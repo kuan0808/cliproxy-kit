@@ -71,8 +71,8 @@ plugins:
 
 Then, in the management panel, open **Plugin Store** and install **Quota Pilot**; it is on once
 installed. Refresh the panel, and its page is in the sidebar under **Plugins**. Updates arrive through
-the store too. If an install fails (a slow connection to GitHub can cut it short), install again, or
-install by hand.
+the store too. The panel waits 30 seconds for an install, so where the 2 MB download from GitHub
+takes longer, the install fails: install by hand then.
 
 <details>
 <summary>Install by hand, or from source</summary>
