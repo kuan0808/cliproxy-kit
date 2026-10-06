@@ -45,12 +45,14 @@ subagents. A new binding takes, in order:
 4. accounts low on their 5-hour window, or used up.
 
 Ties break by account id. A binding moves only after a success elsewhere: when its account stops
-being offered (cooling down, removed, used up), not on a failed retry, a side request or a
-subagent. It also moves when its session has been idle for an hour, so its prompt cache is gone
-anyway, while its account is no longer one a new session would get: the next request goes to the
-best account at no cost. A session the user switched stays. Bindings and routes live in
-`state.json` for 24 hours after their last use, so a resumed session keeps its account and prompt
-cache.
+being offered (cooling down, removed, used up), not on a failed retry, a side request or a subagent.
+An account read as used up often answers a while longer, so its sessions stay until it turns a
+request away; from then on each of them leaves at its next request for a ready account, without
+waiting to be refused itself. It also moves when its session has been idle for an hour, so its
+prompt cache is gone anyway, while its account is no longer one a new session would get: the next
+request goes to the best account at no cost. A session the user switched stays. Bindings and routes
+live in `state.json` for 24 hours after their last use, so a resumed session keeps its account and
+prompt cache.
 
 ### Moving a session to another provider
 

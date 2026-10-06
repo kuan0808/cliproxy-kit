@@ -300,9 +300,10 @@ func (s *State) sessionViewLocked(root string, sess *session) *SessionView {
 	return v
 }
 
-// fillImminentLocked flags a session whose next turn's account cannot serve it, so the proxy
-// will move it, and names the account it will most likely land on. An account that is only
-// running low keeps serving the session it holds.
+// fillImminentLocked flags a session whose account is read as unable to serve it, and names the
+// account it will most likely land on. An account read as used up often answers a while longer:
+// the session stays until it turns a request away, then moves. An account that is only running
+// low keeps serving the session it holds.
 func (s *State) fillImminentLocked(v *SessionView, now time.Time) {
 	c := s.creds[v.AuthID]
 	if c == nil {

@@ -145,6 +145,51 @@ func TestAnIdleSessionMovesOffAnAccountRunningLow(t *testing.T) {
 	}
 }
 
+// An account read as used up often answers a while longer: its sessions stay until it turns a
+// request away, and then every session on it leaves at its next request, not after a refusal of
+// its own. With no ready account to go to, they stay.
+func TestARefusalMovesEverySessionOffAUsedUpAccount(t *testing.T) {
+	s, c := newTestState()
+	setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+	served(s, c, "claude:s1", pick(s, "claude:s1", "m", both).AuthID, true)
+	served(s, c, "claude:s2", pick(s, "claude:s2", "m", both).AuthID, true)
+
+	setQuota(s, c, "claude-a", 0.9, 0, 24*time.Hour)
+	if got := pick(s, "claude:s1", "m", both); got.AuthID != "claude-a" {
+		t.Fatalf("a used-up reading moved a session the account still serves: %+v", got)
+	}
+
+	refuse := func(id string) {
+		h := http.Header{}
+		h.Set("anthropic-ratelimit-unified-7d-utilization", "1.0")
+		h.Set("anthropic-ratelimit-unified-7d-reset", fmt.Sprint(c.t.Add(24*time.Hour).Unix()))
+		s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", AuthID: id, RequestedAt: c.t, Failed: true, ResponseHeader: h})
+	}
+	setQuota(s, c, "claude-b", 0.9, 0, 4*24*time.Hour)
+	refuse("claude-a")
+	if got := pick(s, "claude:s1", "m", both); got.AuthID != "claude-a" {
+		t.Fatalf("with no ready account, a refused session moved: %+v", got)
+	}
+
+	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+	for _, id := range []string{"claude:s1", "claude:s2"} {
+		got := pick(s, id, "m", both)
+		if got.AuthID != "claude-b" || !strings.HasPrefix(got.Reason, "previous account unavailable") {
+			t.Fatalf("%s after a refusal = %+v, want claude-b", id, got)
+		}
+	}
+
+	// A week later the account answers again, and a session bound to it stays.
+	c.t = c.t.Add(25 * time.Hour)
+	setQuota(s, c, "claude-a", 0.9, 1, 7*24*time.Hour)
+	served(s, c, "claude:s3", "claude-a", true)
+	setQuota(s, c, "claude-a", 0.9, 0, 7*24*time.Hour)
+	if got := pick(s, "claude:s3", "m", both); got.AuthID != "claude-a" {
+		t.Fatalf("an old refusal moved a session: %+v", got)
+	}
+}
+
 func TestSessionStaysOnItsAccount(t *testing.T) {
 	s, c := newTestState()
 	setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)

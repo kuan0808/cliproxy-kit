@@ -198,8 +198,12 @@ describe('accounts', () => {
   test('alerts: stale data, imminent switch, exhausted provider', async () => {
     expect(pickAlert(SNAP, sessionAccount(SNAP, 's1'), true, NOW)).toBe(null)
     expect(pickAlert({ ...SNAP, generated_at: iso(-10 * 60_000) }, null, true, NOW)?.text).toMatch(/old/)
-    const imminent = { ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, switch_imminent: true, switch_reason: '5-hour quota nearly used', next_auth_id: 'claude-k' } } }
-    expect(pickAlert(imminent, sessionAccount(imminent, 's1'), true, NOW)?.text).toBe('5-hour quota nearly used on d••• · next account k•••, 7% used')
+    // A used-up account often answers a while longer; a disabled one is not offered at all.
+    const imminent = (switch_reason: string) => ({ ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, switch_imminent: true, switch_reason, next_auth_id: 'claude-k' } } })
+    const usedUp = imminent('weekly quota used up')
+    expect(pickAlert(usedUp, sessionAccount(usedUp, 's1'), true, NOW)?.text).toBe('weekly quota used up on d••• · moves to k••• (7% used) once d••• stops answering')
+    const disabled = imminent('disabled')
+    expect(pickAlert(disabled, sessionAccount(disabled, 's1'), true, NOW)?.text).toBe('disabled on d••• · moves to k••• (7% used) on the next turn')
     const exhausted = { ...SNAP, providers: { claude: { ...SNAP.providers.claude!, health: 'exhausted' } } }
     expect(pickAlert(exhausted, sessionAccount(exhausted, 's1'), true, NOW)?.action).toBe('route')
     const at = iso(-5 * 60_000)

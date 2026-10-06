@@ -77,6 +77,9 @@ type Cred struct {
 	Windows        map[string]Window
 	// Plan is the subscription, e.g. Max 20x or Pro 200; "" until a poll has read it.
 	Plan string
+	// refusedAt is when the account last turned a request away while read as used up; a request
+	// it answers clears it. Kept in memory: after a restart one more refusal says it again.
+	refusedAt time.Time
 }
 
 // CredInfo is the inventory the host reports for a credential.
@@ -552,6 +555,14 @@ func (s *State) Observe(u Usage) {
 		// A refused request (a 429 at 100%) still reads the quota with no tokens run; a stream
 		// that broke off after it began ran the tokens it reports, and they count.
 		ran := u.Input+u.Output+u.CacheRead+u.CacheCreation > 0
+		if c := s.creds[u.AuthID]; supported && c != nil {
+			switch {
+			case !u.Failed || ran:
+				c.refusedAt = time.Time{}
+			case s.classifyLocked(c, u.Model, now).Blocked:
+				c.refusedAt = at
+			}
+		}
 		if u.Failed && !ran && read {
 			r.Poll = true
 			s.log = append(s.log, r)
@@ -689,21 +700,35 @@ func (s *State) Pick(in PickInput) PickResult {
 	key, b := s.boundLocked(pickProviders(in), in.Canonical, root)
 	best := s.rankLocked(in.Candidates, in.Model, now)[0]
 	bound := b != nil && offered[b.AuthID]
-	if bound && !s.moveIdleLocked(b, best, in.Model, now) {
+	refused := bound && s.refusedLocked(b, best, in.Model, now)
+	if bound && !refused && !s.moveIdleLocked(b, best, in.Model, now) {
 		b.LastUsed = now
 		delete(s.displaced, key)
 		return PickResult{Handled: true, AuthID: b.AuthID, Reason: b.Reason}
 	}
 	reason := best.Reason
 	switch {
+	case refused, b != nil && !bound:
+		reason = "previous account unavailable; " + reason
 	case bound:
 		reason = "moved while idle; " + reason
-		s.displaced[key] = true
-	case b != nil:
-		reason = "previous account unavailable; " + reason
+	}
+	if b != nil {
 		s.displaced[key] = true
 	}
 	return PickResult{Handled: true, AuthID: best.ID, Reason: reason}
+}
+
+// refusedLocked tells whether a bound session leaves an account that is read as used up and has
+// since turned a request away. The host offers such an account again until a cooldown of its own
+// starts, and every try costs the request a round trip, so a ready account takes the session at
+// once. It holds for a session the user switched too: the account cannot serve it.
+func (s *State) refusedLocked(b *Binding, best Ranked, model string, now time.Time) bool {
+	c := s.creds[b.AuthID]
+	if c == nil || c.refusedAt.IsZero() || best.Tier != 1 || best.ID == b.AuthID {
+		return false
+	}
+	return s.classifyLocked(c, model, now).Blocked
 }
 
 // moveIdleLocked tells whether a bound session moves now: idle for longer than a prompt cache

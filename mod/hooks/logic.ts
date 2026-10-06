@@ -254,9 +254,13 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
     }
   }
   if (session.switch_imminent) {
+    // An account read as used up often answers a while longer: the session moves once it refuses.
+    const reason = session.switch_reason ?? 'quota low'
+    const label = acct.cred?.label ?? 'this account'
     const next = view.credentials.find(c => c.id === session.next_auth_id)
-    const tail = next ? `next account ${next.label}, ${usedText(windowOf(next, '7d'))}` : 'no other account has quota'
-    return { level: 'warn', text: `${session.switch_reason ?? 'quota low'} on ${acct.cred?.label ?? 'this account'} · ${tail}` }
+    const when = reason.endsWith('used up') ? `once ${label} stops answering` : 'on the next turn'
+    const tail = next ? `moves to ${next.label} (${usedText(windowOf(next, '7d'))}) ${when}` : 'no other account has quota'
+    return { level: 'warn', text: `${reason} on ${label} · ${tail}` }
   }
   // A move shows for 15 minutes, or until dismissed, and says why the session left.
   const sw = session.last_switch
