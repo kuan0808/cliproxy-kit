@@ -45,6 +45,7 @@
     "last_error": "Last plugin error: {{message}}",
     "empty_title": "No accounts to show",
     "empty_live_desc": "quota-pilot reports no credentials for this provider or search.",
+    "empty_none_desc": "No Claude or Codex account is logged in to the proxy yet. Log one in on the OAuth page of the panel, then press Refresh.",
     "reason_resets_soonest": "weekly quota resets soonest",
     "reason_unknown": "quota unknown",
     "reason_cooling": "cooling down on some model",

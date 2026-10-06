@@ -66,7 +66,8 @@ plugins:
     - "https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/registry.json"
 ```
 
-接著在管理面板打開**插件商店**，安裝 **Quota Pilot**，再到**插件管理**頁面啟用它。之後的更新也從這裡來。
+接著在管理面板打開**插件商店**，安裝 **Quota Pilot**，裝好就會啟用。重新整理面板後，它的頁面在側邊欄的
+**插件**底下。之後的更新也從商店來。如果安裝失敗（連到 GitHub 很慢時可能中斷），再裝一次，或改用手動安裝。
 
 <details>
 <summary>手動安裝，或從原始碼安裝</summary>

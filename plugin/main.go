@@ -249,13 +249,13 @@ func registration() map[string]any {
 	return map[string]any{
 		"schema_version": pluginabi.SchemaVersion,
 		"metadata": pluginapi.Metadata{
-			Name:             "quota-pilot",
+			Name:             "Quota Pilot",
 			Version:          version,
 			Author:           "kuan0808",
 			GitHubRepository: "https://github.com/kuan0808/cliproxy-kit",
 			// Descriptions are shown as written in the management panel, which has no translations
-			// for plugin fields, so each is in English, then Chinese; no quotes or angle brackets,
-			// which the panel would show escaped.
+			// for plugin fields, so each is in English, then Chinese; no quotes, apostrophes,
+			// ampersands or angle brackets, which the panel would show escaped.
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "cross_provider", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"off", "auto"},
 					Description: "Moving sessions to another provider. off: only by hand, with switch on the band. auto: when every account of a provider is used up, its sessions go to the model fallback_map names. / 自動切換供應商。off：只在 band 上手動切換。auto：某個供應商的帳號全部用完時，自動把 session 改送到 fallback_map 指定的模型。"},
@@ -264,7 +264,7 @@ func registration() map[string]any {
 				{Name: "min_five_hour_left_percent", Type: pluginapi.ConfigFieldTypeNumber,
 					Description: "A new session is not given an account with less than this percent of its 5-hour quota left, unless that window resets within 30 minutes. Default 25. / 新的 session 不會分到 5 小時額度剩不到這個百分比的帳號，除非它 30 分鐘內就重置。預設 25。"},
 				{Name: "idle_poll_minutes", Type: pluginapi.ConfigFieldTypeInteger,
-					Description: "How often every account's quota is read, in minutes. Default 10. / 多久讀一次各帳號的額度，單位分鐘。預設 10。"},
+					Description: "How often the quota of every account is read, in minutes. Default 10. / 多久讀一次各帳號的額度，單位分鐘。預設 10。"},
 				{Name: "context_lengths", Type: pluginapi.ConfigFieldTypeObject,
 					Description: "Context window per model, to tell whether a conversation fits another model. Empty uses the built-in table. / 各模型的 context 大小，用來判斷對話能不能改送到另一個模型。不填就用內建表。"},
 				{Name: "band_tokens", Type: pluginapi.ConfigFieldTypeArray,

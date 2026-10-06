@@ -69,6 +69,14 @@ describe('QuotaLedger rendering', () => {
     expect(markup).not.toContain('Plugin settings');
   });
 
+  test('with no account at all, says how to add one; with a filter, that nothing matches', () => {
+    const none = { ...snapshot, providers: {} };
+    expect(render({ snapshot: { status: 'live', snapshot: none } })).toContain(
+      'No Claude or Codex account is logged in to the proxy yet.'
+    );
+    expect(render({ search: 'nobody@' })).toContain('quota-pilot reports no credentials for this provider or search.');
+  });
+
   test('waits for the first snapshot', () => {
     const markup = render({ snapshot: { status: 'loading' } });
     expect(markup).toContain('Reading the quota-pilot snapshot');

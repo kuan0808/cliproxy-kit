@@ -18,7 +18,7 @@ var pageFiles embed.FS
 // shows only beside the collapsed sidebar.
 var pageResource = map[string]string{
 	"Path":        "/ui",
-	"Menu":        "quota-pilot",
+	"Menu":        "Quota Pilot",
 	"Description": "用量帳本 · Usage ledger",
 }
 

@@ -133,7 +133,11 @@ export function QuotaLedgerView({
       ) : ledger.groups.length === 0 ? (
         <EmptyState
           title={t('quota_ledger.empty_title')}
-          description={t('quota_ledger.empty_live_desc')}
+          description={t(
+            tab === 'all' && !search.trim()
+              ? 'quota_ledger.empty_none_desc'
+              : 'quota_ledger.empty_live_desc'
+          )}
         />
       ) : (
         <>

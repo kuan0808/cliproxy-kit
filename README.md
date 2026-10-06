@@ -69,8 +69,10 @@ plugins:
     - "https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/registry.json"
 ```
 
-Then, in the management panel, open **Plugin Store**, install **Quota Pilot**, and enable it on the
-**Plugins** page. Updates arrive the same way.
+Then, in the management panel, open **Plugin Store** and install **Quota Pilot**; it is on once
+installed. Refresh the panel, and its page is in the sidebar under **Plugins**. Updates arrive through
+the store too. If an install fails (a slow connection to GitHub can cut it short), install again, or
+install by hand.
 
 <details>
 <summary>Install by hand, or from source</summary>

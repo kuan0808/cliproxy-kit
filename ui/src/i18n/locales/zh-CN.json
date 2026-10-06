@@ -42,6 +42,7 @@
     "last_error": "插件最近错误：{{message}}",
     "empty_title": "没有可显示的账号",
     "empty_live_desc": "quota-pilot 在当前提供商或搜索条件下没有报告任何凭证。",
+    "empty_none_desc": "代理还没有登录任何 Claude 或 Codex 账号。在面板的 OAuth 登录页登录后，点击「刷新」。",
     "reason_resets_soonest": "每周额度最先重置",
     "reason_unknown": "额度未知",
     "reason_cooling": "部分模型冷却中",
