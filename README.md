@@ -193,7 +193,7 @@ controls:
 | View | Shows |
 | --- | --- |
 | Ledger | Every account in the order new sessions get them, with each window and the reason. |
-| Usage | Each account's week, or 7 or 30 days, by project and session; tokens, cache hit rate, days. |
+| Usage | Each account's week, or 7 or 30 days, by project and session, with a tag on sessions a program or another device ran; tokens, cache hit rate, days. |
 
 ![The projects and sessions behind an account's week](docs/images/projects.png)
 

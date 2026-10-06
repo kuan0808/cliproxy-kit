@@ -3,10 +3,19 @@
  * its own detail. One switch trades the quota column for token columns.
  */
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { IconChevronDown } from '@/components/ui/icons';
+import { IconChevronDown, IconLaptop, IconZap } from '@/components/ui/icons';
 import type {
   QuotaPilotTokens,
   QuotaPilotUsage,
@@ -31,16 +40,21 @@ import {
   formatTokens,
   coveredFrom,
   modelName,
-  originLabel,
   projectColours,
   projectLabel,
-  projectSummary,
+  projectSources,
   providerColour,
   providerTitle,
   rangeKey,
   ranLine,
   scopeAccounts,
   sessionLabel,
+  sessionSource,
+  sourceTag,
+  sourceWhy,
+  splitAutomated,
+  type ProjectSources,
+  type SessionSource,
 } from '../usageFormat';
 import { BarCard, PickableBars } from './QuotaUsageBars';
 import { Composition } from './QuotaUsageSummary';
@@ -48,6 +62,9 @@ import styles from './QuotaUsage.module.scss';
 
 /** Sessions listed under an open project before "show N more". */
 const SESSION_PREVIEW = 8;
+
+/** The open state of a project's automated row, kept beside the projects': no folder name holds a NUL. */
+const autoKey = (key: string) => `\u0000${key}`;
 
 type Columns = 'quota' | 'tokens';
 
@@ -78,6 +95,11 @@ export function UsageTable({
   const [detail, setDetail] = useState<string | null>(null);
 
   const query = search.trim().toLowerCase();
+  const [openFor, setOpenFor] = useState(query);
+  if (openFor !== query) {
+    setOpenFor(query);
+    setOpen({});
+  }
   const projects = useMemo(() => {
     if (!query) return usage.projects;
     return usage.projects
@@ -94,8 +116,20 @@ export function UsageTable({
       .filter((project) => project.sessions.length > 0);
   }, [usage.projects, query, t]);
 
+  const all = usage.mode === 'all';
+  const codexView =
+    usage.mode !== 'all' && scopeAccounts(usage).every((a) => a.provider === 'codex');
+  // A Claude Code session that used Codex did so through the proxy, whichever scope lists it.
+  const sourceOf = useCallback(
+    (session: QuotaPilotUsageSession) =>
+      session.id === ''
+        ? null
+        : sessionSource(session.origin, codexView || (all && session.providers.includes('codex'))),
+    [codexView, all]
+  );
+
   // A session asked for from the chart above opens here: its project, its row even past the
-  // first few, and its detail. Each ask is handled once, so the list refreshing does not open it
+  // first few (in its project's automated row too), and its detail. Each ask is handled once, so the list refreshing does not open it
   // again; the row is brought into view once it is drawn.
   const focus = useUsageFocus();
   const handled = useRef(0);
@@ -106,12 +140,15 @@ export function UsageTable({
     const project = projects.find((p) => p.sessions.some((x) => x.id === focus.id));
     if (!project) return;
     const key = project.name || '-';
-    setOpen((o) => ({ ...o, [key]: true }));
-    if (project.sessions.findIndex((x) => x.id === focus.id) >= SESSION_PREVIEW)
-      setMore((m) => ({ ...m, [key]: true }));
+    const { listed, automated } = splitAutomated(project.sessions, sourceOf);
+    const inGroup = automated.some((x) => x.id === focus.id);
+    const at = (inGroup ? automated : listed).findIndex((x) => x.id === focus.id);
+    const listKey = inGroup ? autoKey(key) : key;
+    setOpen((o) => ({ ...o, [key]: true, ...(inGroup ? { [listKey]: true } : {}) }));
+    if (at >= SESSION_PREVIEW) setMore((m) => ({ ...m, [listKey]: true }));
     setDetail(focus.id);
     reveal.current = focus.id;
-  }, [focus, projects]);
+  }, [focus, projects, sourceOf]);
   useEffect(() => {
     if (reveal.current === null) return;
     const row = document.querySelector(`[data-session="${CSS.escape(reveal.current)}"]`);
@@ -128,20 +165,14 @@ export function UsageTable({
     () => new Map(usage.providers.flatMap((p) => p.accounts.map((a) => [a.id, a.label] as const))),
     [usage.providers]
   );
-  const all = usage.mode === 'all';
   const showAccounts = usage.mode === 'provider';
   const providers = usage.providers.map((p) => p.provider);
-  const codexView =
-    usage.mode !== 'all' && scopeAccounts(usage).every((a) => a.provider === 'codex');
   const covered = coveredFrom(scopeAccounts(usage).filter((a) => a.beforeLog > 0));
   const noCacheWrite = !all && scopeAccounts(usage).every((a) => a.provider === 'codex');
   const peak = Math.max(...usage.projects.map((p) => p.used), 0);
   const layout =
     columns === 'tokens' ? 'tokens' : all ? 'quotaAll' : showAccounts ? 'quotaAccounts' : 'quota';
   const when = (ms: number | null) => (ms ? formatRelativeInstant(ms, now, locale) : '—');
-  // A Claude Code session that used Codex did so through the proxy, whichever scope lists it.
-  const ranOnCodex = (session: QuotaPilotUsageSession) =>
-    codexView || (all && session.providers.includes('codex'));
   const unread = (
     <span className={styles.value} title={t('quota_usage.no_reading')}>
       —
@@ -364,73 +395,112 @@ export function UsageTable({
           {projects.map((project, index) => {
             const key = project.name || '-';
             const isOpen = open[key] ?? ((index === 0 && !query) || Boolean(query));
-            const shown = more[key] ? project.sessions : project.sessions.slice(0, SESSION_PREVIEW);
             const colour = colourOf(project.name);
-            // One source for every session is said once, on the project; mixed sources per session.
-            // The requests without a session are no session and run no way of their own.
-            const labelOf = (x: QuotaPilotUsageSession) => originLabel(t, x.origin, ranOnCodex(x));
-            const origins = new Set(project.sessions.filter((x) => x.id !== '').map(labelOf));
-            const shared = origins.size <= 1 ? ([...origins][0] ?? '') : null;
-            return (
-              <div key={key} role="rowgroup" className={styles.projectGroup}>
+            const summary = projectSources(project.sessions, sourceOf);
+            // A source every session shares is said once, on the project; otherwise on each row.
+            const tagOf = (x: QuotaPilotUsageSession) => (summary.shared ? null : sourceOf(x));
+            const { listed, automated } = splitAutomated(project.sessions, sourceOf);
+            const groupKey = autoKey(key);
+            const groupOpen = open[groupKey] ?? Boolean(query);
+            const sessionRow = (session: QuotaPilotUsageSession, inner: boolean, tag: boolean) => (
+              <SessionRows
+                key={session.id || 'none'}
+                session={session}
+                tag={tag ? tagOf(session) : null}
+                source={sourceOf(session)}
+                inner={inner}
+                project={project}
+                layout={layout}
+                scope={usage.scope}
+                range={usage.range}
+                open={detail === session.id}
+                onToggle={() => setDetail(detail === session.id ? null : session.id)}
+              >
+                {cells(session, colour, session.accounts, session.providers)}
+              </SessionRows>
+            );
+            const page = (list: QuotaPilotUsageSession[], listKey: string) =>
+              more[listKey] ? list : list.slice(0, SESSION_PREVIEW);
+            const moreButton = (list: QuotaPilotUsageSession[], listKey: string, inner: boolean) =>
+              list.length > SESSION_PREVIEW &&
+              !more[listKey] && (
                 <button
                   type="button"
-                  role="row"
-                  className={`${styles.row} ${styles.projectRow}`}
-                  data-layout={layout}
-                  aria-expanded={isOpen}
-                  onClick={() => setOpen({ ...open, [key]: !isOpen })}
-                  title={project.path || undefined}
+                  className={`${styles.more} ${inner ? styles.moreInner : ''}`}
+                  onClick={() => setMore({ ...more, [listKey]: true })}
                 >
+                  {t('quota_usage.show_more', { count: list.length - SESSION_PREVIEW })}
+                </button>
+              );
+            return (
+              <div key={key} role="rowgroup" className={styles.projectGroup}>
+                <div role="row" className={`${styles.row} ${styles.projectRow}`} data-layout={layout}>
                   <span role="cell" className={styles.name}>
-                    <IconChevronDown
-                      size={14}
-                      className={styles.chevron}
-                      data-open={isOpen ? 'true' : undefined}
-                      aria-hidden="true"
-                    />
-                    <span
-                      className={styles.dot}
-                      style={{ background: colour }}
-                      aria-hidden="true"
-                    />
-                    <span className={styles.projectName}>{projectLabel(t, project.name)}</span>
-                    <span className={`${styles.muted} ${styles.optional}`}>
-                      {projectSummary(t, project.sessions, labelOf)}
-                    </span>
+                    <button
+                      type="button"
+                      className={styles.rowButton}
+                      aria-expanded={isOpen}
+                      onClick={() => setOpen({ ...open, [key]: !isOpen })}
+                      title={project.path || undefined}
+                    >
+                      <IconChevronDown
+                        size={14}
+                        className={styles.chevron}
+                        data-open={isOpen ? 'true' : undefined}
+                        aria-hidden="true"
+                      />
+                      <span
+                        className={styles.dot}
+                        style={{ background: colour }}
+                        aria-hidden="true"
+                      />
+                      <span className={styles.projectText}>
+                        <span className={styles.projectName}>{projectLabel(t, project.name)}</span>
+                        <ProjectSummary summary={summary} />
+                      </span>
+                    </button>
                   </span>
                   {cells(project, colour, undefined, [
                     ...new Set(project.sessions.flatMap((x) => x.providers)),
                   ])}
-                </button>
-                {isOpen &&
-                  shown.map((session) => (
-                    <SessionRows
-                      key={session.id || 'none'}
-                      session={session}
-                      origin={
-                        shared === null ? originLabel(t, session.origin, ranOnCodex(session)) : ''
-                      }
-                      project={project}
-                      layout={layout}
-                      scope={usage.scope}
-                      range={usage.range}
-                      open={detail === session.id}
-                      onToggle={() => setDetail(detail === session.id ? null : session.id)}
+                </div>
+                {isOpen && page(listed, key).map((session) => sessionRow(session, false, true))}
+                {isOpen && moreButton(listed, key, false)}
+                {isOpen && automated.length > 0 && (
+                  <>
+                    <div
+                      role="row"
+                      className={`${styles.row} ${styles.sessionRow}`}
+                      data-layout={layout}
                     >
-                      {cells(session, colour, session.accounts, session.providers)}
-                    </SessionRows>
-                  ))}
-                {isOpen && project.sessions.length > SESSION_PREVIEW && !more[key] && (
-                  <button
-                    type="button"
-                    className={styles.more}
-                    onClick={() => setMore({ ...more, [key]: true })}
-                  >
-                    {t('quota_usage.show_more', {
-                      count: project.sessions.length - SESSION_PREVIEW,
-                    })}
-                  </button>
+                      <span role="cell" className={styles.sessionName}>
+                        <button
+                          type="button"
+                          className={styles.rowButton}
+                          aria-expanded={groupOpen}
+                          onClick={() => setOpen({ ...open, [groupKey]: !groupOpen })}
+                        >
+                          <IconChevronDown
+                            size={14}
+                            className={styles.chevron}
+                            data-open={groupOpen ? 'true' : undefined}
+                            aria-hidden="true"
+                          />
+                          <SourceTag source={sourceOf(automated[0])!} />
+                          <span>{t('quota_usage.sessions', { count: automated.length })}</span>
+                        </button>
+                      </span>
+                      {cells(
+                        sumRows(automated),
+                        colour,
+                        [...new Set(automated.flatMap((x) => x.accounts))],
+                        [...new Set(automated.flatMap((x) => x.providers))]
+                      )}
+                    </div>
+                    {groupOpen &&
+                      page(automated, groupKey).map((session) => sessionRow(session, true, false))}
+                    {groupOpen && moreButton(automated, groupKey, true)}
+                  </>
                 )}
               </div>
             );
@@ -466,9 +536,83 @@ export function UsageTable({
 const rate = (r: number | null) => (r === null ? '—' : formatRate(r));
 const tokensOrDash = (n: number | null) => (n === null ? '—' : formatTokens(n));
 
+/**
+ * The tag of a session's source: a program, another device, or another app by name. What exactly
+ * ran a session is said once, in its detail.
+ */
+function SourceTag({ source }: { source: SessionSource }) {
+  const { t } = useTranslation();
+  const Icon = source.kind === 'auto' ? IconZap : source.kind === 'device' ? IconLaptop : null;
+  return (
+    <span className={styles.sourceTag}>
+      {Icon && <Icon size={12} aria-hidden="true" />}
+      {sourceTag(t, source)}
+    </span>
+  );
+}
+
+/** "75 sessions · [Automated] 74", "[Other device] 3 sessions", "Requests not in any session". */
+function ProjectSummary({ summary }: { summary: ProjectSources }) {
+  const { t } = useTranslation();
+  const sessions = t('quota_usage.sessions', { count: summary.sessions });
+  const parts: ReactNode[] = summary.shared
+    ? [
+        <>
+          <SourceTag source={summary.sources[0].source} />
+          {sessions}
+        </>,
+      ]
+    : summary.sessions > 0
+      ? [
+          sessions,
+          ...summary.sources.map(({ source, count }) => (
+            <>
+              <SourceTag source={source} />
+              {t('quota_usage.source_count', { count })}
+            </>
+          )),
+        ]
+      : [];
+  if (summary.none)
+    parts.push(t(summary.sessions > 0 ? 'quota_usage.session_none_also' : 'quota_usage.session_none'));
+  return (
+    <span className={styles.projectSummary}>
+      {parts.map((part, i) => (
+        <Fragment key={i}>
+          {i > 0 && ' · '}
+          <span className={styles.summaryPart}>{part}</span>
+        </Fragment>
+      ))}
+    </span>
+  );
+}
+
+/** Rows added together: an automated row's figures are those of the sessions under it. */
+function sumRows(rows: Row[]): Row {
+  const usedBy: Record<string, number> = {};
+  for (const row of rows)
+    for (const [provider, x] of Object.entries(row.usedBy)) usedBy[provider] = (usedBy[provider] ?? 0) + x;
+  const last = rows.map((r) => r.lastMs).filter((ms): ms is number => ms !== null);
+  return {
+    used: rows.reduce((sum, r) => sum + r.used, 0),
+    metered: rows.some((r) => r.metered),
+    usedBy,
+    requests: rows.reduce((sum, r) => sum + r.requests, 0),
+    lastMs: last.length ? Math.max(...last) : null,
+    tokens: {
+      input: rows.reduce((sum, r) => sum + r.tokens.input, 0),
+      output: rows.reduce((sum, r) => sum + r.tokens.output, 0),
+      cacheRead: rows.reduce((sum, r) => sum + r.tokens.cacheRead, 0),
+      cacheWrite: rows.reduce((sum, r) => sum + r.tokens.cacheWrite, 0),
+    },
+  };
+}
+
 function SessionRows({
   session,
-  origin,
+  tag,
+  source,
+  inner,
   project,
   layout,
   scope,
@@ -478,7 +622,12 @@ function SessionRows({
   children,
 }: {
   session: QuotaPilotUsageSession;
-  origin: string;
+  /** Shown beside the title: the session's source where its project's sessions differ. */
+  tag: SessionSource | null;
+  /** Said in full in the session's detail. */
+  source: SessionSource | null;
+  /** Listed under its project's automated row. */
+  inner: boolean;
   project: QuotaPilotUsageProject;
   layout: string;
   scope: string;
@@ -491,31 +640,38 @@ function SessionRows({
   const name = sessionLabel(t, session.id, session.title);
   return (
     <>
-      <button
-        type="button"
+      <div
         role="row"
         className={`${styles.row} ${styles.sessionRow}`}
         data-layout={layout}
-        aria-expanded={open}
-        onClick={onToggle}
-        title={session.id || undefined}
+        data-open={open ? 'true' : undefined}
         data-session={session.id}
       >
-        <span role="cell" className={styles.sessionName}>
-          <span>{name}</span>
-          {origin && <em className={styles.origin}>{origin}</em>}
+        <span role="cell" className={`${styles.sessionName} ${inner ? styles.inner : ''}`}>
+          <button
+            type="button"
+            className={styles.rowButton}
+            aria-expanded={open}
+            onClick={onToggle}
+            title={name}
+          >
+            <span className={styles.sessionTitle}>{name}</span>
+            {tag && <SourceTag source={tag} />}
+          </button>
         </span>
         {children}
-      </button>
+      </div>
       {open && (
-        <SessionDetail
-          id={session.id}
-          title={name}
-          project={project.name}
-          origin={origin}
-          scope={scope}
-          range={range}
-        />
+        <div className={inner ? styles.innerDetail : undefined}>
+          <SessionDetail
+            id={session.id}
+            title={name}
+            project={project.name}
+            source={source}
+            scope={scope}
+            range={range}
+          />
+        </div>
       )}
     </>
   );
@@ -529,14 +685,14 @@ function SessionDetail({
   id,
   title,
   project,
-  origin,
+  source,
   scope,
   range,
 }: {
   id: string;
   title: string;
   project: string;
-  origin: string;
+  source: SessionSource | null;
   scope: string;
   range: QuotaPilotUsageRange;
 }) {
@@ -559,7 +715,7 @@ function SessionDetail({
       detail={state.detail}
       title={title}
       project={project}
-      origin={origin}
+      source={source}
       range={range}
       locale={locale}
     />
@@ -570,14 +726,15 @@ export function SessionDetailView({
   detail: d,
   title,
   project,
-  origin,
+  source,
   range,
   locale,
 }: {
   detail: QuotaPilotUsageSessionDetail;
   title: string;
   project: string;
-  origin: string;
+  /** Where the session came from, said in plain words; null for Claude Code run here. */
+  source: SessionSource | null;
   range: QuotaPilotUsageRange;
   locale?: string;
 }) {
@@ -627,7 +784,6 @@ export function SessionDetailView({
       .join(t('quota_usage.list_separator'));
   const meta = [
     projectLabel(t, project || d.project),
-    origin,
     d.firstMs && d.lastMs
       ? `${formatDayTime(d.firstMs, locale)} → ${formatDayTime(d.lastMs, locale)}`
       : '',
@@ -654,6 +810,12 @@ export function SessionDetailView({
       <div className={styles.detailHead}>
         <strong>{d.title || title}</strong>
         <span>{meta.join(' · ')}</span>
+        {source && (
+          <span className={styles.detailSource}>
+            <SourceTag source={source} />
+            {sourceWhy(t, source)}
+          </span>
+        )}
       </div>
       <div className={styles.detailGrid}>
         <Composition composition={d.composition} note={t(rangeKey(range))} />
@@ -684,7 +846,7 @@ export function SessionDetailView({
                 <div className={styles.timelineAxis} aria-hidden="true">
                   <span>{label(d.buckets[0].atMs)}</span>
                   {d.buckets.length > 2 && <span>{label(mid.atMs)}</span>}
-                  <span>{label(d.buckets[d.buckets.length - 1].atMs)}</span>
+                  {d.buckets.length > 1 && <span>{label(d.buckets[d.buckets.length - 1].atMs)}</span>}
                 </div>
               )
             }

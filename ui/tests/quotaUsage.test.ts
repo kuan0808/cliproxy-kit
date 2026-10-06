@@ -13,8 +13,9 @@ import {
   formatTime,
   formatTokens,
   modelName,
-  originLabel,
-  projectSummary,
+  projectSources,
+  sessionSource,
+  splitAutomated,
 } from '@/features/quota/usageFormat';
 import {
   normalizeQuotaPilotUsage,
@@ -320,7 +321,8 @@ describe('usage view', () => {
     expect(markup).toContain('Account not on the proxy');
     expect(markup).toContain('Untitled session bbbbbbbb');
     expect(markup).toContain('Home folder (~)');
-    expect(markup).toContain('Other device or unknown');
+    expect(markup).toContain('Unsorted');
+    expect(markup).toContain('Requests not in any session');
     expect(markup).toContain('Cache hit rate');
     expect(markup).toContain('How these numbers are made');
   });
@@ -464,10 +466,11 @@ describe('usage view', () => {
       scope: 'codex-k.json',
       state: { status: 'ready', usage: codex, latest: codex },
     });
-    expect(markup).toContain('From Claude Code');
-    expect(markup).toContain('Codex CLI');
-    expect(markup).toContain('Claude Code via proxy');
-    // A project whose sessions share one source says it once.
+    // Codex started by Claude Code is a program's run; the others name their app.
+    expect(markup).toContain('Automated</span>');
+    expect(markup).toContain('Codex CLI</span>');
+    expect(markup).toContain('Claude Code via proxy</span>');
+    // A project whose sessions share one source says it once, on the project.
     const one = report({
       mode: 'account',
       scope: 'codex-k.json',
@@ -482,11 +485,11 @@ describe('usage view', () => {
       scope: 'codex-k.json',
       state: { status: 'ready', usage: one, latest: one },
     });
-    expect(single).toContain('1 session · From Claude Code');
-    expect(single.split('From Claude Code').length - 1).toBe(1);
+    expect(single).toContain('Automated</span>1 session');
+    expect(single.split('Automated</span>').length - 1).toBe(1);
     // In a Claude view a Claude Code session needs no tag.
     expect(render()).not.toContain('Claude Code via proxy');
-    // How a Claude Code session was run shows when it was not the interactive CLI.
+    // A program's run says so; which program waits for the session's detail.
     const sdk = report({
       projects: [
         {
@@ -499,8 +502,35 @@ describe('usage view', () => {
       ],
     });
     const runs = render({ state: { status: 'ready', usage: sdk, latest: sdk } });
-    expect(runs).toContain('Agent SDK (Python)');
-    expect(runs).toContain('claude -p');
+    expect(runs).toContain('Automated</span>2 sessions');
+    expect(runs).not.toContain('Agent SDK');
+    expect(runs).not.toContain('claude -p');
+  });
+
+  test("programs' runs gather under one row beside the sessions a person ran", () => {
+    const reviews = Array.from({ length: 3 }, (_, i) => ({
+      ...projects[0].sessions[1],
+      id: `review-${i}`,
+      title: `Security review ${i}`,
+      origin: 'sdk-py',
+    }));
+    const gathered = report({
+      projects: [{ ...projects[0], sessions: [projects[0].sessions[0], ...reviews] }],
+    });
+    const state = { status: 'ready' as const, usage: gathered, latest: gathered };
+    const closed = render({ state });
+    expect(closed).toContain('4 sessions</span> · ');
+    expect(closed).toContain('Automated</span>3');
+    // One row for the three, closed, with their figures added up; the person's session is listed.
+    expect(closed).toContain('Band redesign');
+    expect(closed).toContain('aria-expanded="false"');
+    expect(closed).toContain('3 sessions</span>');
+    expect(closed).not.toContain('Security review 0');
+    // A search that finds one of them opens the row.
+    expect(render({ state, search: 'security review 2' })).toContain('Security review 2');
+    // Rows open with a real button, not a row that pretends to be one.
+    expect(closed).not.toContain('<button type="button" role="row"');
+    expect(closed).toContain('role="row"');
   });
 
   test('an account without a reading shows no figure', () => {
@@ -752,7 +782,7 @@ describe('usage view', () => {
     for (const row of ['Projects', 'Sessions', 'Use']) expect(card).toContain(`<dt>${row}</dt>`);
     // Each of the day's largest sessions opens in the table; one no reading settled has no figure.
     expect(card).toContain('title="Band redesign">Band redesign</button> 10%');
-    expect(card).toContain('>Requests without a session</button></dd>');
+    expect(card).toContain('>Requests not in any session</button></dd>');
     expect(card).toContain('12 requests · output 3.0k · cache read 90k');
   });
 
@@ -905,25 +935,45 @@ describe('usage view', () => {
   });
 });
 
-describe('project summary', () => {
-  const t = i18n.t.bind(i18n);
-  const label = (x: { origin: string }) => originLabel(t, x.origin, false);
+describe('session sources', () => {
   const run = (id: string, origin = '') => ({ id, origin });
+  const sourceOf = (x: { origin: string }) => sessionSource(x.origin, false);
 
-  test('counts sessions apart by how they ran, and requests without one as no session', () => {
-    // A tool ran 38 reviews beside one session: not "39 sessions".
+  test('a project says where its sessions came from, once when they all share it', () => {
+    // A tool ran 38 reviews beside one session: 39 sessions, 38 of them automated.
     const tool = Array.from({ length: 38 }, (_, i) => run(`r${i}`, 'sdk-py'));
-    expect(projectSummary(t, [run('a'), ...tool], label)).toBe('1 session · Agent SDK (Python) ×38');
-    // One way for all is said once.
-    expect(projectSummary(t, [run('p', 'sdk-py'), run('q', 'sdk-py')], label)).toBe(
-      '2 sessions · Agent SDK (Python)'
-    );
-    expect(projectSummary(t, [run('a'), run('b')], label)).toBe('2 sessions');
+    expect(projectSources([run('a'), ...tool], sourceOf)).toMatchObject({
+      sessions: 39,
+      shared: false,
+      sources: [{ source: { kind: 'auto' }, count: 38 }],
+    });
+    // Every program's run reads the same tag.
+    expect(projectSources([run('p', 'sdk-py'), run('q', 'sdk-cli')], sourceOf)).toMatchObject({
+      sessions: 2,
+      shared: true,
+      sources: [{ count: 2 }],
+    });
+    expect(projectSources([run('a'), run('b')], sourceOf)).toMatchObject({ sessions: 2, sources: [] });
     // Requests that came without a session are named so, never counted as one.
-    expect(projectSummary(t, [run('')], label)).toBe('Requests without a session');
-    expect(projectSummary(t, [run('a'), run('')], label)).toBe('1 session · Requests without a session');
-    // Sessions the band on another device named say where they ran.
-    expect(projectSummary(t, [run('r', 'remote')], label)).toBe('1 session · Another device');
+    expect(projectSources([run('')], sourceOf)).toMatchObject({ sessions: 0, none: true });
+    expect(projectSources([run('r', 'remote')], sourceOf)).toMatchObject({
+      shared: true,
+      sources: [{ source: { kind: 'device' } }],
+    });
+    // In a Codex view Claude Code run by a person came through the proxy; a program's run stays
+    // automated and an app keeps its name. An unknown origin shows as given.
+    expect(sessionSource('', true)).toEqual({ kind: 'app', key: 'origin_proxy' });
+    expect(sessionSource('sdk-py', true)).toMatchObject({ kind: 'auto' });
+    expect(sessionSource('claude-desktop', true)).toMatchObject({ kind: 'app', key: 'origin_claude_desktop' });
+    expect(sessionSource('something-new', false)).toEqual({ kind: 'app', key: '', raw: 'something-new' });
+  });
+
+  test("programs' runs gather only beside sessions a person ran, and only two or more", () => {
+    const tool = Array.from({ length: 3 }, (_, i) => run(`r${i}`, 'sdk-py'));
+    expect(splitAutomated([run('a'), ...tool], sourceOf)).toEqual({ listed: [run('a')], automated: tool });
+    expect(splitAutomated(tool, sourceOf).automated).toEqual([]);
+    expect(splitAutomated([run('a'), tool[0]], sourceOf).automated).toEqual([]);
+    expect(splitAutomated([run(''), ...tool], sourceOf).automated).toEqual([]);
   });
 });
 
@@ -968,12 +1018,13 @@ describe('session detail', () => {
         detail,
         title: 'Band redesign',
         project: 'cliproxy-kit',
-        origin: 'From Claude Code',
+        source: { kind: 'auto', key: 'why_claude_code' },
         range: 'week',
         locale: 'en',
       })
     );
-    expect(markup).toContain('From Claude Code');
+    // The detail says in plain words where the session came from.
+    expect(markup).toContain('Automated</span>Codex started by Claude Code, such as by its Codex plugin.');
     expect(markup).toContain('120 requests');
     expect(markup).toContain('d••• 60%');
     expect(markup).toContain('k••• (Codex) 40%');

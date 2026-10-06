@@ -173,62 +173,110 @@ export function sessionLabel(t: TFunction, id: string, title: string) {
   return title || t('quota_usage.session_untitled', { id: id.slice(0, 8) });
 }
 
-const ORIGIN_KEYS: Record<string, string> = {
-  // What started a Codex session.
-  'Claude Code': 'origin_claude_code',
-  'codex-tui': 'origin_codex_cli',
-  codex_exec: 'origin_codex_exec',
-  'Codex Desktop': 'origin_codex_app',
-  'codex-chrome-extension-sidepanel': 'origin_codex_chrome',
-  // How a Claude Code session was run, when not as the interactive CLI.
-  'sdk-ts': 'origin_sdk_ts',
-  'sdk-py': 'origin_sdk_py',
-  'sdk-cli': 'origin_print',
-  'claude-desktop': 'origin_claude_desktop',
-  // A session on another device, named by the band there.
-  remote: 'origin_remote',
+/**
+ * Where a session came from, when not from Claude Code run on this machine: a program, another
+ * device, or another app. `key` names an app (its tag) or explains a program or a device (its
+ * detail); `raw` keeps an origin this page does not know, shown as given.
+ */
+export interface SessionSource {
+  kind: 'auto' | 'device' | 'app';
+  key: string;
+  raw?: string;
+}
+
+const SOURCES: Record<string, SessionSource> = {
+  // Run by a program: one tag for all, and the session's detail says which.
+  'sdk-ts': { kind: 'auto', key: 'why_sdk_ts' },
+  'sdk-py': { kind: 'auto', key: 'why_sdk_py' },
+  'sdk-cli': { kind: 'auto', key: 'why_print' },
+  codex_exec: { kind: 'auto', key: 'why_codex_exec' },
+  'Claude Code': { kind: 'auto', key: 'why_claude_code' },
+  // On another device, named by the band there.
+  remote: { kind: 'device', key: 'why_remote' },
+  // Opened by a person in another app.
+  'claude-desktop': { kind: 'app', key: 'origin_claude_desktop' },
+  'codex-tui': { kind: 'app', key: 'origin_codex_cli' },
+  'Codex Desktop': { kind: 'app', key: 'origin_codex_app' },
+  'codex-chrome-extension-sidepanel': { kind: 'app', key: 'origin_codex_chrome' },
 };
 
-const CLAUDE_RUNS = new Set(['', 'sdk-ts', 'sdk-py', 'sdk-cli', 'claude-desktop']);
-
 /**
- * Where a session's requests came from, when it is worth saying: what started a Codex session,
- * how a Claude Code session was run (nothing for the interactive CLI), and in a Codex view, that
- * a Claude Code session reached Codex through the proxy.
+ * A session's source; null for Claude Code run on this machine, which carries no tag. In a Codex
+ * view, Claude Code run by a person reached Codex through the proxy, and says so; a program's run
+ * and another app keep their own tag.
  */
-export function originLabel(t: TFunction, origin: string, onCodex: boolean): string {
-  if (onCodex && CLAUDE_RUNS.has(origin)) return t('quota_usage.origin_proxy');
-  if (!origin) return '';
-  return ORIGIN_KEYS[origin] ? t(`quota_usage.${ORIGIN_KEYS[origin]}`) : origin;
+export function sessionSource(origin: string, onCodex: boolean): SessionSource | null {
+  if (!origin) return onCodex ? { kind: 'app', key: 'origin_proxy' } : null;
+  return SOURCES[origin] ?? { kind: 'app', key: '', raw: origin };
+}
+
+/** A source's tag: "Automated", "Other device", or the app's name. */
+export function sourceTag(t: TFunction, source: SessionSource): string {
+  if (source.kind === 'auto') return t('quota_usage.source_auto');
+  if (source.kind === 'device') return t('quota_usage.source_device');
+  return source.raw ?? t(`quota_usage.${source.key}`);
+}
+
+/** What a session's detail adds to its tag in plain words; nothing where the tag says it all. */
+export function sourceWhy(t: TFunction, source: SessionSource): string {
+  return source.kind === 'app' ? '' : t(`quota_usage.${source.key}`);
+}
+
+// Sessions that read the same tag count as one source: every program run is "Automated".
+const tagOf = (source: SessionSource | null) =>
+  source === null ? '' : source.kind === 'app' ? `app:${source.raw ?? source.key}` : source.kind;
+
+export interface ProjectSources {
+  /** Sessions, not counting the requests that came without one. */
+  sessions: number;
+  /** Each tag the sessions carry, with how many, most first; none for Claude Code run here. */
+  sources: { source: SessionSource; count: number }[];
+  /** Every session carries the one tag listed: it is said for the project, not on each row. */
+  shared: boolean;
+  /** Some requests came without a session. */
+  none: boolean;
 }
 
 /**
- * A project's sessions in a few words: how many, apart by how they were run, and the requests that
- * came without a session, which are no session. "1 session · Agent SDK (Python) ×38", not "39
- * sessions", when a tool ran 38 of them; one way for all is said once: "5 sessions · claude -p".
+ * Where a project's sessions came from, for its summary: "75 sessions · [Automated] 74", and
+ * "[Other device] 3 sessions" when all share one source.
  */
-export function projectSummary<S extends { id: string }>(
-  t: TFunction,
+export function projectSources<S extends { id: string }>(
   sessions: S[],
-  labelOf: (session: S) => string
-): string {
-  const counts = new Map<string, number>();
+  sourceOf: (session: S) => SessionSource | null
+): ProjectSources {
+  const counts = new Map<string, { source: SessionSource | null; count: number }>();
   for (const session of sessions) {
     if (session.id === '') continue;
-    const label = labelOf(session);
-    counts.set(label, (counts.get(label) ?? 0) + 1);
+    const source = sourceOf(session);
+    const entry = counts.get(tagOf(source));
+    if (entry) entry.count += 1;
+    else counts.set(tagOf(source), { source, count: 1 });
   }
-  const plain = counts.get('') ?? 0;
-  const ran = [...counts].filter(([label]) => label !== '').sort((a, b) => b[1] - a[1]);
-  const parts =
-    plain === 0 && ran.length === 1
-      ? [t('quota_usage.sessions', { count: ran[0][1] }), ran[0][0]]
-      : [
-          ...(plain > 0 ? [t('quota_usage.sessions', { count: plain })] : []),
-          ...ran.map(([origin, count]) => t('quota_usage.origin_count', { origin, count })),
-        ];
-  if (sessions.some((session) => session.id === '')) parts.push(t('quota_usage.session_none'));
-  return parts.join(' · ');
+  const sources = [...counts.values()]
+    .filter((c): c is { source: SessionSource; count: number } => c.source !== null)
+    .sort((a, b) => b.count - a.count);
+  return {
+    sessions: [...counts.values()].reduce((sum, c) => sum + c.count, 0),
+    sources,
+    shared: counts.size === 1 && sources.length === 1,
+    none: sessions.some((session) => session.id === ''),
+  };
+}
+
+/**
+ * A project's sessions as its rows list them. Two or more run by programs beside sessions a person
+ * ran gather under one row, so those are not lost among them.
+ */
+export function splitAutomated<S extends { id: string }>(
+  sessions: S[],
+  sourceOf: (session: S) => SessionSource | null
+): { listed: S[]; automated: S[] } {
+  const automated = sessions.filter((s) => s.id !== '' && sourceOf(s)?.kind === 'auto');
+  const listed = sessions.filter((s) => !automated.includes(s));
+  return automated.length >= 2 && listed.some((s) => s.id !== '')
+    ? { listed, automated }
+    : { listed: sessions, automated: [] };
 }
 
 /** The earliest time the log began to see any of these accounts. */
