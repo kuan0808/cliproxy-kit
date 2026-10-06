@@ -253,6 +253,7 @@ func registration() map[string]any {
 			Version:          version,
 			Author:           "kuan0808",
 			GitHubRepository: "https://github.com/kuan0808/cliproxy-kit",
+			Logo:             logo,
 			// Descriptions are shown as written in the management panel, which has no translations
 			// for plugin fields, so each is in English, then Chinese; no quotes, apostrophes,
 			// ampersands or angle brackets, which the panel would show escaped.

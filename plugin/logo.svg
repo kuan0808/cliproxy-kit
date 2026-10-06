@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Quota Pilot">
+  <title>Quota Pilot</title>
+  <rect width="64" height="64" rx="14" fill="#282828"/>
+  <circle cx="32" cy="32" r="19" fill="none" stroke="#3c3836" stroke-width="7"/>
+  <path d="M32 13A19 19 0 1 1 14.15 38.5" fill="none" stroke="#fabd2f" stroke-width="7" stroke-linecap="round"/>
+  <path d="M39.32 25.48L31.81 43.43L29.58 35.22L21.37 32.99Z" fill="#ebdbb2" stroke="#ebdbb2" stroke-width="1.2" stroke-linejoin="round"/>
+</svg>

@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"encoding/base64"
 	"net/http"
 )
 
@@ -11,6 +12,13 @@ import (
 //
 //go:embed all:page
 var pageFiles embed.FS
+
+//go:embed logo.svg
+var logoSVG []byte
+
+// logo is the plugin's icon on the Plugins page, carried inline so it shows offline. The store
+// card takes the same file from registry.json.
+var logo = "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString(logoSVG)
 
 // The panel lists a resource with a menu label in its sidebar and shows it in a frame. It shows
 // plugin fields as written, in whatever language it is in, so the label is the plugin's name, the
