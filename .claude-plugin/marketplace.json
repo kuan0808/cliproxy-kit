@@ -1,0 +1,19 @@
+{
+  "name": "cliproxy-kit",
+  "owner": {
+    "name": "kuan0808",
+    "url": "https://github.com/kuan0808"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for CLIProxyAPI users"
+  },
+  "plugins": [
+    {
+      "name": "quota-band",
+      "source": "./mod",
+      "description": "Account, quota, context and cache tiles above the Claude Code prompt, fed by the quota-pilot CLIProxyAPI plugin",
+      "category": "productivity",
+      "tags": ["quota", "proxy", "status", "mod"]
+    }
+  ]
+}

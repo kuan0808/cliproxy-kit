@@ -1,0 +1,100 @@
+@use './styles/mixins' as *;
+
+/* The page's frame: the panel's page padding (set from the panel's width by host.ts), so the
+ * header sits where it sits on the panel's own pages, clear of the panel's floating controls. */
+.page {
+  min-height: 100%;
+  padding: var(--page-pad-top, 70px) var(--page-pad-x, 32px) var(--page-pad-bottom, 40px);
+}
+
+/* The panel's fade under its floating controls (.top-gradient-blur), which it leaves out over a
+ * plugin's frame: drawn here the same, so what scrolls up under the controls fades as on the
+ * panel's own pages. */
+.topFade {
+  position: fixed;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 998;
+  height: 141px;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--bg-secondary) 88%, #0d0c0a) 0%,
+    color-mix(in srgb, var(--bg-secondary) 54%, transparent) 36%,
+    color-mix(in srgb, var(--bg-secondary) 22%, transparent) 66%,
+    transparent 100%
+  );
+  --glass-blur: 22px;
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
+  mask-image: linear-gradient(
+    to bottom,
+    #000 0%,
+    rgb(0 0 0 / 0.9) 24%,
+    rgb(0 0 0 / 0.58) 48%,
+    rgb(0 0 0 / 0.22) 72%,
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 0%,
+    rgb(0 0 0 / 0.9) 24%,
+    rgb(0 0 0 / 0.58) 48%,
+    rgb(0 0 0 / 0.22) 72%,
+    transparent 100%
+  );
+}
+
+@include mobile {
+  .topFade {
+    height: 114px;
+  }
+}
+
+.prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(100%, 420px);
+  margin: 48px auto 0;
+  padding: 24px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+
+  :global(.btn) {
+    align-self: flex-start;
+  }
+
+  :global(.btn:disabled) {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+}
+
+.promptTitle {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.promptText {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.promptField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.promptError {
+  font-size: 13px;
+  color: var(--danger-color);
+}

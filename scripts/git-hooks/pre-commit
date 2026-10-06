@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Refuse a commit that carries this machine's private details, so the repository stays safe to push.
+
+Nothing private is written here: the details are read at run time from where they already live
+(the proxy's credentials and config, Codex's and Claude Code's own account files, the keychain,
+Tailscale) and matched against what is being committed, including the author's email.
+
+  pre-commit           check the staged lines (git runs this as the hook)
+  pre-commit --all     check every tracked file and the whole history, before a first push
+
+Enabled per clone with `git config core.hooksPath scripts/git-hooks`; reading the proxy's
+configuration needs PyYAML. A false alarm can be passed with `git commit --no-verify`.
+"""
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit('pre-commit: reading the proxy configuration needs PyYAML: python3 -m pip install pyyaml')
+
+HOME = os.path.expanduser('~')
+
+# Shapes of secrets that are never right in a commit, whoever they belong to.
+SHAPES = [
+    r'BEGIN( [A-Z]+)? PRIVATE KEY',
+    r'\bsk-[A-Za-z0-9_-]{20,}',
+    r'gh[pousr]_[A-Za-z0-9]{30,}',
+    r'AKIA[0-9A-Z]{16}',
+    r'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.',
+]
+
+
+def run(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+
+def load(path):
+    try:
+        with open(os.path.expanduser(path)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def read(path):
+    try:
+        with open(os.path.expanduser(path), errors='replace') as f:
+            return f.read()
+    except OSError:
+        return ''
+
+
+def private_details():
+    """Every string that would identify this machine, its accounts or its keys."""
+    found = {HOME}
+    # The proxy's credentials, and every account its usage log has ever named.
+    names = [os.path.basename(p)[:-5] for p in glob.glob(HOME + '/.cli-proxy-api/*.json')]
+    for path in glob.glob(HOME + '/.cache/cliproxy-kit/usage/*.json*'):
+        names += re.findall(r'"(?:acct|Account)":"([^"]+)"', read(path))
+    for name in set(names):
+        found.add(name.removesuffix('.json'))
+        found.update(re.findall(r'(?<![0-9a-f])[0-9a-f]{8}(?![0-9a-f])', name))
+        found.update(re.findall(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', name))
+    keys = ('email', 'emailAddress', 'fullName', 'displayName', 'account_id', 'account_uuid', 'accountUuid',
+            'organization_uuid', 'organizationUuid', 'organization_name', 'organizationName',
+            'access_token', 'refresh_token', 'id_token', 'claude_device_ids')
+    for record in [load(p) for p in glob.glob(HOME + '/.cli-proxy-api/*.json')] + [
+        load('~/.codex/auth.json').get('tokens') or {},
+        load('~/.claude.json').get('oauthAccount') or {},
+    ]:
+        for key in keys:
+            value = record.get(key)
+            found.update(value if isinstance(value, list) else [value] if isinstance(value, str) else [])
+    # The proxy's configuration, wherever it is kept: its client keys, band tokens, upstream keys and
+    # management key.
+    for path in [os.environ.get('CLIPROXY_CONFIG', ''), '/opt/homebrew/etc/cliproxyapi.conf',
+                 '/usr/local/etc/cliproxyapi.conf', '~/.cli-proxy-api/config.yaml', 'config.yaml']:
+        found.update(config_secrets(read(path)) if path else [])
+    found.add(run('security', 'find-generic-password', '-s', 'cliproxyapi-management', '-w'))
+    dns = (load_json(run('tailscale', 'status', '--json')).get('Self') or {}).get('DNSName', '')
+    found.update(part for part in dns.split('.')[:2])
+    # Emails, and their names alone, which turn up in labels and file names.
+    for value in list(found):
+        for email in re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', value):
+            found.update((email, email.split('@')[0]))
+    # Short or ordinary words would only raise false alarms.
+    return {v for v in found if isinstance(v, str) and len(v) >= 6 and not v.isdigit()}
+
+
+# Names whose values are secrets: api-keys, api-key, secret-key, band_tokens and the like.
+SECRET_NAME = re.compile(r'(?:key|token|secret)s?$', re.IGNORECASE)
+
+
+def config_secrets(text):
+    """Every value a proxy configuration keeps under a secret's name, read as YAML the way the
+    proxy reads it: as written, nothing converted to a number or a boolean."""
+    try:
+        doc = yaml.load(text, Loader=yaml.BaseLoader) if text else None
+    except yaml.YAMLError as e:
+        sys.exit(f'pre-commit: cannot read the proxy configuration: {e}')
+
+    def walk(node, secret):
+        if isinstance(node, dict):
+            for name, value in node.items():
+                yield from walk(value, bool(SECRET_NAME.search(name)))
+        elif isinstance(node, list):
+            for value in node:
+                yield from walk(value, secret)
+        elif secret and isinstance(node, str):
+            yield node
+
+    return list(walk(doc, False))
+
+
+def load_json(text):
+    try:
+        return json.loads(text) if text else {}
+    except ValueError:
+        return {}
+
+
+def main():
+    details = private_details()
+    pattern = re.compile(
+        '|'.join([re.escape(d) for d in sorted(details, key=len, reverse=True)] + SHAPES),
+        re.IGNORECASE,
+    )
+    if '--all' in sys.argv:
+        texts = [('tracked files', run('git', 'grep', '-I', '-n', '-e', '', '--', '.'))]
+        log = subprocess.run(
+            ['git', 'log', '--all', '-p', '--format=commit %H%nauthor %an <%ae>%ncommitter %cn <%ce>%n%B'],
+            capture_output=True, text=True, errors='replace',
+        ).stdout
+        texts.append(('history', log))
+    else:
+        staged = subprocess.run(
+            ['git', 'diff', '--cached', '-U0', '--no-color'], capture_output=True, text=True, errors='replace'
+        ).stdout
+        added = '\n'.join(l for l in staged.splitlines() if l.startswith(('+', 'diff --git')))
+        texts = [('staged lines', added), ('author', run('git', 'var', 'GIT_AUTHOR_IDENT'))]
+    bad = 0
+    for where, text in texts:
+        for line in text.splitlines():
+            hit = pattern.search(line)
+            if hit:
+                bad += 1
+                if bad <= 20:
+                    shown = pattern.sub(lambda m: '[' + m.group(0)[:3] + '…]', line)
+                    print(f'{where}: {shown[:160]}', file=sys.stderr)
+    if bad:
+        print(f'\n{bad} line(s) carry private details of this machine; nothing was committed.', file=sys.stderr)
+        sys.exit(1)
+    if '--all' in sys.argv:
+        print(f'clean: checked against {len(details)} private details and {len(SHAPES)} secret shapes')
+
+
+if __name__ == '__main__':
+    main()

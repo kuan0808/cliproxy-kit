@@ -1,0 +1,41 @@
+/**
+ * Global styles: the panel's reset, theme tokens and the few shared components the page uses.
+ */
+
+@use './variables.scss' as *;
+@use './reset.scss';
+@use './themes.scss';
+@use './components.scss';
+
+// The page scrolls in its root element, as the panel's pages scroll in theirs, with room kept for
+// the scrollbar: the scrollbar looks the same and the right edge lines up with the panel's pages.
+#root {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+body {
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  transition:
+    background-color $transition-normal,
+    color $transition-normal;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: $radius-full;
+
+  &:hover {
+    background: var(--border-hover);
+  }
+}

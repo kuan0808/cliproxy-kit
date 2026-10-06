@@ -1,0 +1,118 @@
+name: release
+
+# A tag v<version> publishes the release the CLIProxyAPI plugin store installs from: one
+# quota-pilot_<version>_<goos>_<goarch>.zip per platform, with the library at its root, and
+# checksums.txt. Run by hand, it builds the same files as version 0.0.0 without publishing them.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v0.0.0' }}
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  page:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: ui/package.json
+      - run: bun install --frozen-lockfile && bun run verify
+        working-directory: ui
+      - uses: actions/upload-artifact@v7
+        with:
+          name: page
+          path: plugin/page/index.html
+
+  linux:
+    needs: page
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-latest, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    # Debian 12, as the CLIProxyAPI Docker image, so the library links against the same glibc.
+    container: golang:1.26-bookworm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: page
+          path: plugin/page
+      - run: scripts/build-plugin.sh "${TAG#v}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/linux-${{ matrix.arch }}/
+
+  darwin:
+    needs: page
+    strategy:
+      matrix:
+        arch: [arm64, amd64]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: plugin/go.mod
+          cache-dependency-path: plugin/go.sum
+      - uses: actions/download-artifact@v8
+        with:
+          name: page
+          path: plugin/page
+      - run: scripts/build-plugin.sh "${TAG#v}" "$ARCH"
+        env:
+          ARCH: ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: darwin-${{ matrix.arch }}
+          path: dist/darwin-${{ matrix.arch }}/
+
+  release:
+    needs: [checks, linux, darwin]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: "*-*"
+      - name: Package
+        run: |
+          version=${TAG#v}
+          # The band and the plugin are released together, under one version.
+          band=$(jq -r .version mod/.claude-plugin/plugin.json)
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$band" != "$version" ]; then
+            echo "The tag is $version but mod/.claude-plugin/plugin.json says $band." >&2
+            exit 1
+          fi
+          mkdir dist
+          for dir in artifacts/*-*; do
+            platform=${dir#artifacts/}
+            zip -j -q "dist/quota-pilot_${version}_${platform%-*}_${platform#*-}.zip" "$dir"/quota-pilot.*
+          done
+          cd dist
+          sha256sum -- *.zip > checksums.txt
+          cat checksums.txt
+      - uses: actions/upload-artifact@v7
+        if: github.ref_type != 'tag'
+        with:
+          name: release
+          path: dist/
+      - name: Publish
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes dist/*

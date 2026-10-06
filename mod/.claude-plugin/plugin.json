@@ -1,0 +1,14 @@
+{
+  "name": "quota-band",
+  "version": "0.1.0",
+  "description": "Account, quota, context and cache tiles above the Claude Code prompt, for sessions that run through CLIProxyAPI with the quota-pilot plugin",
+  "author": {
+    "name": "kuan0808",
+    "url": "https://github.com/kuan0808"
+  },
+  "homepage": "https://github.com/kuan0808/cliproxy-kit",
+  "repository": "https://github.com/kuan0808/cliproxy-kit",
+  "license": "MIT",
+  "keywords": ["cliproxyapi", "quota", "status", "claude-code", "mod"],
+  "types": "./types/index.d.ts"
+}

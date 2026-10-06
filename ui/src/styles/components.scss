@@ -1,0 +1,165 @@
+@use 'sass:color';
+@use './variables.scss' as *;
+
+/* The management panel's buttons, inputs and empty state (src/styles/components.scss there). */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: $spacing-sm;
+  border: 1px solid transparent;
+  border-radius: $radius-md;
+  padding: 10px 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all $transition-fast;
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+
+  &.btn-primary {
+    background-color: var(--primary-color);
+    color: var(--primary-contrast, #fff);
+    border-color: var(--primary-color);
+
+    &:hover {
+      background-color: var(--primary-hover);
+      border-color: var(--primary-hover);
+    }
+  }
+
+  &.btn-secondary {
+    background-color: var(--bg-tertiary);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+
+    &:hover {
+      background-color: var(--bg-hover, var(--bg-tertiary));
+      border-color: var(--border-hover);
+    }
+  }
+
+  &.btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-secondary);
+
+    &:hover {
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+  }
+
+  &.btn-danger {
+    background-color: $error-color;
+    border-color: $error-color;
+    color: #fff;
+
+    &:hover {
+      background-color: color.adjust($error-color, $lightness: -5%);
+    }
+  }
+
+  &.btn-full {
+    width: 100%;
+  }
+
+  &.btn-sm {
+    padding: 8px 10px;
+    font-size: 14px;
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+
+[data-theme='dark'] {
+  .btn {
+    color: #fff;
+  }
+
+  .btn.btn-secondary,
+  .btn.btn-ghost {
+    color: #fff;
+  }
+}
+
+.input {
+  width: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  padding: 10px 12px;
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  transition:
+    border-color $transition-fast,
+    box-shadow $transition-fast;
+
+  &:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba($primary-color, 0.18);
+  }
+}
+
+.empty-state {
+  border: 1px dashed var(--border-color);
+  border-radius: $radius-lg;
+  padding: $spacing-lg;
+  background: var(--bg-secondary);
+  display: flex;
+  justify-content: space-between;
+  gap: $spacing-md;
+  align-items: center;
+
+  .empty-content {
+    display: flex;
+    align-items: center;
+    gap: $spacing-md;
+  }
+
+  .empty-icon {
+    width: 42px;
+    height: 42px;
+    flex: 0 0 42px;
+    border-radius: $radius-full;
+    border: 2px solid var(--border-color);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+    color: var(--text-secondary);
+
+    svg {
+      display: block;
+      width: 20px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+  }
+
+  .empty-title {
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .empty-desc {
+    color: var(--text-secondary);
+    margin-top: 4px;
+  }
+
+  .empty-action .btn > span {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    line-height: 1;
+  }
+
+  .empty-action .btn svg {
+    display: block;
+    flex-shrink: 0;
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "quota-pilot",
+      "name": "Quota Pilot",
+      "description": "Keeps each Claude Code session on one account and gives new sessions the account whose weekly quota resets soonest; reads every account's quota, logs where it went by project and session, and adds a ledger and usage page to the management panel. Feeds the quota band in Claude Code.",
+      "author": "kuan0808",
+      "repository": "https://github.com/kuan0808/cliproxy-kit",
+      "homepage": "https://github.com/kuan0808/cliproxy-kit",
+      "license": "MIT",
+      "tags": ["Scheduler", "Quota", "Usage", "Management", "Claude", "Codex", "Claude Code"]
+    }
+  ]
+}

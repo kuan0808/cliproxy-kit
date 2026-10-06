@@ -1,0 +1,12 @@
+/**
+ * SCSS mixins
+ */
+
+// The panel's mobile layout, which the panel picks by its own window width (768 px and below).
+// The page sits in a frame narrower than that window, so it follows the panel's choice, set on
+// the root element by host.ts, rather than its own width. Use at the top level of a module.
+@mixin mobile {
+  :global(:root[data-mobile]) {
+    @content;
+  }
+}

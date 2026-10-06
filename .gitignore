@@ -1,0 +1,14 @@
+# Upstream sources checked out for reference
+refs/
+# Build output: the plugin's page (made by `bun run build` in ui/) and plugin libraries
+plugin/page/*
+!plugin/page/.gitkeep
+dist/
+*.dylib
+*.so
+*.dll
+*.h
+# Dependencies and editor files
+node_modules/
+.DS_Store
+__pycache__/

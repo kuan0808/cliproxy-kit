@@ -1,0 +1,450 @@
+/* ============================================================
+ * Quota Ledger: an overview card with one column per provider,
+ * then one section per provider with a row per credential.
+ * Rows share one column template, so each window kind lines up.
+ * Narrow containers stack the overview columns and fold rows.
+ * ============================================================ */
+
+$gutter: 24px;
+$track: color-mix(in srgb, var(--text-primary) 9%, transparent);
+
+.ledger {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+  container: ledger / inline-size;
+}
+
+.topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+
+  label {
+    font-size: 13px;
+  }
+}
+
+.source {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.age::before {
+  content: '·';
+  margin: 0 6px;
+}
+
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.muted {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* ---------- shared bar ---------- */
+
+.track,
+.segment {
+  height: 4px;
+  border-radius: $radius-full;
+  background: $track;
+  overflow: hidden;
+}
+
+.fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  transition: width 360ms var(--ease-out-strong, ease);
+
+  &[data-level='high'] {
+    background: var(--viz-success);
+  }
+
+  &[data-level='medium'] {
+    background: var(--quota-medium-color);
+  }
+
+  &[data-level='low'] {
+    background: var(--viz-failure);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fill {
+    transition: none;
+  }
+}
+
+/* ---------- overview ---------- */
+
+.overview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+// Each column draws the line to its left and above; the card clips the ones on its outer edge,
+// so dividers stay right however the columns wrap.
+.summary {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 20px $gutter;
+  box-shadow:
+    -1px 0 0 var(--border-color),
+    0 -1px 0 var(--border-color);
+}
+
+.summaryHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.providerIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+
+  img {
+    width: 16px;
+    height: 16px;
+    object-fit: contain;
+  }
+}
+
+.providerName {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.caption {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.big {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 4px 0 12px;
+}
+
+.bigValue {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.bigOf {
+  margin-left: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.segments {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.segment {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.reset {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.summaryFoot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-color);
+}
+
+.footPool {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--border-hover);
+  border-radius: $radius-full;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+
+  &[data-tone='exhausted'] {
+    border-color: var(--failure-badge-border);
+    background: var(--failure-badge-bg);
+    color: var(--failure-badge-text);
+  }
+}
+
+/* ---------- provider sections ---------- */
+
+.group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.groupTitle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.groupCount {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: grid;
+  grid-template-columns:
+    minmax(300px, 1.6fr)
+    repeat(var(--ledger-kinds, 1), minmax(140px, 1fr))
+    // Fixed, because every row is its own grid: the columns must match row to row.
+    150px;
+  column-gap: $gutter;
+  align-items: center;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.account {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.identity {
+  overflow: hidden;
+  font-family: $font-mono;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+/* Routing status, right-aligned like the reference's row action. */
+.routing {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.next {
+  font-weight: 650;
+  color: var(--primary-color);
+}
+
+.blocked {
+  font-weight: 600;
+  color: var(--danger-color);
+}
+
+/* Window columns sit in the row grid directly, so every row lines up. */
+.meters {
+  display: contents;
+}
+
+.meter {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+
+  &[data-stale='true'] .meterValue,
+  &[data-missing='true'] .meterValue {
+    color: var(--text-secondary);
+  }
+}
+
+.meterHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.meterLabel {
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meterValue {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.meterReset {
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.meterEmpty {
+  min-width: 0;
+}
+
+/* ---------- footer ---------- */
+
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 18px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.footItem {
+  white-space: nowrap;
+}
+
+.lastError {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--danger-color);
+  overflow-wrap: anywhere;
+}
+
+.pluginLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+/* ---------- narrow: overview columns stack, rows fold ---------- */
+
+@container ledger (max-width: 720px) {
+  .row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 14px;
+  }
+
+  .account,
+  .routing {
+    grid-column: 1 / -1;
+  }
+
+  .routing {
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: flex-start;
+    gap: 12px;
+  }
+
+  .meterEmpty {
+    display: none;
+  }
+}
