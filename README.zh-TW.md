@@ -1,13 +1,21 @@
-# cliproxy-kit
+<p align="center">
+  <img src="plugin/logo.svg" width="96" alt="">
+</p>
 
-[English](README.md) | 繁體中文
+<h1 align="center">cliproxy-kit</h1>
 
-[![ci](https://github.com/kuan0808/cliproxy-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/kuan0808/cliproxy-kit/actions/workflows/ci.yml)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![status: preview](https://img.shields.io/badge/status-preview-orange.svg)
+<p align="center"><a href="README.md">English</a> | 繁體中文</p>
 
-替 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 依額度分配帳號，並在管理面板加上用量頁、在
-Claude Code 加上額度列（band）。
+<p align="center">
+  <a href="https://github.com/kuan0808/cliproxy-kit/actions/workflows/ci.yml"><img src="https://github.com/kuan0808/cliproxy-kit/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"></a>
+  <img src="https://img.shields.io/badge/status-preview-orange.svg" alt="status: preview">
+</p>
+
+<p align="center">
+  替 <a href="https://github.com/router-for-me/CLIProxyAPI">CLIProxyAPI</a> 依額度分配帳號，<br>
+  並在管理面板加上用量頁、在 Claude Code 加上額度列（band）。
+</p>
 
 ![Claude Code 輸入框上方的額度列](docs/images/band.png)
 

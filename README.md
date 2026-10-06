@@ -1,13 +1,21 @@
-# cliproxy-kit
+<p align="center">
+  <img src="plugin/logo.svg" width="96" alt="">
+</p>
 
-English | [繁體中文](README.zh-TW.md)
+<h1 align="center">cliproxy-kit</h1>
 
-[![ci](https://github.com/kuan0808/cliproxy-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/kuan0808/cliproxy-kit/actions/workflows/ci.yml)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![status: preview](https://img.shields.io/badge/status-preview-orange.svg)
+<p align="center">English | <a href="README.zh-TW.md">繁體中文</a></p>
 
-Quota-aware account routing for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), with a
-usage page in its management panel and a quota band in Claude Code.
+<p align="center">
+  <a href="https://github.com/kuan0808/cliproxy-kit/actions/workflows/ci.yml"><img src="https://github.com/kuan0808/cliproxy-kit/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"></a>
+  <img src="https://img.shields.io/badge/status-preview-orange.svg" alt="status: preview">
+</p>
+
+<p align="center">
+  Quota-aware account routing for <a href="https://github.com/router-for-me/CLIProxyAPI">CLIProxyAPI</a>,<br>
+  with a usage page in its management panel and a quota band in Claude Code.
+</p>
 
 ![The quota band above the Claude Code prompt](docs/images/band.png)
 
