@@ -205,13 +205,17 @@ quota-pilot works on its own; the band adds what only Claude Code can show or do
 | --- | :---: | :---: |
 | An account for each session, kept with its prompt cache | ✅ | ✅ |
 | The usage page: accounts, projects, sessions | ✅ | ✅ |
-| Session titles | first request¹ | current, from any device |
+| A session's name on the usage page | its first message¹ | Claude Code's title, renames included, from any device |
 | One project per repository across devices | by folder | ✅ |
 | Account, quota, context and cache above the prompt | | ✅ |
 | Switch an account or a provider by hand | | ✅ |
 | `compact` and `handoff` before the cache expires | | ✅ |
 
-¹ The current title, renames included, when the proxy runs beside Claude Code as the same user.
+¹ Claude Code's title too when the proxy runs beside Claude Code, as the same user.
+
+The band reads the quota with the key Claude Code already sends, once the proxy has served a request
+with that key in the last week. So right after installing, and after a week away, it shows the quota
+from the first reply on.
 
 ## Use
 
