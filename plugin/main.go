@@ -68,7 +68,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -200,7 +199,8 @@ func handleMethod(method string, request []byte) (out []byte, err error) {
 				{"Method": http.MethodPost, "Path": "/quota-pilot/refresh"},
 			},
 			"resources": []map[string]string{
-				{"Path": "/band", "Description": "Snapshot for quota-band on another device; needs a band token"},
+				{"Path": "/band", "Description": "Snapshot for quota-band, and its commands; needs a client key the proxy accepted"},
+				{"Path": "/codex", "Description": "Quota notices for Codex hooks; needs a client key the proxy accepted"},
 				pageResource,
 			},
 		})
@@ -217,7 +217,6 @@ type pluginConfig struct {
 	MinFiveHourLeftPercent float64           `yaml:"min_five_hour_left_percent"`
 	IdlePollMinutes        int               `yaml:"idle_poll_minutes"`
 	ContextLengths         map[string]int    `yaml:"context_lengths"`
-	BandTokens             []string          `yaml:"band_tokens"`
 }
 
 func configure(raw []byte) error {
@@ -241,7 +240,6 @@ func configure(raw []byte) error {
 		MinFiveHourLeftPercent: cfg.MinFiveHourLeftPercent,
 		IdlePollMinutes:        cfg.IdlePollMinutes,
 		ContextLengths:         cfg.ContextLengths,
-		BandTokens:             cfg.BandTokens,
 	})
 	return nil
 }
@@ -260,7 +258,7 @@ func registration() map[string]any {
 			// ampersands or angle brackets, which the panel would show escaped.
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "cross_provider", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"off", "auto"},
-					Description: "Moving sessions to another provider. off: only by hand, with switch on the band. auto: when every account of a provider is used up, its Claude Code sessions go to the model fallback_map names. / 自動切換供應商。off：只在 band 上手動切換。auto：某個供應商的帳號全部用完時，自動把 Claude Code 的 session 改送到 fallback_map 指定的模型。"},
+					Description: "Moving sessions to another provider. off: only by hand, with switch on the band. auto: when every account of a provider is used up, its Claude Code sessions go to the model fallback_map names. / 自動切換供應商。off：只在額度列上用 switch 手動切換。auto：某個供應商的帳號全部用完時，自動把 Claude Code 的 session 改送到 fallback_map 指定的模型。"},
 				{Name: "fallback_map", Type: pluginapi.ConfigFieldTypeObject,
 					Description: "The model each provider moves to, as provider: provider:model, for example claude: codex:gpt-6.1-sol. Used by switch and by auto. / 各供應商改用的模型，寫成 供應商: 供應商:模型，例如 claude: codex:gpt-6.1-sol。手動和自動切換都用這個設定。"},
 				{Name: "min_five_hour_left_percent", Type: pluginapi.ConfigFieldTypeNumber,
@@ -269,8 +267,6 @@ func registration() map[string]any {
 					Description: "How often the quota of every account is read, in minutes. Default 10. / 多久讀一次各帳號的額度，單位分鐘。預設 10。"},
 				{Name: "context_lengths", Type: pluginapi.ConfigFieldTypeObject,
 					Description: "Context window per model, to tell whether a conversation fits another model. Empty uses the built-in table. / 各模型的 context 大小，用來判斷對話能不能改送到另一個模型。不填就用內建表。"},
-				{Name: "band_tokens", Type: pluginapi.ConfigFieldTypeArray,
-					Description: "Client keys with which Claude Code on other devices may read the quota for its band. / 允許其他裝置上的 Claude Code 讀取額度資料的 client key 清單。"},
 			},
 		},
 		"capabilities": map[string]any{
@@ -327,7 +323,7 @@ func usage(raw []byte) ([]byte, error) {
 		TraceID: r.TraceID, AuthID: r.AuthID, AuthIndex: r.AuthIndex, Failed: r.Failed, StatusCode: r.Failure.StatusCode,
 		RequestedAt: r.RequestedAt, Input: r.Detail.InputTokens, Output: r.Detail.OutputTokens,
 		CacheRead: r.Detail.CacheReadTokens, CacheCreation: r.Detail.CacheCreationTokens,
-		ResponseHeader: r.ResponseHeaders, TierAsked: tierOf(r.ServiceTier), TierServed: servedTier(r),
+		ResponseHeader: r.ResponseHeaders, TierAsked: tierOf(r.ServiceTier), TierServed: servedTier(r), ClientKey: r.APIKey,
 	})
 	return okEnvelope(map[string]any{})
 }
@@ -361,18 +357,62 @@ func askedTier(format string, body []byte) string {
 	return "auto"
 }
 
-// fromAnotherDevice tells whether a request reached the proxy from another device. A reverse proxy
-// in front of it (Tailscale Serve) appends the client's address to X-Forwarded-For, so the last
-// entry is the one a client cannot forge; a client on this machine has one of its own addresses.
-// A container on this machine reaching the port directly is not told apart.
-func fromAnotherDevice(headers http.Header) bool {
+// otherDevice is the address of the other device a request reached the proxy from; "" for this
+// machine, or where it cannot be told. A reverse proxy in front of the proxy (Tailscale Serve)
+// appends the client's address to X-Forwarded-For, so the last entry is the one a client cannot
+// forge; a client on this machine has one of its own addresses. A client reaching the port
+// directly, with no reverse proxy between, is not told apart.
+func otherDevice(headers http.Header) string {
 	forwarded := headers.Values("X-Forwarded-For")
 	if len(forwarded) == 0 {
-		return false
+		return ""
 	}
 	list := strings.Split(forwarded[len(forwarded)-1], ",")
 	ip := net.ParseIP(strings.TrimSpace(list[len(list)-1]))
-	return ip != nil && !ip.IsLoopback() && !ownAddress(ip)
+	if ip == nil || ip.IsLoopback() || ownAddress(ip) {
+		return ""
+	}
+	return ip.String()
+}
+
+// deviceName is the name DNS gives a device's address, its first label ("laptop" for MagicDNS's
+// "laptop.tail1234.ts.net."); "" while it is looked up, or where there is none. An address is
+// looked up apart from the request that brings it, again at most hourly, and only so many are.
+func deviceName(addr string) string {
+	devices.Lock()
+	defer devices.Unlock()
+	d, ok := devices.names[addr]
+	if (!ok && len(devices.names) < 256) || (ok && time.Since(d.at) > time.Hour) {
+		devices.names[addr] = deviceLookup{name: d.name, at: time.Now()}
+		go lookupDevice(lookupAddr, addr, d.name)
+	}
+	return d.name
+}
+
+var devices = struct {
+	sync.Mutex
+	names map[string]deviceLookup
+}{names: map[string]deviceLookup{}}
+
+type deviceLookup struct {
+	name string
+	at   time.Time
+}
+
+var lookupAddr = net.DefaultResolver.LookupAddr
+
+func lookupDevice(lookup func(context.Context, string) ([]string, error), addr, known string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	name := known
+	if names, errLookup := lookup(ctx, addr); errLookup == nil && len(names) > 0 {
+		if label, _, _ := strings.Cut(names[0], "."); label != "" {
+			name = label
+		}
+	}
+	devices.Lock()
+	devices.names[addr] = deviceLookup{name: name, at: time.Now()}
+	devices.Unlock()
 }
 
 // ownAddresses are this machine's addresses, read again at most once a minute: a VPN can change
@@ -411,6 +451,8 @@ func route(raw []byte) ([]byte, error) {
 	}
 	attachments, encoded := attachmentsOf(req.Body)
 	in := core.RouteInput{
+		// Moving to another provider is for Claude Code sessions, which name themselves in this
+		// header: the host names a request's session only after routing.
 		Session:        strings.TrimSpace(req.Headers.Get("X-Claude-Code-Session-Id")),
 		RequestedModel: req.RequestedModel,
 		BodyBytes:      len(req.Body) - encoded,
@@ -501,7 +543,7 @@ func intercept(raw []byte) ([]byte, error) {
 		Thread:         gjson.GetBytes(req.Body, "thread.type").String(),
 		Tools:          len(gjson.GetBytes(req.Body, "tools").Array()),
 		Tier:           askedTier(req.SourceFormat, req.Body),
-		Remote:         fromAnotherDevice(req.Headers),
+		Remote:         otherDevice(req.Headers) != "",
 	})
 	if !d.Terminate {
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
@@ -522,20 +564,25 @@ func intercept(raw []byte) ([]byte, error) {
 	})
 }
 
-// sessionOf returns Claude Code's own session id: its header, else the host's canonical id.
 // interceptAfter runs once the account is chosen, when the host has named the request's session:
-// a session a client runs over the Responses API, as Codex does, is named by what it sends.
+// every session is named by what its requests say (see noteRequestSession), from whatever machine.
 func interceptAfter(raw []byte) ([]byte, error) {
 	var req pluginapi.RequestInterceptRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
 		return nil, errUnmarshal
 	}
-	if req.SourceFormat == "openai-response" {
-		noteRequestSession(sessionOf(req.Headers, req.Metadata), req.Headers, req.Body, time.Now())
+	// What the session itself asked: not a Claude Code subagent's task, nor a side request (a title,
+	// a check), which carries no tools.
+	canonical, _ := req.Metadata["canonical_session_id"].(string)
+	parent, _ := req.Metadata["parent_session_id"].(string)
+	subagent := core.RootSession(canonical, parent) != canonical
+	if req.SourceFormat != "claude" || !subagent && gjson.GetBytes(req.Body, "tools.#").Int() > 0 {
+		noteRequestSession(sessionOf(req.Headers, req.Metadata), req.SourceFormat, req.Headers, req.Body, time.Now())
 	}
 	return okEnvelope(pluginapi.RequestInterceptResponse{})
 }
 
+// sessionOf returns Claude Code's own session id: its header, else the host's canonical id.
 func sessionOf(headers http.Header, metadata map[string]any) string {
 	if id := strings.TrimSpace(headers.Get("X-Claude-Code-Session-Id")); id != "" {
 		return id
@@ -549,8 +596,8 @@ func sessionOf(headers http.Header, metadata map[string]any) string {
 }
 
 // managementResponse serves the full snapshot on the management route (management key checked
-// by the host) and the email-free band snapshot on the resource route, which the host does not
-// authenticate, so this handler checks a band token itself.
+// by the host), and on the resource routes, which the host does not authenticate, the email-free
+// band snapshot and the Codex hooks' notices, each behind a client key the proxy accepted.
 func managementResponse(raw []byte) ([]byte, error) {
 	var req pluginapi.ManagementRequest
 	if len(raw) > 0 {
@@ -570,15 +617,29 @@ func managementResponse(raw []byte) ([]byte, error) {
 	if strings.HasSuffix(req.Path, pageResource["Path"]) {
 		return pageResponse()
 	}
+	if strings.HasSuffix(req.Path, "/codex") {
+		return codexHookResponse(req)
+	}
 	var doc any
 	if strings.HasSuffix(req.Path, "/band") {
 		token, _ := strings.CutPrefix(req.Headers.Get("Authorization"), "Bearer ")
-		if !state.BandTokenAllowed(strings.TrimSpace(token)) {
-			return httpResponse(http.StatusUnauthorized, []byte(`{"error":"band token required"}`))
+		client, known := state.Client(strings.TrimSpace(token))
+		if !known {
+			return httpResponse(http.StatusUnauthorized, []byte(`{"error":"a client key the proxy accepted in the last week is required"}`))
 		}
-		// The band on another device says what its session is, which only that device knows.
-		noteBandSession(req.Headers, time.Now())
-		doc = state.BuildForBand(headerText(req.Headers, "X-Band-Session"))
+		// The band says what its session is, which only its device knows, and sends its switch,
+		// route or back with a read (resources are read-only routes): applied to its own session,
+		// if that runs on the same key, timed as received, acknowledged in the snapshot it reads.
+		session := headerText(req.Headers, "X-Band-Session")
+		if state.MayName(session, client) {
+			noteBandSession(req.Headers, time.Now())
+		}
+		var cmd core.Command
+		if raw := headerText(req.Headers, "X-Band-Command"); raw != "" && json.Unmarshal([]byte(raw), &cmd) == nil && cmd.Session == session {
+			cmd.CreatedAt, cmd.AuthID, cmd.Client = time.Now(), state.FromOpaque(cmd.AuthID), client
+			state.Apply(cmd)
+		}
+		doc = state.BuildForBand(session, headerText(req.Headers, "X-Band-Model"), client)
 	} else {
 		doc = state.Build()
 	}
@@ -610,7 +671,7 @@ func startLoops() {
 	l := &loopSet{cancel: cancel}
 	l.done.Add(3)
 	go func() { defer l.done.Done(); pollLoop(ctx) }()
-	go func() { defer l.done.Done(); fileLoop(ctx) }()
+	go func() { defer l.done.Done(); storeLoop(ctx) }()
 	go func() { defer l.done.Done(); warmReport(ctx) }()
 	loops = l
 }
@@ -627,6 +688,7 @@ func stopLoops() {
 	loops = nil
 	saveState()
 	appendLog(state.TakeLog())
+	saveNamed()
 }
 
 // pollLoop polls every account once at start, then every idle_poll_minutes while the proxy
@@ -1004,47 +1066,35 @@ func httpGet(ctx context.Context, url string, headers map[string][]string) ([]by
 	return resp.Body, resp.StatusCode, nil
 }
 
-// fileLoop applies band commands and writes the snapshot file.
-func fileLoop(ctx context.Context) {
-	dir := kitDir()
-	commands := filepath.Join(dir, "commands")
-	_ = os.MkdirAll(commands, 0o700)
-	var lastWrite, lastPrune time.Time
+// storeLoop writes what the proxy learned: the usage log as it comes, the state on a change (at
+// most once a second), and the log's trim once a day. The band reads everything over the network
+// (see /band), so nothing else is written for it.
+func storeLoop(ctx context.Context) {
+	// What 0.1.6 and earlier wrote for a band beside the proxy, and the history its backfill script
+	// recovered from transcripts, read by nothing now.
+	_ = os.Remove(filepath.Join(kitDir(), "snapshot.json"))
+	_ = os.RemoveAll(filepath.Join(kitDir(), "commands"))
+	_ = os.Remove(filepath.Join(usageDir(), "history.jsonl"))
+	var lastPrune time.Time
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	for {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					state.NoteError(fmt.Sprintf("file loop panic: %v", r))
+					state.NoteError(fmt.Sprintf("store loop panic: %v", r))
 				}
 			}()
-			readCommands(commands)
 			appendLog(state.TakeLog())
 			if time.Since(lastPrune) >= 24*time.Hour {
 				pruneLog(time.Now())
 				lastPrune = time.Now()
 			}
 			state.Sweep()
-			// The snapshot goes out on a change, at most once a second, and at least every 30 s
-			// with traffic or every minute without, so a reader can tell a quiet proxy from a
-			// stopped one and sees windows whose reset has passed. Only a write takes the change
-			// flag, so a change made right after a write goes out with the next one.
-			every := 30 * time.Second
-			if state.Idle() {
-				every = time.Minute
-			}
-			since := time.Since(lastWrite)
-			due := lastWrite.IsZero() || since >= every
-			if since >= time.Second {
-				due = state.TakeDirty() || due
-			}
-			if due {
-				if errWrite := writeSnapshot(filepath.Join(dir, "snapshot.json")); errWrite == nil {
-					lastWrite = time.Now()
-				}
+			if state.TakeDirty() {
 				saveState()
 			}
+			saveNamed()
 		}()
 		select {
 		case <-ctx.Done():
@@ -1052,52 +1102,6 @@ func fileLoop(ctx context.Context) {
 		case <-tick.C:
 		}
 	}
-}
-
-// readCommands applies the band's commands in the order they were written.
-func readCommands(dir string) {
-	entries, errRead := os.ReadDir(dir)
-	if errRead != nil {
-		return
-	}
-	type pending struct {
-		path string
-		cmd  core.Command
-	}
-	var cmds []pending
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		raw, errFile := os.ReadFile(path)
-		if errFile != nil {
-			continue
-		}
-		var cmd core.Command
-		if json.Unmarshal(raw, &cmd) != nil {
-			// The band may still be writing it; give it two seconds before rejecting.
-			if info, errStat := e.Info(); errStat == nil && time.Since(info.ModTime()) > 2*time.Second {
-				state.RejectUnreadable(e.Name())
-				_ = os.Remove(path)
-			}
-			continue
-		}
-		cmds = append(cmds, pending{path: path, cmd: cmd})
-	}
-	sort.SliceStable(cmds, func(i, j int) bool { return cmds[i].cmd.CreatedAt.Before(cmds[j].cmd.CreatedAt) })
-	for _, p := range cmds {
-		state.Apply(p.cmd)
-		_ = os.Remove(p.path)
-	}
-}
-
-func writeSnapshot(path string) error {
-	body, errMarshal := json.MarshalIndent(state.Build(), "", " ")
-	if errMarshal != nil {
-		return errMarshal
-	}
-	return writeAtomic(path, body)
 }
 
 func writeAtomic(path string, body []byte) error {

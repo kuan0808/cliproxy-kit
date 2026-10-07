@@ -206,6 +206,7 @@ const normalizeUsageSession = (value: unknown): QuotaPilotUsageSession | null =>
     accounts: asStrings(value.accounts),
     origin: asString(value.origin),
     remote: value.remote === true,
+    device: asString(value.device),
     usedBy: asProviderParts(value.used_by),
     metered: value.metered === true,
     providers: asStrings(value.providers).map((p) => p.toLowerCase()),
@@ -420,7 +421,6 @@ export function normalizeQuotaPilotUsageSession(
           }
         : null
     ),
-    history: value.history === true,
     origin: asString(value.origin),
     remote: value.remote === true,
     tiers: listOf(value.tiers, (x) =>

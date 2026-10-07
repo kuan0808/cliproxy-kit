@@ -704,6 +704,8 @@ func TestRouteOverrideAndAuto(t *testing.T) {
 	if d := s.Route(in); !d.Handled {
 		t.Fatalf("route dropped mid-session: %+v", d)
 	}
+	// The routed turn is answered, so the session is its key's to command.
+	s.Observe(Usage{Provider: "codex", Model: "gpt-6-sol", SessionID: "claude:s1", AuthID: "codex-a", RequestedAt: c.t})
 	cmd := Command{CommandID: "u1", Session: "s1", BootID: "boot-1", CreatedAt: c.t, Action: "unroute"}
 	if ack := s.Apply(cmd); ack.Status != "applied" {
 		t.Fatalf("unroute ack = %+v", ack)
@@ -768,16 +770,137 @@ func TestRoutedSessionDropsThreadsAndNeverFallsBack(t *testing.T) {
 	}
 }
 
+// The band and a Codex hook read with a client key the proxy accepted for a request in the last week:
+// the key itself is never kept, only its hash, and it lasts across a restart.
+func TestAClientKeyTheProxyAcceptedReadsTheQuota(t *testing.T) {
+	s, c := newTestState()
+	known := func(st *State, key string) bool { _, ok := st.Client(key); return ok }
+	if known(s, "sk-device") {
+		t.Fatal("a key no request used was accepted")
+	}
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", AuthID: "claude-a", RequestedAt: c.t, ClientKey: "sk-device"})
+	if !known(s, "sk-device") || known(s, "sk-other") || known(s, "") {
+		t.Fatal("the accepted key was not told apart")
+	}
+	saved := s.Export()
+	if raw, _ := json.Marshal(saved); strings.Contains(string(raw), "sk-device") {
+		t.Fatalf("the key itself was kept: %s", raw)
+	}
+	r, rc := newTestState()
+	r.Import(saved)
+	if !known(r, "sk-device") {
+		t.Fatal("the key was forgotten across a restart")
+	}
+	rc.add(clientTTL + time.Minute)
+	if known(r, "sk-device") {
+		t.Fatal("a key unused for over a week was still accepted")
+	}
+}
+
+// A proxy without api-keys lets any client in, and so any band; once it asks for keys, only theirs.
+func TestAProxyWithoutKeysLetsEveryBandIn(t *testing.T) {
+	s, c := newTestState()
+	// A model call of the host's own, with neither a key nor a session, says nothing of clients.
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", AuthID: "claude-a", RequestedAt: c.t})
+	if _, ok := s.Client("sk-any"); ok {
+		t.Fatal("a request with no session opened the band")
+	}
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t})
+	if id, ok := s.Client("sk-any"); !ok || id != "" {
+		t.Fatalf("a keyless proxy's band = %q, %v", id, ok)
+	}
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s2", AuthID: "claude-a", RequestedAt: c.t, ClientKey: "sk-device"})
+	if _, ok := s.Client("sk-any"); ok {
+		t.Fatal("a proxy that asks for keys now still let any key in")
+	}
+	// A stream sent before the proxy asked for keys, answered late, does not open it again, though
+	// the plugin was loaded anew meanwhile: the key's own time moves on only hourly.
+	c.add(10 * time.Minute)
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s2", AuthID: "claude-a", RequestedAt: c.t, ClientKey: "sk-device"})
+	r, rc := newTestState()
+	rc.t = c.t
+	r.Import(s.Export())
+	for _, st := range []*State{s, r} {
+		st.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t.Add(-time.Minute)})
+		if _, ok := st.Client("sk-any"); ok {
+			t.Fatal("a late keyless answer let any key in again")
+		}
+	}
+	// The watermark is when that keyed request was sent, not when it was answered: a keyless
+	// request sent after it, once the proxy asks for no keys again, opens it, across a reload too;
+	// and then every key is the keyless client, one it accepted before included.
+	sent := c.t
+	c.add(20 * time.Minute)
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s2", AuthID: "claude-a", RequestedAt: sent, ClientKey: "sk-device"})
+	r, rc = newTestState()
+	rc.t = c.t
+	r.Import(s.Export())
+	r.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s3", AuthID: "claude-a", RequestedAt: sent.Add(10 * time.Minute)})
+	if id, ok := r.Client("sk-device"); !ok || id != "" {
+		t.Fatalf("an accepted key on a proxy open again = %q, %v", id, ok)
+	}
+	if _, ok := s.Client("sk-device"); !ok {
+		t.Fatal("the key it accepted was refused")
+	}
+}
+
+// A band commands only a session that runs on its own key, even knowing another's id.
+func TestABandCommandsOnlyASessionOfItsOwnKey(t *testing.T) {
+	s, c := newTestState()
+	setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+	// Another key's request under its id that fails before its own first answer takes nothing.
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t, ClientKey: "sk-dana", Failed: true})
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t, ClientKey: "sk-alex"})
+	if s.BuildForBand("s1", "", clientID("sk-dana")).Sessions["s1"] != nil || s.BuildForBand("s1", "", clientID("sk-alex")).Sessions["s1"] == nil {
+		t.Fatal("a band saw another key's session, or not its own")
+	}
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s2", AuthID: "claude-a", RequestedAt: c.t, ClientKey: "sk-dana"})
+	other := clientID("sk-dana")
+	cmd := Command{CommandID: "c1", Session: "s1", BootID: "boot-1", CreatedAt: c.t, Action: "switch", AuthID: "claude-b", Client: other}
+	if ack := s.Apply(cmd); ack.Status != "rejected" {
+		t.Fatalf("another key's switch = %+v", ack)
+	}
+	cmd.CommandID, cmd.Client = "c2", clientID("sk-alex")
+	if ack := s.Apply(cmd); ack.Status != "applied" {
+		t.Fatalf("its own key's switch = %+v", ack)
+	}
+	// A request of another key under its id does not take it over.
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t, ClientKey: "sk-dana", Failed: true})
+	cmd.CommandID, cmd.Client = "c3", other
+	if ack := s.Apply(cmd); ack.Status != "rejected" {
+		t.Fatalf("another key's switch after its request = %+v", ack)
+	}
+	// Its owner stays as long as the account it chose: past a day idle, and across a restart.
+	c.add(3 * 24 * time.Hour)
+	s.Sweep()
+	r, rc := newTestState()
+	rc.t = c.t
+	r.Import(s.Export())
+	cmd.CommandID, cmd.Action, cmd.CreatedAt = "c4", "unroute", c.t
+	if ack := r.Apply(cmd); ack.Status != "rejected" {
+		t.Fatalf("another key's command after a pause and a restart = %+v", ack)
+	}
+	cmd.CommandID, cmd.Client = "c5", clientID("sk-alex")
+	if ack := r.Apply(cmd); ack.Status != "applied" {
+		t.Fatalf("its own key's command after a pause = %+v", ack)
+	}
+	// A session the proxy has not seen is no one's to command.
+	cmd.CommandID, cmd.Session = "c6", "s-unseen"
+	if ack := r.Apply(cmd); ack.Status != "rejected" {
+		t.Fatalf("a command for an unseen session = %+v", ack)
+	}
+}
+
 func TestBandSnapshotHasNoEmailsOrPaths(t *testing.T) {
 	s, c := newTestState()
-	s.SetConfig(Config{BandTokens: []string{"tok-1"}})
 	s.UpdateInventory([]CredInfo{{ID: "claude-dana@example.com.json", Provider: "claude", Email: "dana@example.com"}, {ID: "claude-alex@example.com.json", Provider: "claude", Email: "alex@example.com"}})
 	setQuota(s, c, "claude-dana@example.com.json", 0, 0.5, 24*time.Hour)
 	setQuota(s, c, "claude-alex@example.com.json", 0.9, 0.5, 48*time.Hour)
 	served(s, c, "claude:s1", "claude-dana@example.com.json", true)
 	s.NoteError("open /Users/dana/.cli-proxy-api/claude-dana@example.com.json: permission denied")
 	served(s, c, "claude:s2", "claude-alex@example.com.json", true)
-	band := s.BuildForBand("s1")
+	band := s.BuildForBand("s1", "", "")
 	raw, _ := json.Marshal(band)
 	if strings.Contains(string(raw), "@") || strings.Contains(string(raw), "/Users/") {
 		t.Fatalf("band snapshot leaks: %s", raw)
@@ -797,9 +920,6 @@ func TestBandSnapshotHasNoEmailsOrPaths(t *testing.T) {
 	if s.Build().Providers["claude"].Credentials[0].Label != "a•••" {
 		t.Fatalf("label not masked")
 	}
-	if !s.BandTokenAllowed("tok-1") || s.BandTokenAllowed("tok-2") || s.BandTokenAllowed("") {
-		t.Fatalf("band token check wrong")
-	}
 }
 
 func TestBindingsRoutesAndSessionsSurviveARestart(t *testing.T) {
@@ -807,6 +927,7 @@ func TestBindingsRoutesAndSessionsSurviveARestart(t *testing.T) {
 	setQuota(s, c, "claude-a", 0.9, 0.5, 4*24*time.Hour)
 	setQuota(s, c, "claude-b", 0.9, 0.5, 24*time.Hour)
 	served(s, c, "claude:s1", "claude-a", true)
+	served(s, c, "claude:s2", "claude-a", true)
 	s.Apply(Command{CommandID: "r", Session: "s2", BootID: "boot-1", CreatedAt: c.t, Action: "route", Provider: "codex", Model: "gpt-6-sol"})
 	raw, _ := json.Marshal(s.Export())
 	c.add(2 * time.Hour)
@@ -904,7 +1025,7 @@ func TestPlans(t *testing.T) {
 	s, _ := newTestState()
 	s.UpdateInventory([]CredInfo{{ID: "claude-a", Provider: "claude"}})
 	s.SetPlan("claude-a", "claude", "Max 20x")
-	if got := s.BuildForBand("").Providers["claude"].Credentials[0].Plan; got != "Max 20x" {
+	if got := s.BuildForBand("", "", "").Providers["claude"].Credentials[0].Plan; got != "Max 20x" {
 		t.Fatalf("snapshot plan = %q", got)
 	}
 }
@@ -1356,7 +1477,7 @@ func TestCredentialsOfOneAccountCountAsOne(t *testing.T) {
 	if _, got := s.BuildWithCanonical(); got["codex-old"] != "codex-new" {
 		t.Fatalf("with the read-last credential disabled: canonical = %v", got)
 	}
-	if band := s.BuildForBand(""); band.Providers["codex"].Credentials[1].SameAs != band.Providers["codex"].Credentials[0].ID &&
+	if band := s.BuildForBand("", "", ""); band.Providers["codex"].Credentials[1].SameAs != band.Providers["codex"].Credentials[0].ID &&
 		band.Providers["codex"].Credentials[0].SameAs != band.Providers["codex"].Credentials[1].ID {
 		t.Fatal("the band's ids for the same account do not match")
 	}
@@ -1438,7 +1559,74 @@ func TestASessionViewNamesTheAccountsThatCannotServeIt(t *testing.T) {
 	if v := s.Build().Sessions["s1"]; fmt.Sprint(v.Blocked) != "[claude-b]" {
 		t.Fatalf("blocked = %v", v.Blocked)
 	}
-	if v := s.BuildForBand("s1").Sessions["s1"]; len(v.Blocked) != 1 || v.Blocked[0] == "claude-b" {
+	if v := s.BuildForBand("s1", "", "").Sessions["s1"]; len(v.Blocked) != 1 || v.Blocked[0] == "claude-b" {
 		t.Fatalf("remote blocked = %v", v.Blocked)
+	}
+}
+
+// What a user chose lasts as long as a session can be resumed; what the proxy chose, a day unused.
+func TestAChoiceOutlastsAPause(t *testing.T) {
+	s, c := newTestState()
+	setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+	served(s, c, "claude:s1", "claude-a", true)
+	served(s, c, "claude:s2", "claude-a", true)
+	s.Apply(Command{CommandID: "c1", Session: "s1", BootID: "boot-1", CreatedAt: c.t, Action: "switch", AuthID: "claude-b"})
+	s.Apply(Command{CommandID: "c2", Session: "s2", BootID: "boot-1", CreatedAt: c.t, Action: "route", Provider: "codex", Model: "gpt-6-sol"})
+	c.add(3 * 24 * time.Hour) // a weekend
+	s.Sweep()
+	r, _ := newTestState()
+	r.Import(s.Export())
+	for _, st := range []*State{s, r} {
+		if b := st.bindings["claude|claude:s1"]; b == nil || b.AuthID != "claude-b" {
+			t.Fatalf("the account chosen = %+v", b)
+		}
+		if _, ok := st.routes["claude:s2"]; !ok {
+			t.Fatal("the route chosen was dropped")
+		}
+		if b := st.bindings["claude|claude:s2"]; b != nil {
+			t.Fatalf("the account the proxy chose = %+v", b)
+		}
+	}
+	c.add(choiceTTL)
+	s.Sweep()
+	if len(s.bindings) != 0 || len(s.routes) != 0 {
+		t.Fatalf("past a month: %v %v", s.bindings, s.routes)
+	}
+}
+
+// A Codex turn counts its cached input once, as a Claude one does: routing sizes the conversation
+// from it, and a restart keeps it.
+func TestACodexTurnCountsItsCacheOnce(t *testing.T) {
+	s, c := newTestState()
+	s.Observe(Usage{Provider: "codex", Model: "gpt-6-sol", SessionID: "claude:s1", AuthID: "codex-a", RequestedAt: c.t,
+		Input: 200_000, CacheRead: 140_000, Output: 1_000})
+	r, _ := newTestState()
+	r.Import(s.Export())
+	for _, st := range []*State{s, r} {
+		if last := st.Build().Sessions["s1"].Last; last.Input != 60_000 || last.CacheRead != 140_000 {
+			t.Fatalf("last turn = %+v", last)
+		}
+	}
+	if need := needOf(r.sessions["claude:s1"], RouteInput{BodyBytes: 3000}); need != 201_000+outputReserveTokens {
+		t.Fatalf("need = %d", need)
+	}
+}
+
+// The band is told the account a new session gets for its model, as a pick ranks them: a model
+// with a weekly window of its own goes by that window's reset.
+func TestTheBandIsToldTheAccountANewSessionGets(t *testing.T) {
+	s, c := newTestState()
+	setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+	s.MergeWindows("claude-a", "claude", []Window{{Kind: "7d_fable", Remaining: 0.5, ResetAt: c.t.Add(20 * 24 * time.Hour), ObservedAt: c.t}})
+	s.MergeWindows("claude-b", "claude", []Window{{Kind: "7d_fable", Remaining: 0.5, ResetAt: c.t.Add(2 * time.Hour), ObservedAt: c.t}})
+	for model, want := range map[string]string{"claude-opus-5-5": "claude-a", "claude-fable-5-1": "claude-b"} {
+		if got := s.BuildForBand("s1", model, "").Expected["claude"]; got != opaqueID(want) {
+			t.Errorf("%s: expected %s, want %s", model, got, opaqueID(want))
+		}
+		if got := pick(s, "claude:new-"+model, model, both); got.AuthID != want {
+			t.Errorf("%s: a pick took %s, want %s", model, got.AuthID, want)
+		}
 	}
 }

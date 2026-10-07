@@ -94,6 +94,8 @@ export interface QuotaPilotUsageSession {
   origin: string;
   /** It ran on another device. */
   remote: boolean;
+  /** That device's name, as DNS names its address; '' where unknown. */
+  device: string;
   /** Mode `all`: its part of each provider's weekly quota, in that provider's unit. */
   usedBy: Record<string, number>;
   /** False when none of its requests fell where quota readings exist: only its tokens are known. */
@@ -307,8 +309,6 @@ export interface QuotaPilotUsageSessionDetail {
   agent: number;
   /** Label '' when the account is no longer on the proxy. */
   accounts: { id: string; label: string; provider: string; weight: number }[];
-  /** Includes lines recovered from transcripts, which sum a whole day. */
-  history: boolean;
   origin: string;
   /** It ran on another device. */
   remote: boolean;

@@ -16,6 +16,9 @@ const (
 	bindingTTL = 24 * time.Hour
 	sessionTTL = 24 * time.Hour
 	routeTTL   = 24 * time.Hour
+	// choiceTTL keeps an account or a route the user chose for as long as Claude Code keeps a
+	// session to resume (30 days by default); what the proxy chose itself lasts a day unused.
+	choiceTTL = 30 * 24 * time.Hour
 	// traceTTL bounds how long a request's thread marker waits for its usage record.
 	traceTTL    = time.Hour
 	activeAfter = time.Hour
@@ -36,7 +39,6 @@ type Config struct {
 	MinFiveHourLeftPercent float64
 	IdlePollMinutes        int
 	ContextLengths         map[string]int
-	BandTokens             []string // client keys allowed to read the band snapshot over the network
 }
 
 // Normalized fills defaults and drops invalid values.
@@ -111,12 +113,28 @@ type Binding struct {
 	At time.Time `json:"at,omitzero"`
 }
 
-// Route is a per-session cross-provider override written by the band.
+// Route is a per-session cross-provider override: the band's, or the proxy's own takeover (Auto).
 type Route struct {
 	Provider string    `json:"provider"`
 	Model    string    `json:"model"`
 	Auto     bool      `json:"auto"`
 	At       time.Time `json:"at"`
+}
+
+// ttl is how long a binding lasts unused: one the user chose as long as a session can be resumed.
+func (b Binding) ttl() time.Duration {
+	if b.Reason == switchedReason {
+		return choiceTTL
+	}
+	return bindingTTL
+}
+
+// ttl is how long a route lasts unused: one the user chose as long as a session can be resumed.
+func (r Route) ttl() time.Duration {
+	if r.Auto {
+		return routeTTL
+	}
+	return choiceTTL
 }
 
 // Usage is the part of an upstream usage record the core needs.
@@ -137,6 +155,7 @@ type Usage struct {
 	ResponseHeader http.Header
 	TierAsked      string // the service tier the client asked for, as the host read it; "auto" for none
 	TierServed     string // the service tier the provider reported serving it at; "" when it did not say
+	ClientKey      string // the client key the proxy accepted the request with
 }
 
 type session struct {
@@ -151,6 +170,10 @@ type session struct {
 	RequestedModel string
 	RouteNote      string
 	LastCommandAt  time.Time
+	// Client is the key whose request it first served (see clientID, "" for none, on a proxy
+	// without api-keys), once Owned: only that key's band commands it.
+	Client string
+	Owned  bool
 }
 
 // Tokens are summed or single-request token counts of a session's main thread.
@@ -203,6 +226,11 @@ type State struct {
 	inventoryAt time.Time
 	// identities name the provider account behind each credential read, kept past its removal.
 	identities map[string]Identity
+	// clients are the client keys the proxy accepted, by hash, with when each was last used.
+	clients map[string]time.Time
+	// keyedAt is when the newest request that came with a key was sent: one without a key sent
+	// before it, answered late, does not open the proxy again (see noteClientLocked).
+	keyedAt time.Time
 }
 
 // New creates an empty state. now may be nil for the wall clock.
@@ -221,6 +249,7 @@ func New(bootID string, now func() time.Time) *State {
 		traces:     map[string]trace{},
 		displaced:  map[string]map[string]bool{},
 		identities: map[string]Identity{},
+		clients:    map[string]time.Time{},
 	}
 }
 
@@ -246,7 +275,7 @@ func (s *State) Idle() bool {
 	return s.lastActivity.IsZero() || s.now().Sub(s.lastActivity) > idleAfter
 }
 
-// TakeDirty reports and clears whether the snapshot changed since the last call.
+// TakeDirty reports and clears whether the state changed since the last call, so it is saved.
 func (s *State) TakeDirty() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -282,6 +311,10 @@ type Persisted struct {
 	// Identities name the provider account behind each credential read, removed ones included, so
 	// the report counts an account logged in again under a new credential as one account.
 	Identities map[string]Identity `json:"identities,omitempty"`
+	// Clients are the client keys the proxy accepted (see clientID), with when each was last used,
+	// and KeyedAt when the newest request with a key was sent (see State.keyedAt).
+	Clients map[string]time.Time `json:"clients,omitempty"`
+	KeyedAt time.Time            `json:"keyed_at,omitzero"`
 }
 
 // Identity is the provider account a credential logs in to, and when that was last read.
@@ -362,6 +395,11 @@ type SavedSession struct {
 	LastMainAt     time.Time `json:"last_main_at"`
 	LastSeen       time.Time `json:"last_seen"`
 	LastSwitch     *Switch   `json:"last_switch,omitempty"`
+	Client         string    `json:"client,omitempty"`
+	Owned          bool      `json:"owned,omitempty"`
+	// Last is its last main turn, so a restart does not leave routing to judge a conversation's
+	// size by a continuation that carries only what is new.
+	Last Tokens `json:"last,omitzero"`
 }
 
 // Export returns the bindings, routes, sessions and quota readings to save.
@@ -378,7 +416,8 @@ func (s *State) Export() Persisted {
 	}
 	for root, sess := range s.sessions {
 		p.Sessions[root] = SavedSession{Provider: sess.Provider, Model: sess.Model, ServedAuth: sess.ServedAuth,
-			RequestedModel: sess.RequestedModel, LastMainAt: sess.LastMainAt, LastSeen: sess.LastSeen, LastSwitch: sess.LastSwitch}
+			RequestedModel: sess.RequestedModel, LastMainAt: sess.LastMainAt, LastSeen: sess.LastSeen, LastSwitch: sess.LastSwitch, Client: sess.Client,
+			Owned: sess.Owned, Last: sess.Last}
 	}
 	for id, c := range s.creds {
 		if len(c.Windows) == 0 && len(c.Absent) == 0 && c.Plan == "" {
@@ -399,6 +438,11 @@ func (s *State) Export() Persisted {
 	for id, ident := range s.identities {
 		p.Identities[id] = ident
 	}
+	p.Clients = map[string]time.Time{}
+	for h, seen := range s.clients {
+		p.Clients[h] = seen
+	}
+	p.KeyedAt = s.keyedAt
 	return p
 }
 
@@ -411,24 +455,36 @@ func (s *State) Import(p Persisted) {
 	}
 	now := s.now()
 	for k, b := range p.Bindings {
-		if b.AuthID != "" && now.Sub(b.LastUsed) <= bindingTTL {
+		if b.AuthID != "" && now.Sub(b.LastUsed) <= b.ttl() {
 			s.bindings[k] = &b
 		}
 	}
 	for k, r := range p.Routes {
-		if r.Provider != "" && r.Model != "" && now.Sub(r.At) <= routeTTL {
+		if r.Provider != "" && r.Model != "" && now.Sub(r.At) <= r.ttl() {
 			s.routes[k] = r
 		}
 	}
+	chosen := s.chosenLocked()
 	for root, saved := range p.Sessions {
-		if now.Sub(saved.LastSeen) <= sessionTTL {
+		if now.Sub(saved.LastSeen) <= sessionTTL || chosen[root] {
 			s.sessions[root] = &session{Provider: saved.Provider, Model: saved.Model, ServedAuth: saved.ServedAuth,
-				RequestedModel: saved.RequestedModel, LastMainAt: saved.LastMainAt, LastSeen: saved.LastSeen, LastSwitch: saved.LastSwitch}
+				RequestedModel: saved.RequestedModel, LastMainAt: saved.LastMainAt, LastSeen: saved.LastSeen, LastSwitch: saved.LastSwitch,
+				Client: saved.Client, Owned: saved.Owned, Last: saved.Last}
 		}
 	}
 	for id, ident := range p.Identities {
 		if ident.Account != "" && now.Sub(ident.Seen) <= identityTTL {
 			s.identities[id] = ident
+		}
+	}
+	s.keyedAt = p.KeyedAt
+	for h, seen := range p.Clients {
+		if now.Sub(seen) <= clientTTL {
+			s.clients[h] = seen
+			// A state saved before the watermark was: the keys' own times stand in for it.
+			if p.KeyedAt.IsZero() && h != "" && seen.After(s.keyedAt) {
+				s.keyedAt = seen
+			}
 		}
 	}
 	for id, saved := range p.Accounts {
@@ -691,6 +747,10 @@ func (s *State) Observe(u Usage) {
 	if at.IsZero() || at.After(now) {
 		at = now
 	}
+	// A request with neither a key nor a session may be the host's own, a model call of a plugin.
+	if u.ClientKey != "" || u.SessionID != "" {
+		s.noteClientLocked(u.ClientKey, at, now)
+	}
 	if provider == "" {
 		if c := s.creds[u.AuthID]; c != nil {
 			provider = c.Provider
@@ -751,6 +811,10 @@ func (s *State) Observe(u Usage) {
 	if u.Failed || u.AuthID == "" {
 		return
 	}
+	if !sess.Owned {
+		// The key whose request it first served owns it; one that only failed under its id does not.
+		sess.Client, sess.Owned = clientID(u.ClientKey), true
+	}
 	if supported {
 		s.commitLocked(provider, u.SessionID, root, u.AuthID, u.Model, tr.Thread, known && tr.Side, at, now)
 	}
@@ -769,8 +833,10 @@ func (s *State) Observe(u Usage) {
 		sess.LastSwitch = &Switch{From: sess.ServedAuth, To: u.AuthID, At: now, Reason: reason}
 	}
 	sess.ServedAuth = u.AuthID
-	sess.Last = Tokens{Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheCreation: u.CacheCreation, At: now}
-	sess.Totals.Input += u.Input
+	// Input without the cached part, which Codex counts in it: the same for every provider.
+	input := freshInput(provider, u.Input, u.CacheRead, u.CacheCreation)
+	sess.Last = Tokens{Input: input, Output: u.Output, CacheRead: u.CacheRead, CacheCreation: u.CacheCreation, At: now}
+	sess.Totals.Input += input
 	sess.Totals.Output += u.Output
 	sess.Totals.CacheRead += u.CacheRead
 	sess.Totals.CacheCreation += u.CacheCreation
@@ -1085,20 +1151,21 @@ func (s *State) classify(c *Cred, model string, now time.Time, offered bool) Ran
 
 func (s *State) sweepLocked(now time.Time) {
 	for k, b := range s.bindings {
-		if now.Sub(b.LastUsed) > bindingTTL {
+		if now.Sub(b.LastUsed) > b.ttl() {
 			delete(s.bindings, k)
 			delete(s.displaced, k)
 			s.dirty = true
 		}
 	}
+	chosen := s.chosenLocked()
 	for root, sess := range s.sessions {
-		if now.Sub(sess.LastSeen) > sessionTTL {
+		if now.Sub(sess.LastSeen) > sessionTTL && !chosen[root] {
 			delete(s.sessions, root)
 			s.dirty = true
 		}
 	}
 	for root, r := range s.routes {
-		if now.Sub(r.At) > routeTTL {
+		if now.Sub(r.At) > r.ttl() {
 			delete(s.routes, root)
 			s.dirty = true
 		}
@@ -1108,6 +1175,23 @@ func (s *State) sweepLocked(now time.Time) {
 			delete(s.traces, id)
 		}
 	}
+}
+
+// chosenLocked names the sessions with an account or a route the user chose: each is kept as long
+// as that choice, so the key that started it still owns it.
+func (s *State) chosenLocked() map[string]bool {
+	chosen := map[string]bool{}
+	for k, b := range s.bindings {
+		if _, root, ok := strings.Cut(k, "|"); ok && b.Reason == switchedReason {
+			chosen[root] = true
+		}
+	}
+	for root, r := range s.routes {
+		if !r.Auto {
+			chosen[root] = true
+		}
+	}
+	return chosen
 }
 
 // Sweep drops expired bindings, sessions, routes and request markers.

@@ -70,21 +70,12 @@ claude plugin install quota-band@cliproxy-kit
 # so it is set last.
 edit '.extraKnownMarketplaces["cliproxy-kit"].autoUpdate = true'
 
-# Unless a snapshot of the plugin reads here (a proxy on this machine, run as this user), the band
-# reads the quota over the network, with this key. The plugin writes the snapshot with Go's
-# encoding/json and replaces it whole, so only its shape can differ: it reads when it has every part
-# the band's parseSnap requires.
-snapshot_ok='def obj: type == "object";
-  .schema_version == 1 and (.sequence | type) == "number" and (.boot_id | type) == "string"
-  and (.generated_at | type) == "string" and (.config | obj) and (.config.fallback_map | obj)
-  and (.providers | obj) and (.sessions | obj) and (.context_lengths | obj) and (.acks | type) == "array"
-  and all(.providers[]; obj and (.credentials | type) == "array"
-    and all(.credentials[]; obj and (.id | type) == "string" and (.windows | type) == "array"))'
-if ! $local_proxy || ! jq -e "$snapshot_ok" "$HOME/.cache/cliproxy-kit/snapshot.json" >/dev/null 2>&1; then
-  case $(status "$base/v0/resource/plugins/quota-pilot/band") in
-    200) ;;
-    404) echo "Note: quota-pilot does not answer at $base yet; install it on the proxy for the band to show quota." ;;
-    *) echo "Note: for the band to show quota here, add this key to quota-pilot's band_tokens on the proxy." ;;
-  esac
-fi
+# The band reads the quota from the proxy with this key, once the proxy has accepted it for a
+# request (/v1/models above is not one).
+case $(status "$base/v0/resource/plugins/quota-pilot/band") in
+  200) ;;
+  401) echo "Note: the band shows quota from this key's first reply through the proxy on." ;;
+  404) echo "Note: quota-pilot does not answer at $base yet; install it on the proxy for the band to show quota." ;;
+  *) echo "Note: quota-pilot at $base did not answer for the quota; the band says why once it runs." ;;
+esac
 echo "Done: start a new Claude Code session, and the band shows above the prompt."

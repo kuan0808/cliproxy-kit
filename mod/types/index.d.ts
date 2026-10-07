@@ -1,5 +1,4 @@
-// quota-band's state contract and the quota-pilot snapshot it reads
-// (~/.cache/cliproxy-kit/snapshot.json, written by the proxy plugin).
+// quota-band's state contract and the quota-pilot snapshot it reads from the proxy's /band route.
 
 export type SnapWindow = {
   kind: string
@@ -87,6 +86,8 @@ export type Snap = {
   acks: SnapAck[]
   context_lengths: Record<string, number>
   last_error?: string
+  /** The account a new session of each provider gets for the model the band named, as a pick ranks them. */
+  expected?: Record<string, string>
 }
 
 export type RateLimit = { kind: string; percentUsed: number; resetsAt?: string }
@@ -100,14 +101,12 @@ export type SessionInfo = {
   contextWindow: number
   rateLimits: RateLimit[]
   proxied: boolean
-  /** The proxy's files are not on this machine for this user (another machine, a container): the snapshot comes over the network and changes are made on the host. */
-  remote: boolean
   home: string
 }
 
 /**
- * What the band on another device tells the proxy of its session, which the proxy cannot read
- * there. Claude Code's hook events and the band's reads each write only their own fields.
+ * What the band tells the proxy of its session, which only this device knows. Claude Code's hook
+ * events and the band's reads each write only their own fields.
  */
 export type SessionAbout = {
   /** The session this is about; another id starts over. */
@@ -124,6 +123,8 @@ export type SessionAbout = {
   /** The folder it started in, kept from its first read (a `/cd` later does not move it), and the repository it is in ("" outside one). */
   start: string
   root: string
+  /** That repository as its git remote names it ("github.com/owner/name"), the same on every device; "" without one. */
+  repo: string
 }
 
 export type CacheInfo = {
@@ -136,12 +137,12 @@ export type CacheInfo = {
   lastAnswer: string
 }
 
-/** A command sent and not yet acknowledged: the proxy run (boot id) it was written for, and when. */
+/** A command sent and not yet acknowledged: the proxy run (boot id) it was sent to, and when. */
 export type Pending = { id: string; text: string; boot: string; at: number }
 
 /**
- * Why the band read no snapshot from the proxy's `/band`: an error status (401 when the key is
- * not in `band_tokens`), an answer that is not a snapshot, or no answer at all.
+ * Why the band read no snapshot from the proxy's `/band`: an error status (401 before the proxy
+ * has accepted the key for a request), an answer that is not a snapshot, or no answer at all.
  */
 export type BandError =
   | { kind: 'status'; status: number }

@@ -157,6 +157,14 @@ export function pooled(view: SnapProvider): { left: number | null; parts: (numbe
   }
 }
 
+/** A window kind as the plugin labels it: "5-hour", "Weekly", "Weekly Fable". */
+export function kindLabel(kind: string): string {
+  if (kind === '5h') return '5-hour'
+  if (kind === '7d') return 'Weekly'
+  const family = kind.startsWith('7d_') ? kind.slice(3) : ''
+  return family ? `Weekly ${family.charAt(0).toUpperCase()}${family.slice(1)}` : kind
+}
+
 /** "7% used", "7%~ used" when stale, "—" without a reading. */
 export function usedText(w: SnapWindow | undefined): string {
   return w ? `${Math.round((1 - w.remaining) * 100)}%${w.stale ? '~' : ''} used` : '—'
@@ -193,9 +201,18 @@ export function nextTurnMoves(acct: SessionAccount | null): boolean {
   return Boolean(s?.served_auth_id) && s?.served_auth_id !== s?.auth_id
 }
 
+/**
+ * The provider's accounts other than `current`'s, each once: a second credential of an account
+ * (`same_as`) is that account, not another.
+ */
+export function otherAccounts(view: SnapProvider, current: string): SnapCred[] {
+  const own = view.credentials.find(c => c.id === current)?.same_as || current
+  return view.credentials.filter(c => !c.same_as && c.id !== own && c.id !== current)
+}
+
 /** The account a new session or a switch would land on next, other than `current`. */
 export function nextUp(view: SnapProvider, current: string, now: number): string {
-  const others = view.credentials.filter(c => c.id !== current && !c.disabled)
+  const others = otherAccounts(view, current).filter(c => !c.disabled)
   const ready = others.find(c => c.tier < 3)
   if (ready) return `next up: ${ready.label} ${usedText(windowOf(ready, '7d'))}`
   // When the window that stops each account resets: the plugin knows which one it is.
@@ -225,9 +242,9 @@ export function resetText(reset: string): string {
   return reset === 'now' ? 'resetting now' : `resets in ${reset}`
 }
 
-/** Accounts the switch list offers: same provider, not the current one, able to serve the session's next model. */
+/** Accounts the switch list offers: same provider, another account, able to serve the session's next model. */
 export function switchTargets(view: SnapProvider, current: string, blocked: readonly string[] = []): SnapCred[] {
-  return view.credentials.filter(c => c.id !== current && c.tier < 3 && !c.unavailable && !blocked.includes(c.id))
+  return otherAccounts(view, current).filter(c => c.tier < 3 && !c.unavailable && !blocked.includes(c.id))
 }
 
 /**
@@ -307,7 +324,7 @@ export function offerCacheActions(state: CacheState, acct: SessionAccount | null
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
-/** Parse the snapshot file; null when missing, unreadable, of another schema or missing a part the band reads. */
+/** Parse the snapshot; null when missing, unreadable, of another schema or missing a part the band reads. */
 export function parseSnap(text: string): Snap | null {
   try {
     const s = JSON.parse(text) as unknown
@@ -323,16 +340,21 @@ export function parseSnap(text: string): Snap | null {
   }
 }
 
-// The plugin rewrites its snapshot file at least once a minute, so a reader can tell a quiet proxy
-// from a stopped one.
-const LIVE_MS = 2 * MIN
-
 /**
- * Whether a snapshot file is the running proxy's: one a stopped proxy left behind is not, and
- * another proxy (in a container, say) may serve its port now.
+ * A repository as its git remote names it, the same on every device and in every worktree:
+ * "github.com/owner/name", without credentials or ".git"; "" for none, or a remote on a path of
+ * this machine (relative, absolute or file://), which names no repository the same everywhere.
  */
-export function snapIsLive(snap: Snap, now: number): boolean {
-  return now - Date.parse(snap.generated_at) <= LIVE_MS
+export function repoOf(remote: string | null | undefined): string {
+  const r = remote?.trim() ?? ''
+  // A URL (https://, ssh://, git://), else scp's form ([user@]host:path); a bare one-letter host
+  // is a drive (C:\repos).
+  const url = /^([a-z][a-z0-9+.-]*):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+?)(?:\.git)?\/?$/i.exec(r)
+  const scp = url ? null : /^(?:([^@/:]+)@)?([^@/:\\]+):(?!\/\/)(.+?)(?:\.git)?\/?$/.exec(r)
+  const drive = scp && !scp[1] && scp[2]!.length === 1
+  const [host, path] = url ? (url[1]!.toLowerCase() === 'file' ? [] : [url[2], url[3]]) : scp && !drive ? [scp[2], scp[3]] : []
+  const name = path?.replace(/^(?:\.?\/)+/, '')
+  return host && name ? `${host.toLowerCase()}/${name}` : ''
 }
 
 /** The proxy's `/band` answer: a snapshot, or why there is none. */
@@ -346,18 +368,18 @@ export function readBand(status: number, text: string): { snap: Snap; error: nul
 export function bandErrorText(error: BandError): string {
   if (error.kind === 'network') return `cannot reach the proxy for quota data: ${error.message}`
   if (error.kind === 'body') return "the proxy's quota data is not in a form this band reads; are both the same version?"
-  if (error.status === 401) return "the proxy refused this key for quota data; list it in quota-pilot's band_tokens setting"
+  if (error.status === 401) return 'quota data comes once this key has sent a request through the proxy'
   if (error.status === 404) return 'the proxy has no quota-pilot band route (404); is the plugin installed there?'
   return `the proxy answered HTTP ${error.status} for quota data`
 }
 
-// The plugin reads commands every second and acknowledges each in its next snapshot, which the
-// band reads within ten seconds: a minute without an answer means nothing is reading them.
+// A command goes with the band's next read of /band, which answers with its acknowledgement: a
+// minute without one means the proxy is not answering.
 const PENDING_MS = MIN
 
 /**
- * Pending commands as the snapshot leaves them: its acknowledgement settles one; one written for
- * an earlier run of the proxy will not be acknowledged, as acknowledgements do not survive a
+ * Pending commands as the snapshot leaves them: its acknowledgement settles one; one sent to an
+ * earlier run of the proxy will not be acknowledged, as acknowledgements do not survive a
  * restart; one unanswered for a minute expires. `notice` tells the last outcome, null for none.
  */
 export function settlePending(pending: readonly Pending[], snap: Snap | null, now: number): {
@@ -397,12 +419,14 @@ export const HANDOFF_PROMPT = [
   'Be specific with paths, commands and names. Plain markdown, no preamble.',
 ].join(' ')
 
-/** The account a new session of `provider` would get: first in the plugin's routing order. */
-export function likelyAccount(snap: Snap | null, provider: string): { provider: string; cred: SnapCred; total: number } | null {
-  if (!snap || !provider) return null
-  const view = snap.providers[provider]
-  const cred = view?.credentials[0]
-  return view && cred ? { provider, cred, total: view.credentials.length } : null
+/**
+ * The account a new session of `provider` would get: the one the plugin ranks first for the model
+ * the band named in its read, else the first in its routing order.
+ */
+export function likelyAccount(snap: Snap | null, provider: string): { provider: string; cred: SnapCred } | null {
+  const view = snap?.providers[provider]
+  const cred = view?.credentials.find(c => c.id === snap?.expected?.[provider]) ?? view?.credentials[0]
+  return cred ? { provider, cred } : null
 }
 
 /** Who publishes each provider's models in the proxy's /v1/models list. Add a provider once its owner is seen there. */

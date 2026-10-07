@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { EngineInterface, On, RenderElement, RenderInput } from 'claude-code'
+import type { EngineInterface, On, OpEventResult, RenderElement, RenderInput } from 'claude-code'
 import type { FoundElement, MockClock } from 'claude-code/testing'
 
 import type { CacheInfo, SessionInfo, Snap } from '../types'
@@ -49,7 +49,7 @@ const SNAP: Snap = {
 const SESSION: SessionInfo = {
   id: 's1', model: 'opus[1m]', effort: 'high', cwd: '/Users/me/Documents/developer/jesse',
   contextTokens: 420_000, contextWindow: 1_000_000, rateLimits: [],
-  proxied: true, remote: false, home: '/Users/me',
+  proxied: true, home: '/Users/me',
 }
 
 const WARM: CacheInfo = { lastAt: NOW - 8 * 60_000, prompt: 412_000, read: 400_000, creation: 12_000, input: 10, ttlMs: H, lastAnswer: '' }
@@ -66,12 +66,19 @@ const LOCAL_ENV = { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'http://127.0.0.1:83
 const TITLED = '"aiTitle":"Login page"\n"customTitle":"Fix the \\"login\\" page"\n"aiTitle":"Later title"\n'
 /** What the band's read of its transcript finds; a test sets it after `stubSession`. */
 let transcript = TITLED
-/** What the plugin's snapshot file holds; a test sets it after `stubSession`. */
+/** What the proxy's /band answers; a test sets it after `stubSession`. */
 let snapshot: Snap
-/** Whether the plugin's snapshot file is on this machine; a test sets it after `stubSession`. */
-let snapshotHere = true
-/** Whether that file reads as a snapshot; a test sets it after `stubSession`. */
-let snapshotReadable = true
+/** When set, how /band fails instead: refused, or not reached. */
+let failure: OpEventResult<'http.fetch'> | undefined
+/** The proxy's model list. */
+let models: { id: string; owned_by: string; created: number }[]
+/** The URL and headers of the band's last read of /band, and every command its reads carried. */
+let sentTo = ''
+let sent: Record<string, string> = {}
+let commands: Record<string, string>[] = []
+/** The session's root and repository, as Claude Code reports them. */
+let root: string
+let repo: unknown
 
 /** How many of a one-line meter's cells are filled: the first run of its bar. */
 const filledCells = (meter: FoundElement | undefined): number => {
@@ -97,8 +104,13 @@ function stubSession(
   const clock = mock.clock(on, { now: NOW })
   transcript = TITLED
   snapshot = snap
-  snapshotHere = true
-  snapshotReadable = true
+  failure = undefined
+  models = []
+  sentTo = ''
+  sent = {}
+  commands = []
+  root = SESSION.cwd
+  repo = null
   on('session.id', () => ({ value: SESSION.id }))
   on('session.model', () => ({ value: SESSION.model }))
   on('session.cwd', () => ({ value: SESSION.cwd }))
@@ -114,10 +126,16 @@ function stubSession(
       stderr: '', isStdoutTruncated: false, isStderrTruncated: false,
     },
   }))
-  on('fs.read', () => {
-    if (!snapshotHere) throw new Error('ENOENT: no snapshot file')
-    return { value: snapshotReadable ? JSON.stringify(snapshot) : '{"cut short' }
+  const ok = (body: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } })
+  on('http.fetch', (_$, e) => {
+    if (!e.url.endsWith('/band')) return ok({ data: models })
+    sentTo = e.url
+    sent = { ...(e.init?.headers as Record<string, string> | undefined) }
+    if (sent['X-Band-Command']) commands.push(JSON.parse(decodeURIComponent(sent['X-Band-Command'])))
+    return failure ?? ok(snapshot)
   })
+  on('session.root', () => ({ value: root }))
+  on('session.repo', () => ({ value: repo as never }))
   on('command.register', () => ({ value: { command: 'quota' } }))
   on('session.start', () => ({ cwd: SESSION.cwd }))
   // Nothing sits beneath a test's hooks: this one stands for the engine, or for another mod.
@@ -222,37 +240,10 @@ test('band keeps what hooks beneath it draw, under it, and folds to one line to 
   await idle.unmount()
 })
 
-test('band leaves a snapshot file its proxy stopped writing and asks whoever serves the port now', async ($, on) => {
-  // The proxy that ran here stops; one in a container takes its port, with its own accounts.
-  const clock = stubSession(on, SNAP)
-  const docker: Snap = { ...SNAP, boot_id: 'docker', sessions: { s1: { ...SNAP.sessions.s1!, auth_id: 'claude-k', auth_label: 'k•••' } } }
-  let asked = ''
-  on('http.fetch', (_$, e) => {
-    if (e.url.endsWith('/band')) asked = e.url
-    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(docker) } }
-  })
-  on('session.root', () => ({ value: '/Users/me/notes' }))
-  on('session.repo', () => ({ value: null }))
-  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
-  expect(asked).toBe('') // a file the proxy keeps fresh is read here
-  await clock.advance(3 * 60_000)
-  expect(asked).toBe('http://127.0.0.1:8317/v0/resource/plugins/quota-pilot/band')
-  const cards = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
-  expect(await cards.find({ text: /next up: d••• 42% used/ })).toBeDefined()
-  // The commands directory here is not the serving proxy's: no switching, in either view.
-  expect(await cards.find({ key: 'switch' })).toBeUndefined()
-  await cards.unmount()
-  const line = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(60, true) })
-  expect(await line.find({ key: 'switch' })).toBeUndefined()
-  await line.unmount()
-})
-
 test('band whose proxy stopped shows its last snapshot, and why nothing newer came', async ($, on) => {
   const clock = stubSession(on, SNAP)
-  on('http.fetch', () => ({ deny: 'connect ECONNREFUSED 127.0.0.1:8317' }))
-  on('session.root', () => ({ value: '/Users/me/notes' }))
-  on('session.repo', () => ({ value: null }))
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  failure = { deny: 'connect ECONNREFUSED 127.0.0.1:8317' }
   await clock.advance(3 * 60_000)
   const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
   expect(await ui.find({ text: /cannot reach the proxy for quota data/ })).toBeDefined()
@@ -263,26 +254,21 @@ test('band whose proxy stopped shows its last snapshot, and why nothing newer ca
 
 test('band that gets no quota data from the proxy says why', async ($, on) => {
   const clock = stubSession(on, SNAP, { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'https://mac.tailnet.ts.net:8317', ANTHROPIC_AUTH_TOKEN: 'sk-device', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })
-  let refused = true
-  on('http.fetch', () => (refused
-    ? { value: { status: 401, ok: false, headers: {}, text: '{"error":"band token required"}' } }
-    : { deny: 'connect ECONNREFUSED 100.64.0.1:8317' }))
-  on('session.root', () => ({ value: '/Users/me/notes' }))
-  on('session.repo', () => ({ value: null }))
+  // A key that has sent no request through the proxy yet.
+  failure = { value: { status: 401, ok: false, headers: {}, text: '{"error":"a client key the proxy accepted in the last week is required"}' } }
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
-  // A key the plugin does not list in band_tokens.
   const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
-  expect(await ui.find({ text: /the proxy refused this key for quota data; list it in quota-pilot's band_tokens setting/ })).toBeDefined()
+  expect(await ui.find({ text: /quota data comes once this key has sent a request through the proxy/ })).toBeDefined()
   await ui.unmount()
   const pane = await $.ui.mount({
     plugin: 'quota-band', surface: 'terminal', component: 'Pane', requestId: 'quota',
     props: { title: 'Accounts and quota', isFocused: true, bodyColumns: 56, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   } as never)
-  expect(await pane.find({ text: /band_tokens/ })).toBeDefined()
+  expect(await pane.find({ text: /once this key has sent a request/ })).toBeDefined()
   expect(await pane.find({ text: /Is the proxy plugin running/ })).toBeUndefined()
   await pane.unmount()
   // Then the proxy cannot be reached at all.
-  refused = false
+  failure = { deny: 'connect ECONNREFUSED 100.64.0.1:8317' }
   await clock.advance(10_000)
   const line = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, true) })
   expect(await line.find({ text: /cannot reach the proxy for quota data: .*connect ECONNREFUSED/ })).toBeDefined()
@@ -291,7 +277,6 @@ test('band that gets no quota data from the proxy says why', async ($, on) => {
 
 test('a switch the proxy restarts under, or never answers, does not stay pending', async ($, on) => {
   const clock = stubSession(on, SNAP)
-  on('fs.write', () => ({ value: undefined }))
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
   const notice = async () => {
     const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
@@ -333,17 +318,10 @@ test('a routed session keeps back beside switch, for another account or model of
     },
   }
   stubSession(on, routed)
-  on('http.fetch', () => ({
-    value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ data: [
-      { id: 'gpt-6.1-sol', owned_by: 'openai', created: 3 }, { id: 'gpt-6-astra', owned_by: 'openai', created: 1 },
-      { id: 'claude-opus-5-5', owned_by: 'anthropic', created: 2 },
-    ] }) },
-  }))
-  let written = ''
-  on('fs.write', (_$, e) => {
-    written = e.text
-    return { value: undefined }
-  })
+  models = [
+    { id: 'gpt-6.1-sol', owned_by: 'openai', created: 3 }, { id: 'gpt-6-astra', owned_by: 'openai', created: 1 },
+    { id: 'claude-opus-5-5', owned_by: 'anthropic', created: 2 },
+  ]
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
   const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
   expect(await ui.find({ text: /^→ gpt-6.1-sol$/ })).toBeDefined()
@@ -354,7 +332,7 @@ test('a routed session keeps back beside switch, for another account or model of
   await ui.press({ key: 'prov-codex' })
   expect(await ui.find({ text: /^gpt-6.1-sol \(now\)$/ })).toBeDefined()
   await ui.press({ key: 'model-gpt-6-astra' })
-  expect(JSON.parse(written)).toMatchObject({ action: 'route', provider: 'codex', model: 'gpt-6-astra', session: 's1' })
+  expect(commands).toMatchObject([{ action: 'route', provider: 'codex', model: 'gpt-6-astra', session: 's1' }])
   await ui.unmount()
 })
 
@@ -407,76 +385,59 @@ test('band names the account a session on a Claude Code alias will get, before t
   await ui.unmount()
 })
 
-test('band on another device reads the snapshot over the network and hides host-only controls', async ($, on) => {
+test('band on another device reads the snapshot over the network and sends its commands with it', async ($, on) => {
   const clock = stubSession(on, SNAP, { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'https://mac.tailnet.ts.net:8317', ANTHROPIC_AUTH_TOKEN: 'sk-device', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })
-  let asked = ''
-  let said: Record<string, string> = {}
-  on('http.fetch', (_$, e) => {
-    const { Authorization, ...rest } = (e.init?.headers ?? {}) as Record<string, string>
-    asked = `${e.url} ${Authorization ?? ''}`
-    said = rest
-    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(SNAP) } }
-  })
   // No settings hook beneath; the session started in jesse, then /cd moved its root elsewhere.
   on('classic.SessionStart', () => ({}))
   on('classic.UserPromptSubmit', () => ({}))
-  let root = '/Users/me/Documents/developer/jesse'
-  on('session.root', () => ({ value: root }))
-  on('session.repo', () => ({ value: { root: '/Users/me/Documents/developer', remote: null, internal: false } as never }))
+  repo = { root: '/Users/me/Documents/developer', remote: 'git@github.com:me/jesse.git', internal: false }
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
-  expect(asked).toBe('https://mac.tailnet.ts.net:8317/v0/resource/plugins/quota-pilot/band Bearer sk-device')
+  expect(sentTo).toBe('https://mac.tailnet.ts.net:8317/v0/resource/plugins/quota-pilot/band')
+  expect(sent.Authorization).toBe('Bearer sk-device')
 
   // The proxy cannot read this device's transcript: the band says what the session is, in
   // headers. Resumed, no event says a title, so the transcript's is read (a rename wins).
   await $.classic.SessionStart({ session_id: SESSION.id, transcript_path: '/Users/me/.claude/projects/p/s1.jsonl', source: 'resume' })
   root = '/Users/me/elsewhere'
   await clock.advance(10_000)
-  expect(said).toEqual({
+  expect(sent).toEqual({
+    Authorization: 'Bearer sk-device',
     'X-Band-Session': 's1',
+    'X-Band-Model': 'opus%5B1m%5D',
     'X-Band-Title': 'Fix%20the%20%22login%22%20page',
     'X-Band-Cwd': '%2FUsers%2Fme%2FDocuments%2Fdeveloper%2Fjesse',
     'X-Band-Root': '%2FUsers%2Fme%2FDocuments%2Fdeveloper',
+    'X-Band-Repo': 'github.com%2Fme%2Fjesse',
   })
   // A title a hook event says is the one sent, and the folder it started in stays.
   await $.classic.UserPromptSubmit({ session_id: SESSION.id, prompt: 'hi', session_title: 'Login revamp' })
   await clock.advance(10_000)
-  expect(said['X-Band-Title']).toBe('Login%20revamp')
-  expect(said['X-Band-Cwd']).toBe('%2FUsers%2Fme%2FDocuments%2Fdeveloper%2Fjesse')
+  expect(sent['X-Band-Title']).toBe('Login%20revamp')
+  expect(sent['X-Band-Cwd']).toBe('%2FUsers%2Fme%2FDocuments%2Fdeveloper%2Fjesse')
 
   const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
   expect(await ui.find({ text: /next up: k••• 7% used/ })).toBeDefined()
-  expect(await ui.find({ key: 'switch' })).toBeUndefined()
+  // A switch goes with the next read of /band, for this session, and settles by the snapshot's
+  // acknowledgement.
+  await ui.press({ key: 'switch' })
+  await ui.press({ key: 'to-claude-k' })
   await ui.unmount()
-})
-
-test('band beside a proxy whose files it cannot see reads the snapshot over the network', async ($, on) => {
-  // The proxy runs on this machine, but in a container or as another user: no snapshot file here.
-  stubSession(on, SNAP)
-  snapshotHere = false
-  let asked = ''
-  on('http.fetch', (_$, e) => {
-    asked = e.url
-    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(SNAP) } }
-  })
-  on('session.root', () => ({ value: '/Users/me/notes' }))
-  on('session.repo', () => ({ value: null }))
-  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
-  expect(asked).toBe('http://127.0.0.1:8317/v0/resource/plugins/quota-pilot/band')
-  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
-  expect(await ui.find({ text: /next up: k••• 7% used/ })).toBeDefined()
-  // Switching writes files the proxy cannot read, so it is offered only beside the proxy.
-  expect(await ui.find({ key: 'switch' })).toBeUndefined()
-  await ui.unmount()
+  expect(commands).toMatchObject([{ session: 's1', boot_id: 'b1', action: 'switch', auth_id: 'claude-k' }])
+  snapshot = { ...SNAP, acks: [{ command_id: commands[0]!.command_id!, session: 's1', status: 'applied', at: new Date().toISOString() }] }
+  await clock.advance(10_000)
+  const after = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+  expect((await after.find({ key: 'notice' }))?.text).toMatch(/Switch to k•••: done/)
+  expect(commands).toHaveLength(1) // sent once
+  await after.unmount()
 })
 
 test('band forgets the conversation it leaves, on a resume as on a clear', async ($, on) => {
   stubSession(on, SNAP)
   // A reply that wrote and read the prompt cache, as the engine reports it.
+  const WROTE = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 400_000, cache_creation_input_tokens: 12_000 }
+  let usage = WROTE
   on('turn.step', async function* () {
-    return {
-      turnId: 't1', index: 0, answer: 'Done.', toolUses: [], stopReason: 'end_turn',
-      usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 400_000, cache_creation_input_tokens: 12_000 },
-    } as never
+    return { turnId: 't1', index: 0, answer: 'Done.', toolUses: [], stopReason: 'end_turn', usage } as never
   })
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -486,6 +447,12 @@ test('band forgets the conversation it leaves, on a resume as on a clear', async
     await ui.unmount()
     return waiting ? 'waiting' : 'warm'
   }
+  // A reply that neither read nor wrote the cache, as one under the smallest cached prompt, says
+  // nothing of it.
+  usage = { input_tokens: 900, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  for await (const chunk of $.turn.step({ turnId: 't1', index: 0, model: SESSION.model } as never)) void chunk
+  expect(await cacheText()).toBe('waiting')
+  usage = WROTE
   for (const reason of ['clear', 'resume'] as const) {
     for await (const chunk of $.turn.step({ turnId: 't1', index: 0, model: SESSION.model } as never)) void chunk
     expect(await cacheText()).toBe('warm')
@@ -494,18 +461,11 @@ test('band forgets the conversation it leaves, on a resume as on a clear', async
   }
 })
 
-test('band whose snapshot file cannot be read asks the proxy over the network', async ($, on) => {
-  stubSession(on, SNAP)
-  snapshotReadable = false
-  let asked = ''
-  on('http.fetch', (_$, e) => {
-    if (e.url.endsWith('/band')) asked = e.url
-    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(SNAP) } }
-  })
-  on('session.root', () => ({ value: '/Users/me/notes' }))
-  on('session.repo', () => ({ value: null }))
+test('band reads a proxy without api-keys with no key of its own', async ($, on) => {
+  stubSession(on, SNAP, { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'https://mac.tailnet.ts.net:8317', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
-  expect(asked).toBe('http://127.0.0.1:8317/v0/resource/plugins/quota-pilot/band')
+  expect(sentTo).toBe('https://mac.tailnet.ts.net:8317/v0/resource/plugins/quota-pilot/band')
+  expect(sent.Authorization).toBeUndefined()
   const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
   expect(await ui.find({ text: /next up: k••• 7% used/ })).toBeDefined()
   await ui.unmount()
@@ -513,34 +473,23 @@ test('band whose snapshot file cannot be read asks the proxy over the network', 
 
 test('band reloaded mid-session learns its transcript from the next prompt', async ($, on) => {
   const clock = stubSession(on, SNAP, { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'https://mac.tailnet.ts.net:8317', ANTHROPIC_AUTH_TOKEN: 'sk-device', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })
-  let said: Record<string, string> = {}
-  on('http.fetch', (_$, e) => {
-    said = (e.init?.headers ?? {}) as Record<string, string>
-    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(SNAP) } }
-  })
   on('classic.UserPromptSubmit', () => ({}))
-  on('session.root', () => ({ value: '/Users/me/notes' }))
-  on('session.repo', () => ({ value: null }))
+  root = '/Users/me/notes'
   // No start event: the band loaded after the session began.
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
-  expect(said['X-Band-Title']).toBeUndefined()
+  expect(sent['X-Band-Title']).toBeUndefined()
   await $.classic.UserPromptSubmit({ session_id: SESSION.id, prompt: 'hi', transcript_path: '/Users/me/.claude/projects/p/s1.jsonl' })
   await clock.advance(10_000)
-  expect(said['X-Band-Title']).toBe('Fix%20the%20%22login%22%20page')
-  expect(said['X-Band-Cwd']).toBe('%2FUsers%2Fme%2Fnotes')
-  expect(said['X-Band-Root']).toBeUndefined()
+  expect(sent['X-Band-Title']).toBe('Fix%20the%20%22login%22%20page')
+  expect(sent['X-Band-Cwd']).toBe('%2FUsers%2Fme%2Fnotes')
+  expect(sent['X-Band-Root']).toBeUndefined()
+  expect(sent['X-Band-Repo']).toBeUndefined()
 })
 
 test('band on another device names a session Claude Code has not titled by its first request', async ($, on) => {
   const clock = stubSession(on, SNAP, { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'https://mac.tailnet.ts.net:8317', ANTHROPIC_AUTH_TOKEN: 'sk-device', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })
-  let said: Record<string, string> = {}
-  on('http.fetch', (_$, e) => {
-    said = (e.init?.headers ?? {}) as Record<string, string>
-    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(SNAP) } }
-  })
   on('classic.SessionStart', () => ({}))
-  on('session.root', () => ({ value: '/Users/me' }))
-  on('session.repo', () => ({ value: null }))
+  root = '/Users/me'
   // Claude Code titles no request under ten characters: "hi" leaves the session untitled. What
   // it writes first (a caveat, a command, an image) is passed over, as the proxy's Mac does.
   const requests = [
@@ -553,11 +502,11 @@ test('band on another device names a session Claude Code has not titled by its f
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
   await $.classic.SessionStart({ session_id: SESSION.id, transcript_path: '/Users/me/.claude/projects/p/s1.jsonl', source: 'startup' })
   await clock.advance(10_000)
-  expect(said['X-Band-Title']).toBe('hi')
+  expect(sent['X-Band-Title']).toBe('hi')
   // A longer request later gets the session Claude Code's title, which then names it.
   transcript = '"aiTitle":"Greeting and setup"\n' + requests
   await clock.advance(60_000)
-  expect(said['X-Band-Title']).toBe('Greeting%20and%20setup')
+  expect(sent['X-Band-Title']).toBe('Greeting%20and%20setup')
 })
 
 test('quota pane lists every window kind for every account and says what the settings do', async ($, on) => {
@@ -569,7 +518,7 @@ test('quota pane lists every window kind for every account and says what the set
         credentials: SNAP.providers.claude!.credentials.map(c =>
           c.id === 'claude-k'
             ? { ...c, windows: [...c.windows, { kind: '7d_fable', label: 'Weekly Fable', remaining: 1, reset_at: iso(30 * 24 * H), observed_at: iso(-60_000), stale: false }] }
-            : c),
+            : { ...c, absent: ['7d_opus'] }),
       },
     },
   }
@@ -579,7 +528,10 @@ test('quota pane lists every window kind for every account and says what the set
     plugin: 'quota-band', surface: 'terminal', component: 'Pane', requestId: 'quota',
     props: { title: 'Accounts and quota', isFocused: true, bodyColumns: 56, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   } as never)
-  expect(await pane.find({ text: /^not reported$/ })).toBeDefined() // d••• has no Fable window
+  expect(await pane.find({ text: /^not reported yet$/ })).toBeDefined() // d••• has not said a Fable window
+  // A limit no account reports, one says it has not: its row is there to say so.
+  expect(await pane.find({ text: /^Weekly Opus$/ })).toBeDefined()
+  expect(await pane.find({ text: /^no such limit$/ })).toBeDefined()
   expect(await pane.find({ text: /^this session$/ })).toBeDefined()
   expect(await pane.find({ text: /^use gpt-6-sol \(Codex\)$/ })).toBeDefined()
   expect(await pane.find({ text: /^off$/ })).toBeDefined()
@@ -595,17 +547,10 @@ test('switch walks from the provider to its newest models and routes the session
     },
   }
   stubSession(on, snap)
-  on('http.fetch', () => ({
-    value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ data: [
-      { id: 'gpt-6.1-sol', owned_by: 'openai', created: 3 }, { id: 'gpt-6-astra', owned_by: 'openai', created: 1 },
-      { id: 'gpt-6-sol', owned_by: 'openai', created: 2 }, { id: 'gpt-image-2', owned_by: 'openai', created: 4 },
-    ] }) },
-  }))
-  let written = ''
-  on('fs.write', (_$, e) => {
-    written = e.text
-    return { value: undefined }
-  })
+  models = [
+    { id: 'gpt-6.1-sol', owned_by: 'openai', created: 3 }, { id: 'gpt-6-astra', owned_by: 'openai', created: 1 },
+    { id: 'gpt-6-sol', owned_by: 'openai', created: 2 }, { id: 'gpt-image-2', owned_by: 'openai', created: 4 },
+  ]
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
   const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
   await ui.press({ key: 'switch' })
@@ -616,7 +561,7 @@ test('switch walks from the provider to its newest models and routes the session
   expect(await ui.find({ key: 'model-gpt-6-sol' })).toBeUndefined() // an older sol
   expect(await ui.find({ key: 'model-gpt-image-2' })).toBeUndefined()
   await ui.press({ key: 'model-gpt-6.1-sol' })
-  expect(JSON.parse(written)).toMatchObject({ action: 'route', provider: 'codex', model: 'gpt-6.1-sol', session: 's1' })
+  expect(commands).toMatchObject([{ action: 'route', provider: 'codex', model: 'gpt-6.1-sol', session: 's1' }])
   await ui.unmount()
 })
 

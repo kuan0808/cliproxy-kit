@@ -174,6 +174,15 @@ func TestSpeedScalesARequestsWeight(t *testing.T) {
 	if !near(fast.Weight(), 2.5*base.Weight()) || !near(standard.Weight(), base.Weight()) || claude.Weight() != 0 {
 		t.Fatalf("weights: fast %v standard %v base %v claude fast %v", fast.Weight(), standard.Weight(), base.Weight(), claude.Weight())
 	}
+	// What a request ran shows whatever its speed: a fast-mode session's timeline is not empty.
+	if fast.Cost() != base.Cost() || claude.Cost() == 0 {
+		t.Fatalf("cost: fast %v base %v claude fast %v", fast.Cost(), base.Cost(), claude.Cost())
+	}
+	ran := claude
+	ran.T = 1000
+	if d := Detail([]LogEntry{ran}, nil, time.UTC); len(d.Buckets) == 0 || d.Buckets[0].Weight == 0 || d.Composition.Weights.Output == 0 {
+		t.Fatalf("a fast-mode session's detail = %+v", d)
+	}
 }
 
 // Claude's fast mode draws nothing on the plan: a rise read beside only such requests is use
@@ -200,9 +209,9 @@ func TestDetailCountsServiceTiers(t *testing.T) {
 		{T: 1000, Provider: "codex", Output: 10, TierAsked: "priority", TierServed: "default"},
 		{T: 2000, Provider: "codex", Output: 10, TierAsked: "priority", TierServed: "default"},
 		{T: 3000, Provider: "codex", Output: 10, TierAsked: "priority", TierServed: "priority"},
-		{T: 4000, Provider: "claude", Output: 10, Count: 3},
+		{T: 4000, Provider: "claude", Output: 10},
 	}, nil, time.UTC)
-	want := []Tier{{"claude", "", "", 3}, {"codex", "priority", "default", 2}, {"codex", "priority", "priority", 1}}
+	want := []Tier{{"codex", "priority", "default", 2}, {"claude", "", "", 1}, {"codex", "priority", "priority", 1}}
 	if fmt.Sprint(d.Tiers) != fmt.Sprint(want) {
 		t.Fatalf("tiers = %+v", d.Tiers)
 	}

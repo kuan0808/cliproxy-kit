@@ -176,7 +176,8 @@ export function sessionLabel(t: TFunction, id: string, title: string) {
 /**
  * One thing a session's tags say, when it is not Claude Code a person ran on this machine: it ran
  * on another device, a program ran it, or another app. `key` names an app (its tag) or explains a
- * program or a device (its detail); `raw` keeps an origin this page does not know, shown as given.
+ * program or a device (its detail); `raw` keeps an origin this page does not know, or the device's
+ * name, shown as given.
  */
 export interface SessionSource {
   kind: 'auto' | 'device' | 'app';
@@ -201,34 +202,44 @@ const SOURCES: Record<string, SessionSource> = {
 };
 
 /**
- * A session's tags: where it ran (another device), then what ran it; none for Claude Code a person
- * ran on this machine. In a Codex view, Claude Code run by a person reached Codex through the
- * proxy, and says so; a program's run and another app keep their own tag.
+ * A session's tags: where it ran (another device, by its name where known), then what ran it; none
+ * for Claude Code a person ran on this machine. In a Codex view, Claude Code run by a person
+ * reached Codex through the proxy, and says so; a program's run and another app keep their own tag.
  */
-export function sessionSources(origin: string, onCodex: boolean, remote = false): SessionSource[] {
+export function sessionSources(
+  origin: string,
+  onCodex: boolean,
+  remote = false,
+  device = ''
+): SessionSource[] {
   const app: SessionSource | null = origin
     ? (SOURCES[origin] ?? { kind: 'app', key: '', raw: origin })
     : onCodex
       ? { kind: 'app', key: 'origin_proxy' }
       : null;
-  return [...(remote ? [DEVICE] : []), ...(app ? [app] : [])];
+  const where: SessionSource[] = !remote
+    ? []
+    : device
+      ? [{ kind: 'device', key: 'why_remote_named', raw: device }]
+      : [DEVICE];
+  return [...where, ...(app ? [app] : [])];
 }
 
-/** A tag's text: "Automated", "Other device", or the app's name. */
+/** A tag's text: "Automated", the device's name or "Other device", or the app's name. */
 export function sourceTag(t: TFunction, source: SessionSource): string {
   if (source.kind === 'auto') return t('quota_usage.source_auto');
-  if (source.kind === 'device') return t('quota_usage.source_device');
+  if (source.kind === 'device') return source.raw ?? t('quota_usage.source_device');
   return source.raw ?? t(`quota_usage.${source.key}`);
 }
 
 /** What a session's detail adds to its tag in plain words; nothing where the tag says it all. */
 export function sourceWhy(t: TFunction, source: SessionSource): string {
-  return source.kind === 'app' ? '' : t(`quota_usage.${source.key}`);
+  return source.kind === 'app' ? '' : t(`quota_usage.${source.key}`, { device: source.raw });
 }
 
 // Sessions whose tags read the same count as one source: every program run is "Automated".
 const tagsOf = (sources: SessionSource[]) =>
-  sources.map((s) => (s.kind === 'app' ? `app:${s.raw ?? s.key}` : s.kind)).join('+');
+  sources.map((s) => (s.kind === 'auto' ? s.kind : `${s.kind}:${s.raw ?? s.key}`)).join('+');
 
 export interface ProjectSources {
   /** Sessions, not counting the requests that came without one. */

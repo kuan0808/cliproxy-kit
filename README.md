@@ -149,22 +149,69 @@ requests.
 
 </details>
 
-### Other machines and Docker
+**4. Show the quota in Codex** (optional). Codex has no status line of its own to fill, and through
+a proxy its footer shows no limits; two hooks print a line instead: the account and its use when a
+session starts, and after a turn only when the session moved to another account, or its account
+passed 80% or ran out.
 
-Claude Code elsewhere can use the same proxy over an encrypted address, such as one from
-[Tailscale Serve](https://tailscale.com/kb/1312/serve). Add the key it uses to `band_tokens`, then run
-the same command there with the proxy's address:
+<details>
+<summary>Add to <code>~/.codex/config.toml</code>, with the same key and address</summary>
+
+```toml
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = '''id=$(sed -n 's/.*[{,]"session_id":"\([^"]*\)".*/\1/p'); printf 'Authorization: Bearer %s\nX-Codex-Session: %s\n' '<a client key of the proxy>' "$id" | curl -fs -m 3 -H @- "http://127.0.0.1:8317/v0/resource/plugins/quota-pilot/codex?event=SessionStart"'''
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = '''id=$(sed -n 's/.*[{,]"session_id":"\([^"]*\)".*/\1/p'); printf 'Authorization: Bearer %s\nX-Codex-Session: %s\n' '<a client key of the proxy>' "$id" | curl -fs -m 3 -H @- "http://127.0.0.1:8317/v0/resource/plugins/quota-pilot/codex?event=Stop"'''
+```
+
+It needs only `curl`, and Codex asks once to trust the two hooks. Codex shows each line as a notice;
+none of it reaches the model.
+
+</details>
+
+### Where the proxy runs
+
+Every part talks to the proxy's address and nothing else, so the proxy can run beside Claude Code,
+in a container, or on a server that runs no client at all.
+
+| Setup | What changes |
+| --- | --- |
+| **The same machine** | Nothing: steps 1 to 4 as above. |
+| **Docker** | Keep the proxy user's `~/.cache/cliproxy-kit/` on a volume (`/root/.cache/cliproxy-kit` in most images), or a restart loses the log and the state. |
+| **Another machine** | Reach the proxy over an encrypted address, such as one from [Tailscale Serve](https://tailscale.com/kb/1312/serve), and give that address to the connect command and to Codex. |
 
 ```sh
 bash <(curl -fsSL https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/scripts/connect-claude-code.sh) https://proxy.example.ts.net:8317
 ```
 
-- Its sessions, and Codex sessions there, show in the usage page marked as from another device.
-- Switching a session's account is offered only on the machine that runs the proxy.
-- A proxy in Docker works the same way: its band key goes in `band_tokens`. Requests that reach the
-  container directly, with no reverse proxy in front, are not marked as from another device.
-- The script refuses a plain `http://` address on another machine; set `ALLOW_HTTP=1` when the
-  network already encrypts it (a VPN).
+- **Devices.** With a reverse proxy such as Tailscale Serve in front, which tells the proxy where a
+  request came from, sessions from other devices show on the page under the device's name
+  (MagicDNS), else as "Other device". A client that reaches the port directly is not told apart.
+- **Names.** The proxy reads Claude Code's transcripts only beside them, as the same user. Elsewhere
+  the band names each session; without it a session keeps the title of its first request.
+- **Plain http.** The script refuses an `http://` address on another machine; set `ALLOW_HTTP=1`
+  when the network already encrypts it (a VPN).
+
+### With and without the band
+
+quota-pilot works on its own; the band adds what only Claude Code can show or do.
+
+| | quota-pilot alone | with the band |
+| --- | :---: | :---: |
+| An account for each session, kept with its prompt cache | ✅ | ✅ |
+| The usage page: accounts, projects, sessions | ✅ | ✅ |
+| Session titles | first request¹ | current, from any device |
+| One project per repository across devices | by folder | ✅ |
+| Account, quota, context and cache above the prompt | | ✅ |
+| Switch an account or a provider by hand | | ✅ |
+| `compact` and `handoff` before the cache expires | | ✅ |
+
+¹ The current title, renames included, when the proxy runs beside Claude Code as the same user.
 
 ## Use
 
@@ -195,8 +242,6 @@ ticked, else it asks for the management key once per tab.
 
 - **A window that starts over** before its reset, as after a plan change, counts from then; the use
   before stays in the 7- and 30-day views.
-- **History:** days before quota-pilot ran have no quota readings. `python3 scripts/usage-backfill.py`,
-  run once on the proxy's machine, recovers their token counts from Claude Code's transcripts.
 - **Fast modes:** Codex's Fast (`service_tier = "fast"`) uses included limits 2.5 times as fast, and
   counts so. Claude Code's `/fast` is billed to usage credits, not plan limits, so it counts for
   nothing; through a proxy Claude Code offers it only with `CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1`.
@@ -214,15 +259,24 @@ On the panel's **Plugins** page, or under `plugins.configs.quota-pilot` in `conf
 | `fallback_map` | none | The model each provider moves to, as `provider: provider:model`, for example `claude: codex:gpt-6.1-sol`. |
 | `idle_poll_minutes` | `10` | How often idle accounts' quota is read. |
 | `context_lengths` | built in | Context window per model, to tell whether a conversation fits another model. |
-| `band_tokens` | none | Client keys with which a band on another machine may read the quota. |
+
+## What it changes
+
+| Where | What | To undo |
+| --- | --- | --- |
+| CLIProxyAPI's `config.yaml` | `plugins:` turned on, the store, and quota-pilot's settings | Remove them. |
+| `~/.cache/cliproxy-kit/` of the proxy's user | State, the request log and what is known of each session (mode 0600; client keys as hashes only) | Delete the folder. |
+| `~/.claude/settings.json`, on each machine with Claude Code | The `env` keys of step 2; the file as it was is kept as `settings.json.bak-<time>` | Put the backup back. |
+| Claude Code's plugins | The `cliproxy-kit` marketplace and `quota-band` | `claude plugin uninstall quota-band@cliproxy-kit` |
+| `~/.cache/cliproxy-kit/handoff/`, beside the band | Notes `handoff` wrote | Delete the folder. |
+| `~/.codex/config.toml` (optional) | The model provider of step 3 and the hooks of step 4 | Remove them. |
 
 ## Update and uninstall
 
 - **Update:** the panel's Plugin Store offers new versions of quota-pilot;
   `claude plugin update quota-band@cliproxy-kit` updates the band.
-- **Uninstall:** delete Quota Pilot on the panel's **Plugins** page, run
-  `claude plugin uninstall quota-band@cliproxy-kit`, and put back `~/.claude/settings.json.bak-<time>`
-  (or remove the `env` keys above). The log and state live in `~/.cache/cliproxy-kit/`.
+- **Uninstall:** delete Quota Pilot on the panel's **Plugins** page, then undo the rest as the table
+  above says.
 
 ## Troubleshooting
 
@@ -230,24 +284,24 @@ On the panel's **Plugins** page, or under `plugins.configs.quota-pilot` in `conf
 | --- | --- |
 | The store install fails | The panel waits 30 seconds for the 2 MB download from GitHub: install by hand (step 1). |
 | No quota-pilot page under Plugins | Refresh the panel, and check `plugins.enabled: true`. |
-| The band says the proxy refused this key | Add the key Claude Code uses to `band_tokens`. |
+| The band says quota data comes once this key has sent a request | Send one prompt: the proxy has not accepted that key for a request in the last week. |
 | The band says quota data is old | The proxy, or the plugin in it, stopped: restart CLIProxyAPI. |
 | Codex sessions are missing from the page | Codex does not use the proxy yet (step 3). |
+| Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
 | A Codex account has no 5-hour window | Its plan has none; the page and the band say so. |
 
 ## Privacy and security
 
-- **One owner.** Every client key of the proxy is trusted: a client can name sessions with its
-  requests, and a key in `band_tokens` reads every account's quota. Give keys only to people you
-  would show your usage to.
-- **Local.** Everything stays in `~/.cache/cliproxy-kit/` (mode 0600) on the machine that runs the
-  proxy. Besides the requests it routes, the plugin calls only the providers' own usage and profile
-  endpoints, with the accounts' existing tokens.
-- **Transcripts.** To name sessions it reads Claude Code's transcripts there, so the proxy should run
-  as the same user as Claude Code.
+- **One owner.** Every client key of the proxy is trusted. Once the proxy has accepted a key for a
+  request, it reads every account's quota (masked labels, no emails or paths), and names and
+  switches the sessions it started. Give keys only to people you would show your usage to; a key
+  removed from the proxy keeps reading for up to a week.
+- **Local.** Everything stays in `~/.cache/cliproxy-kit/` (mode 0600) of the proxy's user, client
+  keys only as hashes. Besides the requests it routes, the plugin calls only the providers' own
+  usage and profile endpoints, with the accounts' existing tokens, and DNS for device names.
+- **Transcripts.** It reads Claude Code's transcripts only on its own machine, as its own user.
 - **Behind keys.** The page carries no data: it reads everything through management routes, behind
-  the management key. The band's network route needs a `band_tokens` key and carries no emails or
-  paths.
+  the management key. The band's and the Codex hooks' routes need a client key the proxy accepted.
 
 ## Develop
 

@@ -128,18 +128,60 @@ api_key_model_discovery = true   # Codex 0.156 起需要
 
 </details>
 
-### 其他機器與 Docker
+**4. 在 Codex 裡顯示額度**（選用）。Codex 沒有可以自訂的狀態列，經過 proxy 時底部也不會顯示用量上限；加上兩個 hook 就會印出一行：session 開始時顯示帳號和用量，之後只在換了帳號、帳號用量超過 80% 或用完時才提醒。
 
-其他機器上的 Claude Code 可以透過加密的位址使用同一個 proxy，例如[Tailscale Serve](https://tailscale.com/kb/1312/serve) 提供的位址。先把那台要用的 key 加進 `band_tokens`，再到那台執行同一行指令，加上 proxy 的位址：
+<details>
+<summary>加進 <code>~/.codex/config.toml</code>，key 和位址與上面相同</summary>
+
+```toml
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = '''id=$(sed -n 's/.*[{,]"session_id":"\([^"]*\)".*/\1/p'); printf 'Authorization: Bearer %s\nX-Codex-Session: %s\n' '<proxy 的一把 client key>' "$id" | curl -fs -m 3 -H @- "http://127.0.0.1:8317/v0/resource/plugins/quota-pilot/codex?event=SessionStart"'''
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = '''id=$(sed -n 's/.*[{,]"session_id":"\([^"]*\)".*/\1/p'); printf 'Authorization: Bearer %s\nX-Codex-Session: %s\n' '<proxy 的一把 client key>' "$id" | curl -fs -m 3 -H @- "http://127.0.0.1:8317/v0/resource/plugins/quota-pilot/codex?event=Stop"'''
+```
+
+只需要 `curl`。Codex 第一次會請你確認信任這兩個 hook。每一行都以提示顯示，不會進到模型的 context。
+
+</details>
+
+### proxy 跑在哪裡
+
+每個部分都只連 proxy 的位址，所以 proxy 可以和 Claude Code 在同一台、跑在容器裡，或是在完全不跑 client 的伺服器上。
+
+| 情況 | 要改什麼 |
+| --- | --- |
+| **同一台機器** | 不用改：照上面步驟 1 到 4。 |
+| **Docker** | 把 proxy 使用者的 `~/.cache/cliproxy-kit/` 放在 volume 上（大多數映像檔是 `/root/.cache/cliproxy-kit`），否則重新啟動就會遺失記錄和狀態。 |
+| **另一台機器** | 透過加密的位址連到 proxy，例如 [Tailscale Serve](https://tailscale.com/kb/1312/serve) 提供的位址，再把這個位址交給連接指令和 Codex。 |
 
 ```sh
 bash <(curl -fsSL https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/scripts/connect-claude-code.sh) https://proxy.example.ts.net:8317
 ```
 
-- 那台的 session，以及那台經過 proxy 的 Codex session，都會在用量頁標示為其他裝置。
-- 切換 session 的帳號，只在執行 proxy 的那台機器上提供。
-- proxy 跑在 Docker 裡時也一樣：額度列用的 key 要加進 `band_tokens`。沒有經過反向代理、直接連到容器的請求，不會標示為其他裝置。
-- 其他機器上的 `http://` 位址會被腳本拒絕；網路本身已經加密時（例如 VPN），可以設定 `ALLOW_HTTP=1`。
+- **裝置。** 前面有 Tailscale Serve 這類反向代理時，proxy 才知道請求從哪裡來：其他裝置的 session 會在用量頁標上裝置名稱（MagicDNS），查不到名稱時標成「其他裝置」。直接連到 port 的 client 無法區分。
+- **名稱。** proxy 只有和 Claude Code 在同一台、用同一個使用者執行時，才會讀它的對話記錄。其他情況由額度列替每個 session 命名；沒裝額度列時，session 會沿用第一個請求當標題。
+- **純 http。** 其他機器上的 `http://` 位址會被腳本拒絕；網路本身已經加密時（例如 VPN），可以設定 `ALLOW_HTTP=1`。
+
+### 有沒有裝額度列
+
+quota-pilot 單獨就能運作；額度列補上只有 Claude Code 裡才能顯示或做到的事。
+
+| | 只有 quota-pilot | 加上額度列 |
+| --- | :---: | :---: |
+| 每個 session 分到帳號，並保留 prompt 快取 | ✅ | ✅ |
+| 用量頁：帳號、專案、session | ✅ | ✅ |
+| session 標題 | 第一個請求¹ | 目前的標題，任何裝置都是 |
+| 同一個 repo 跨裝置算成一個專案 | 依資料夾 | ✅ |
+| 輸入框上方的帳號、額度、context 和快取 | | ✅ |
+| 手動切換帳號或供應商 | | ✅ |
+| 快取過期前的 `compact` 和 `handoff` | | ✅ |
+
+¹ proxy 和 Claude Code 在同一台、用同一個使用者執行時，會是目前的標題，包含你改過的名稱。
 
 ## 使用
 
@@ -167,7 +209,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/s
 ### 值得知道
 
 - **額度提前重新計算時**（例如變更方案），從那一刻重新計算；之前的用量仍在近 7、30 天的檢視裡。
-- **歷史資料：** 安裝 quota-pilot 之前的日子沒有額度讀數。在 proxy 那台執行一次 `python3 scripts/usage-backfill.py`，可以從 Claude Code 的對話記錄補回這些日子的 token 數。
 - **Fast 模式：** Codex 的 Fast（`service_tier = "fast"`）以 2.5 倍速度消耗方案額度，也照這個比例計算。Claude Code 的 `/fast` 計入用量點數，不計入方案額度，所以不算進帳號的額度；經過 proxy 時，要設定 `CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1`，Claude Code 才會提供 `/fast`。
 - **多個 Codex 帳號**會像 Claude 帳號一樣分配 session；改用另一個供應商只適用於 Claude Code 的 session。
 
@@ -182,12 +223,22 @@ bash <(curl -fsSL https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/s
 | `fallback_map` | 無 | 各供應商改用的模型，寫成 `供應商: 供應商:模型`，例如 `claude: codex:gpt-6.1-sol`。 |
 | `idle_poll_minutes` | `10` | 多久讀一次閒置帳號的額度。 |
 | `context_lengths` | 內建表 | 各模型的 context 大小，用來判斷對話放不放得進另一個模型。 |
-| `band_tokens` | 無 | 允許其他機器上的額度列讀取額度的 client key。 |
+
+## 它改了什麼
+
+| 位置 | 內容 | 還原方式 |
+| --- | --- | --- |
+| CLIProxyAPI 的 `config.yaml` | 開啟 `plugins:`、加入商店，以及 quota-pilot 的設定 | 刪掉這些設定。 |
+| proxy 使用者的 `~/.cache/cliproxy-kit/` | 狀態、請求記錄，以及每個 session 的資料（權限 0600；client key 只存雜湊） | 刪掉這個資料夾。 |
+| 每台跑 Claude Code 的 `~/.claude/settings.json` | 步驟 2 的 `env` 設定；原本的檔案保留為 `settings.json.bak-<時間>` | 把備份放回去。 |
+| Claude Code 的插件 | `cliproxy-kit` marketplace 和 `quota-band` | `claude plugin uninstall quota-band@cliproxy-kit` |
+| 額度列那台的 `~/.cache/cliproxy-kit/handoff/` | `handoff` 寫的交接筆記 | 刪掉這個資料夾。 |
+| `~/.codex/config.toml`（選用） | 步驟 3 的 model provider 和步驟 4 的 hook | 刪掉這些設定。 |
 
 ## 更新與移除
 
 - **更新：** 面板的插件商店會提供 quota-pilot 的新版本；額度列用 `claude plugin update quota-band@cliproxy-kit` 更新。
-- **移除：** 在面板的**插件**頁面刪除 Quota Pilot，執行 `claude plugin uninstall quota-band@cliproxy-kit`，再把 `~/.claude/settings.json.bak-<時間>` 放回去（或刪掉上面那幾個 `env` 設定）。記錄和狀態放在 `~/.cache/cliproxy-kit/`。
+- **移除：** 在面板的**插件**頁面刪除 Quota Pilot，其餘照上表還原。
 
 ## 疑難排解
 
@@ -195,17 +246,18 @@ bash <(curl -fsSL https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/s
 | --- | --- |
 | 從商店安裝失敗 | 面板只等 30 秒，從 GitHub 下載 2 MB 太慢就會失敗：改用手動安裝（步驟 1）。 |
 | 插件底下沒有 quota-pilot | 重新整理面板，並確認 `plugins.enabled: true`。 |
-| 額度列說 proxy 拒絕了這把 key | 把 Claude Code 用的 key 加進 `band_tokens`。 |
+| 額度列說這把 key 送出請求後才有額度資料 | 送出一個 prompt：proxy 最近一週還沒接受過這把 key 的請求。 |
 | 額度列說額度資料太舊 | proxy 或裡面的插件停了：重新啟動 CLIProxyAPI。 |
 | 用量頁看不到 Codex 的 session | Codex 還沒經過 proxy（步驟 3）。 |
+| Codex 說 hook 以代碼 7 或 22 結束 | hook 的位址沒有 proxy 回應（7），或那個 proxy 上沒有 quota-pilot（22）。 |
 | Codex 帳號沒有 5 小時視窗 | 它的方案本來就沒有；頁面和額度列都會標明。 |
 
 ## 隱私與安全
 
-- **單一擁有者。** proxy 的每一把 client key 都視為可信：client 可以用請求替 session 命名，列在 `band_tokens` 的 key 能讀到所有帳號的額度。只把 key 給你願意讓他看到用量的人。
-- **留在本機。** 所有資料都放在執行 proxy 那台機器的 `~/.cache/cliproxy-kit/`（權限 0600）。除了轉送的請求，插件只會用帳號既有的 token 呼叫供應商自己的用量和帳號資料端點。
-- **對話記錄。** 為了替 session 命名，它會讀那台機器上 Claude Code 的對話記錄，所以 proxy 應該用和 Claude Code 相同的使用者執行。
-- **都在金鑰後面。** 頁面本身不含任何資料，一切都經過 management 路由讀取，需要 management key。額度列走網路時需要 `band_tokens` 裡的 key，而且不含 email 或路徑。
+- **單一擁有者。** proxy 的每一把 client key 都視為可信。proxy 接受過某把 key 的請求後，這把 key 就能讀到所有帳號的額度（遮蔽過的名稱，不含 email 或路徑），也能替它開的 session 命名、切換帳號。只把 key 給你願意讓他看到用量的人；從 proxy 移除的 key 最多還能讀一週。
+- **留在本機。** 所有資料都放在 proxy 使用者的 `~/.cache/cliproxy-kit/`（權限 0600），client key 只存雜湊。除了轉送的請求，插件只會用帳號既有的 token 呼叫供應商自己的用量和帳號資料端點，以及查詢裝置名稱的 DNS。
+- **對話記錄。** 它只讀自己那台機器上、同一個使用者的 Claude Code 對話記錄。
+- **都在金鑰後面。** 頁面本身不含任何資料，一切都經過 management 路由讀取，需要 management key。額度列和 Codex hook 的路由需要 proxy 接受過的 client key。
 
 ## 開發
 

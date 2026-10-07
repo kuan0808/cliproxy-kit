@@ -2,7 +2,6 @@ package core
 
 import (
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -13,7 +12,7 @@ import (
 // SchemaVersion is the snapshot and command format version.
 const SchemaVersion = 1
 
-// Command is a request the band writes into the command directory.
+// Command is a switch, route or back the band sends with a read of its snapshot.
 type Command struct {
 	CommandID string    `json:"command_id"`
 	Session   string    `json:"session"` // Claude Code's own session id
@@ -23,6 +22,8 @@ type Command struct {
 	AuthID    string    `json:"auth_id,omitempty"`
 	Provider  string    `json:"provider,omitempty"`
 	Model     string    `json:"model,omitempty"`
+	// Client is who sent it, as the proxy knows its key (see State.Client); never the band's say.
+	Client string `json:"-"`
 }
 
 // Ack is the outcome of one command, published in the snapshot.
@@ -48,7 +49,11 @@ func (s *State) Apply(cmd Command) Ack {
 		ack.Reason = "proxy restarted since the command was written"
 	case now.Sub(cmd.CreatedAt) > 10*time.Minute:
 		ack.Reason = "command too old"
-	case s.sessions[root] != nil && cmd.CreatedAt.Before(s.sessions[root].LastCommandAt):
+	case s.sessions[root] == nil:
+		ack.Reason = "the proxy has not seen this session"
+	case !s.sessions[root].Owned || s.sessions[root].Client != cmd.Client:
+		ack.Reason = "the session runs on another client key"
+	case cmd.CreatedAt.Before(s.sessions[root].LastCommandAt):
 		ack.Reason = "superseded by a newer command"
 	default:
 		sess := s.sessionLocked(root, now)
@@ -100,13 +105,6 @@ func (s *State) applyLocked(cmd Command, root string, sess *session, now time.Ti
 // switchedReason marks a binding the user chose.
 const switchedReason = "switched by user"
 
-// RejectUnreadable records a command file that never became valid JSON.
-func (s *State) RejectUnreadable(name string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.addAckLocked(Ack{CommandID: name, Status: "rejected", Reason: "unreadable command file", At: s.now()})
-}
-
 func (s *State) addAckLocked(a Ack) {
 	s.acks = append(s.acks, a)
 	if len(s.acks) > maxAcks {
@@ -127,6 +125,9 @@ type Snapshot struct {
 	Acks          []Ack                    `json:"acks"`
 	Contexts      map[string]int           `json:"context_lengths"`
 	LastError     string                   `json:"last_error,omitempty"`
+	// Expected is, for a band or a Codex hook, the account a new session of each provider gets for
+	// the model it names ("" for none), as a pick ranks them.
+	Expected map[string]string `json:"expected,omitempty"`
 }
 
 // SnapshotConfig exposes the settings the band and panel display.
@@ -505,14 +506,29 @@ func (s *State) contextsLocked() map[string]int {
 	return out
 }
 
-// BuildForBand is the snapshot for a band on another device, read over the network with a
-// client key listed in band_tokens. Credential ids are file names that contain the account's
-// email, so every reference becomes an opaque id, and internal errors (which may hold paths)
-// are left out. Only the asking band's own session is in it, and no acknowledgements: the remote
-// band only displays, it never sends commands.
-func (s *State) BuildForBand(session string) Snapshot {
-	snap := s.Build()
-	snap.LastError, snap.Acks = "", []Ack{}
+// BuildForBand is the snapshot for a band, read over the network with a client key the proxy
+// accepted, and for the session it names when that key may speak of it (see MayName). Credential ids are file names that contain the account's email, so every reference
+// becomes an opaque id, and internal errors (which may hold paths) are left out. Only the asking band's own session is in it, with the acknowledgements of its own
+// commands (see FromOpaque for the ids they name).
+func (s *State) BuildForBand(session, model, client string) Snapshot {
+	s.mu.Lock()
+	snap := s.buildLocked()
+	snap.Expected = s.expectedLocked(model, s.now())
+	if !s.mayNameLocked(session, client) {
+		session = "" // another key's session: the band sees the accounts, not it
+	}
+	s.mu.Unlock()
+	for p, id := range snap.Expected {
+		snap.Expected[p] = opaqueID(id)
+	}
+	snap.LastError = ""
+	acks := []Ack{}
+	for _, a := range snap.Acks {
+		if a.Session == session {
+			acks = append(acks, a)
+		}
+	}
+	snap.Acks = acks
 	own := snap.Sessions[session]
 	snap.Sessions = map[string]*SessionView{}
 	if own != nil {
@@ -537,6 +553,35 @@ func (s *State) BuildForBand(session string) Snapshot {
 	return snap
 }
 
+// expectedLocked is the account a new session of each provider gets for model: the first a pick
+// ranks among those the host offers, taken to be every enabled one. The host also leaves out one
+// that does not serve the model or cools down on it, which the plugin does not see: an estimate.
+func (s *State) expectedLocked(model string, now time.Time) map[string]string {
+	byProvider := map[string][]Candidate{}
+	for _, c := range s.creds {
+		if Supported(c.Provider) && !c.Disabled {
+			byProvider[c.Provider] = append(byProvider[c.Provider], Candidate{ID: c.ID, Provider: c.Provider})
+		}
+	}
+	out := map[string]string{}
+	for provider, cands := range byProvider {
+		out[provider] = s.rankLocked(cands, model, now, true)[0].ID
+	}
+	return out
+}
+
+// FromOpaque is the account a band names by its opaque id; "" for none the proxy holds.
+func (s *State) FromOpaque(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for real := range s.creds {
+		if opaqueID(real) == id {
+			return real
+		}
+	}
+	return ""
+}
+
 func opaqueID(id string) string {
 	if id == "" {
 		return ""
@@ -545,17 +590,70 @@ func opaqueID(id string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// BandTokenAllowed reports whether token is one of the configured band tokens.
-func (s *State) BandTokenAllowed(token string) bool {
+// clientTTL is how long a client key the proxy accepted keeps reading the quota: one removed from
+// the proxy stops within it.
+const clientTTL = 7 * 24 * time.Hour
+
+// noteClientLocked remembers the client of a request the proxy accepted, sent at at: its key's
+// hash, or "" for a request with no key, which only a proxy without api-keys lets in. A keyed
+// request means the proxy asks for keys now, which ends the keyless entry; a keyless one sent
+// before it, answered late, does not bring it back. The time moves on at most hourly, so a busy
+// client does not rewrite the state with every request.
+func (s *State) noteClientLocked(key string, at, now time.Time) {
+	id := clientID(key)
+	switch {
+	case id != "":
+		if at.After(s.keyedAt) {
+			s.keyedAt = at
+			s.dirty = true
+		}
+		if _, open := s.clients[""]; open {
+			delete(s.clients, "")
+			s.dirty = true
+		}
+	case !at.After(s.keyedAt):
+		return
+	}
+	if seen, ok := s.clients[id]; !ok || now.Sub(seen) > time.Hour {
+		s.clients[id] = now
+		s.dirty = true
+	}
+}
+
+// Client is who key is to the proxy, when it accepted that key for a request within clientTTL:
+// the band on any device, and a Codex hook, read the quota with the key their client already
+// sends. While the proxy asks for no api-keys every key is the keyless client "", as the requests
+// it serves are, a key it accepted before included.
+func (s *State) Client(key string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if token == "" {
-		return false
-	}
-	for _, t := range s.cfg.BandTokens {
-		if subtle.ConstantTimeCompare([]byte(t), []byte(token)) == 1 {
-			return true
+	now := s.now()
+	for _, id := range []string{"", clientID(key)} {
+		if seen, ok := s.clients[id]; ok && now.Sub(seen) <= clientTTL {
+			return id, true
 		}
 	}
-	return false
+	return "", false
+}
+
+// MayName tells whether client may speak of a session (name it, be told of it): the key that
+// started it may, and anyone may of one the proxy has not seen, or one started with no key.
+func (s *State) MayName(session, client string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mayNameLocked(session, client)
+}
+
+func (s *State) mayNameLocked(session, client string) bool {
+	sess := s.sessions[rootFromRaw(session)]
+	return sess == nil || !sess.Owned || sess.Client == client
+}
+
+// clientID is a client key as the state keeps it: its hash, never the key; "" for none.
+func clientID(key string) string {
+	if key == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
 }

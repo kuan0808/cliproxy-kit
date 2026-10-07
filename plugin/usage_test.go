@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"os"
@@ -179,7 +181,7 @@ func TestScopesCountEachAccountsOwnPeriod(t *testing.T) {
 	lines := []core.LogEntry{
 		{T: 150, Account: "d"}, {T: 150, Account: "k"}, // k's week has not begun at 150
 		{T: 250, Account: "k"}, {T: 160, Account: "cx"}, {T: 90, Account: "d"},
-		{T: 300, Provider: "claude", History: true}, {T: 300, Account: "chatgpt:x", Provider: "codex"},
+		{T: 300, Account: "claude-gone", Provider: "claude"}, {T: 300, Account: "chatgpt:x", Provider: "codex"},
 	}
 	count := func(r *reading, scope string) int {
 		in, _, ok := r.covers(scope)
@@ -216,6 +218,58 @@ func TestRowsNameEachProvidersPartForThePanel(t *testing.T) {
 		Sessions: []usageSession{{UsedBy: map[string]float64{"claude": 0.2}}}})
 	if n := strings.Count(string(body), `"used_by":`); n != 2 {
 		t.Fatalf("used_by appears %d times in %s", n, body)
+	}
+}
+
+// A repository the band names by its remote is one project on every device: the folder here shows
+// it, and a session no band named in one of its folders, as a Codex session, joins it. Another
+// repository of the same name stays apart.
+func TestARepositoryIsOneProjectOnEveryDevice(t *testing.T) {
+	refs := mergeProjects(map[string]sessionInfo{
+		"mac":    {Project: "web-app", Path: "/Users/me/dev/web-app", Repo: true, Repository: "github.com/me/web-app"},
+		"laptop": {Project: "webapp", Path: "/home/me/src/webapp", Repo: true, Repository: "github.com/me/web-app", Remote: true},
+		"codex":  {Project: "webapp", Path: "/home/me/src/webapp", Repo: true, Remote: true},
+		"fork":   {Project: "web-app", Path: "/Users/me/forks/web-app", Repo: true, Repository: "github.com/you/web-app"},
+	}, "/Users/me")
+	if refs["mac"] != refs["laptop"] || refs["mac"] != refs["codex"] || refs["mac"].Path != "/Users/me/dev/web-app" {
+		t.Fatalf("one repository = %+v", refs)
+	}
+	if refs["fork"].Name == refs["mac"].Name {
+		t.Fatalf("another repository of the name = %+v", refs)
+	}
+	// Two devices with a /home/me/app of their own: a session no band named joins its own device's.
+	refs = mergeProjects(map[string]sessionInfo{
+		"a":  {Project: "app", Path: "/home/me/app", Repo: true, Repository: "github.com/me/app", Remote: true, Device: "laptop"},
+		"b":  {Project: "app", Path: "/home/me/app", Repo: true, Repository: "github.com/me/other-app", Remote: true, Device: "desk"},
+		"cx": {Project: "app", Path: "/home/me/app", Repo: true, Remote: true, Device: "desk"},
+	}, "/Users/me")
+	if refs["cx"] != refs["b"] || refs["a"].Name == refs["b"].Name {
+		t.Fatalf("one path on two devices = %+v", refs)
+	}
+	// Devices DNS does not name are told apart by their addresses.
+	refs = mergeProjects(map[string]sessionInfo{
+		"a":  {Project: "app", Path: "/home/me/app", Repo: true, Repository: "github.com/me/app", Remote: true, addr: "100.64.0.1"},
+		"b":  {Project: "app", Path: "/home/me/app", Repo: true, Repository: "github.com/me/other-app", Remote: true, addr: "100.64.0.2"},
+		"cx": {Project: "app", Path: "/home/me/app", Repo: true, Remote: true, addr: "100.64.0.2"},
+	}, "/Users/me")
+	if refs["cx"] != refs["b"] {
+		t.Fatalf("two unnamed devices = %+v", refs)
+	}
+	// Repositories with no remote known stay their own device's, told apart by its name.
+	refs = mergeProjects(map[string]sessionInfo{
+		"a": {Project: "app", Path: "/home/me/app", Repo: true, Remote: true, Device: "laptop", addr: "100.64.0.1"},
+		"b": {Project: "app", Path: "/home/me/app", Repo: true, Remote: true, Device: "desk", addr: "100.64.0.2"},
+	}, "/Users/me")
+	if refs["a"].Name != "app · laptop" || refs["b"].Name != "app · desk" {
+		t.Fatalf("two repositories with no remote = %+v", refs)
+	}
+	// Two devices DNS names alike are told apart by their addresses.
+	refs = mergeProjects(map[string]sessionInfo{
+		"a": {Project: "app", Path: "/home/me/app", Repo: true, Remote: true, Device: "laptop", addr: "100.64.0.1"},
+		"b": {Project: "app", Path: "/home/me/app", Repo: true, Remote: true, Device: "laptop", addr: "100.64.0.2"},
+	}, "/Users/me")
+	if refs["a"].Name != "app · 100.64.0.1" || refs["b"].Name != "app · 100.64.0.2" {
+		t.Fatalf("two devices of one name = %+v", refs)
 	}
 }
 
@@ -301,8 +355,9 @@ func TestSessionTitlesFollowTheirTranscript(t *testing.T) {
 		}
 	}
 	write("First")
+	resetNamed()
 	metaMu.Lock()
-	indexedAt = time.Time{}
+	transcripts, readStamps, indexedAt = map[string]string{}, map[string]fileStamp{}, time.Time{}
 	metaMu.Unlock()
 	if got := sessionMeta("title-test").Title; got != "First" {
 		t.Fatalf("title = %q", got)
@@ -310,6 +365,11 @@ func TestSessionTitlesFollowTheirTranscript(t *testing.T) {
 	write("Second title")
 	if got := sessionMeta("title-test").Title; got != "Second title" {
 		t.Fatalf("after the transcript changed, title = %q", got)
+	}
+	// Claude Code deletes old transcripts; what this one said stays as long as the log.
+	os.Remove(path)
+	if got := sessionMeta("title-test").Title; got != "Second title" {
+		t.Fatalf("after the transcript was deleted, title = %q", got)
 	}
 }
 
@@ -437,12 +497,44 @@ func TestATierIsReadAsAsked(t *testing.T) {
 func TestARequestFromAnotherDeviceIsToldApart(t *testing.T) {
 	via := func(values ...string) http.Header { return http.Header{"X-Forwarded-For": values} }
 	switch {
-	case !fromAnotherDevice(via("203.0.113.5")):
+	case otherDevice(via("203.0.113.5")) != "203.0.113.5":
 		t.Fatal("another device")
-	case fromAnotherDevice(via("203.0.113.5, 127.0.0.1")), fromAnotherDevice(via("::1")), fromAnotherDevice(http.Header{}):
+	case otherDevice(via("203.0.113.5, 127.0.0.1")) != "", otherDevice(via("::1")) != "", otherDevice(http.Header{}) != "":
 		t.Fatal("this machine")
-	case !fromAnotherDevice(via("127.0.0.1", "203.0.113.5")):
+	case otherDevice(via("127.0.0.1", "203.0.113.5")) == "":
 		t.Fatal("the last header counts")
+	}
+}
+
+// A session from another device is named after that device, as DNS names its address (MagicDNS
+// on a tailnet), looked up apart from the request: a session that made one request gets the name
+// once the lookup is done.
+func TestASessionIsNamedAfterItsDevice(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetNamed()
+	devices.Lock()
+	devices.names = map[string]deviceLookup{}
+	devices.Unlock()
+	saved := lookupAddr
+	lookupAddr = func(_ context.Context, addr string) ([]string, error) {
+		if addr == "100.64.0.7" {
+			return []string{"laptop.tail1234.ts.net."}, nil
+		}
+		return nil, errors.New("no name")
+	}
+	defer func() { lookupAddr = saved }()
+	id := "codex:019f4a1d-0000-7000-8000-0000000000e1"
+	body := mustJSON(t, map[string]any{"input": []any{
+		map[string]any{"role": "user", "content": "<environment_context><cwd>/srv/app</cwd></environment_context>"},
+		map[string]any{"role": "user", "content": "Fix the tests"},
+	}})
+	from := http.Header{"X-Forwarded-For": {"100.64.0.7"}}
+	noteRequestSession(id, "openai-response", from, body, time.Now())
+	for deadline := time.Now().Add(time.Second); deviceName("100.64.0.7") == "" && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if info := sessionMeta(id); !info.Remote || info.Device != "laptop" {
+		t.Fatalf("after the lookup = %+v", info)
 	}
 }
 

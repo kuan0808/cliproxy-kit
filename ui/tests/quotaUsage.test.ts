@@ -15,6 +15,8 @@ import {
   modelName,
   projectSources,
   sessionSources,
+  sourceTag,
+  sourceWhy,
   splitAutomated,
 } from '@/features/quota/usageFormat';
 import {
@@ -1163,6 +1165,24 @@ describe('session sources', () => {
     expect(sessionSources('', false)).toEqual([]);
   });
 
+  test('a device DNS names is named on the tag and in the detail; sessions of two devices count apart', () => {
+    const laptop = sessionSources('', false, true, 'laptop');
+    expect(laptop).toEqual([{ kind: 'device', key: 'why_remote_named', raw: 'laptop' }]);
+    const t = i18n.getFixedT('en');
+    expect(sourceTag(t, laptop[0]!)).toBe('laptop');
+    expect(sourceWhy(t, laptop[0]!)).toBe('It ran on laptop: its requests reached the proxy from there.');
+    expect(sourceTag(t, sessionSources('', false, true)[0]!)).toBe('Other device');
+    const on = (id: string, device: string) => ({ id, device });
+    const byDevice = (x: { device: string }) => sessionSources('', false, true, x.device);
+    expect(projectSources([on('a', 'laptop'), on('b', 'desk'), on('c', 'laptop')], byDevice)).toMatchObject({
+      shared: false,
+      sources: [
+        { source: [{ raw: 'laptop' }], count: 2 },
+        { source: [{ raw: 'desk' }], count: 1 },
+      ],
+    });
+  });
+
   test("programs' runs gather only beside sessions a person ran, and only two or more", () => {
     const tool = Array.from({ length: 3 }, (_, i) => run(`r${i}`, 'sdk-py'));
     expect(splitAutomated([run('a'), ...tool], sourceOf)).toEqual({ listed: [run('a')], automated: tool });
@@ -1208,7 +1228,6 @@ describe('session detail', () => {
         { id: 'claude-d.json', label: 'd•••', provider: 'claude', weight: 60 },
         { id: 'codex-k.json', label: 'k•••', provider: 'codex', weight: 40 },
       ],
-      history: false,
     })!;
     const markup = renderToStaticMarkup(
       createElement(SessionDetailView, {

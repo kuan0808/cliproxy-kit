@@ -11,7 +11,10 @@ import {
   parseModels,
   tileWidths,
   tilesSpan,
+  kindLabel,
+  likelyAccount,
   nextUp,
+  otherAccounts,
   offerCacheActions,
   parseSnap,
   pickAlert,
@@ -25,7 +28,7 @@ import {
   resetText,
   sessionAccount,
   settlePending,
-  snapIsLive,
+  repoOf,
   nextTurnMoves,
   weeklyFor,
   currentModel,
@@ -77,7 +80,7 @@ const SNAP: Snap = {
 const SESSION: SessionInfo = {
   id: 's1', model: 'opus[1m]', effort: 'high', cwd: '/Users/me/Documents/developer/jesse',
   contextTokens: 420_000, contextWindow: 1_000_000, rateLimits: [],
-  proxied: true, remote: false, home: '/Users/me',
+  proxied: true, home: '/Users/me',
 }
 
 const WARM: CacheInfo = { lastAt: NOW - 8 * 60_000, prompt: 412_000, read: 400_000, creation: 12_000, input: 10, ttlMs: H, lastAnswer: '' }
@@ -143,10 +146,24 @@ describe('accounts', () => {
     expect(resetText('')).toBe('no reset pending')
   })
 
-  test('a second credential of one account adds no quota to the pool', async () => {
+  test('a second credential of one account adds no quota to the pool, and is not another account', async () => {
     const [d] = SNAP.providers.claude!.credentials
     const view = { health: 'healthy', credentials: [d!, { ...d!, id: 'claude-d2', same_as: 'claude-d' }] }
     expect(pooled(view)).toMatchObject({ parts: [Math.round(d!.windows[1]!.remaining * 100)] })
+    // Neither from the account nor from its second credential is the other one offered.
+    expect(nextUp(view, 'claude-d', NOW)).toBe('single account')
+    expect(nextUp(view, 'claude-d2', NOW)).toBe('single account')
+    expect(switchTargets(view, 'claude-d')).toEqual([])
+    const both = { ...SNAP.providers.claude!, credentials: [...SNAP.providers.claude!.credentials, { ...d!, id: 'claude-d2', same_as: 'claude-d' }] }
+    expect(otherAccounts(both, 'claude-d2').map(c => c.id)).toEqual(['claude-k'])
+  })
+
+  test('the account a new session gets is the one the plugin ranks first for its model', async () => {
+    expect(likelyAccount({ ...SNAP, expected: { claude: 'claude-k' } }, 'claude')?.cred.id).toBe('claude-k')
+    // From a plugin that says none: the first in its routing order.
+    expect(likelyAccount(SNAP, 'claude')?.cred.id).toBe('claude-d')
+    expect(likelyAccount(SNAP, 'codex')).toBe(null)
+    expect([kindLabel('5h'), kindLabel('7d'), kindLabel('7d_fable')]).toEqual(['5-hour', 'Weekly', 'Weekly Fable'])
   })
 
   test('missing readings are unknown, not empty', async () => {
@@ -264,19 +281,24 @@ describe('accounts', () => {
     expect(parseSnap('{not json')).toBe(null)
   })
 
-  test('a snapshot file is the running proxy only while it keeps it fresh', async () => {
-    // Rewritten at least once a minute: two minutes old is a proxy that stopped.
-    expect(snapIsLive(SNAP, NOW)).toBe(true)
-    expect(snapIsLive({ ...SNAP, generated_at: iso(-110_000) }, NOW)).toBe(true)
-    expect(snapIsLive({ ...SNAP, generated_at: iso(-3 * 60_000) }, NOW)).toBe(false)
-    expect(snapIsLive({ ...SNAP, generated_at: 'not a time' }, NOW)).toBe(false)
+  test('a repository is named by its git remote, the same on every device', async () => {
+    expect(repoOf('git@github.com:kuan0808/cliproxy-kit.git')).toBe('github.com/kuan0808/cliproxy-kit')
+    expect(repoOf('https://x-access-token:secret@GitHub.com/kuan0808/cliproxy-kit')).toBe('github.com/kuan0808/cliproxy-kit')
+    expect(repoOf('ssh://git@git.example.com:2222/team/app.git')).toBe('git.example.com/team/app')
+    expect(repoOf('/srv/git/app.git')).toBe('')
+    // A path of this machine names no repository the same everywhere.
+    for (const local of ['../origin.git', 'file:///srv/git/app.git', 'C:\\repos\\app.git', 'C:/repos/app.git']) expect(repoOf(local)).toBe('')
+    expect(repoOf('work:team/app.git')).toBe('work/team/app') // an ssh alias
+    expect(repoOf('git@x:team/app.git')).toBe('x/team/app')
+    expect(repoOf('git@host:./team/app.git')).toBe('host/team/app')
+    expect(repoOf(null)).toBe('')
   })
 
   test("the proxy's /band answer, or why there is none", async () => {
     expect(readBand(200, JSON.stringify(SNAP)).snap?.sequence).toBe(7)
     expect(readBand(401, '{"error":"band token required"}').error).toEqual({ kind: 'status', status: 401 })
     expect(readBand(200, '<html>').error).toEqual({ kind: 'body' })
-    expect(bandErrorText({ kind: 'status', status: 401 })).toBe("the proxy refused this key for quota data; list it in quota-pilot's band_tokens setting")
+    expect(bandErrorText({ kind: 'status', status: 401 })).toBe('quota data comes once this key has sent a request through the proxy')
     expect(bandErrorText({ kind: 'status', status: 404 })).toMatch(/no quota-pilot band route \(404\)/)
     expect(bandErrorText({ kind: 'status', status: 502 })).toBe('the proxy answered HTTP 502 for quota data')
     expect(bandErrorText({ kind: 'body' })).toMatch(/not in a form this band reads/)

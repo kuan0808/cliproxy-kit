@@ -1,5 +1,5 @@
 // quota-band: the cards above the Claude Code prompt. Session, context and cache come from
-// Claude Code itself; accounts, quota and routing come from the quota-pilot snapshot file.
+// Claude Code itself; accounts, quota and routing come from the proxy's quota-pilot snapshot.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
@@ -27,19 +27,20 @@ import {
   tileWidths,
   tilesSpan,
   likelyAccount,
+  kindLabel,
   nextUp,
   offerCacheActions,
   parseModels,
-  parseSnap,
   pickAlert,
   pooled,
   readBand,
+  repoOf,
   resetText,
   sessionAccount,
   settlePending,
   sev,
-  snapIsLive,
   switchTargets,
+  otherAccounts,
   untilIso,
   weeklyFor,
   windowOf,
@@ -51,9 +52,9 @@ const PANE = 'quota'
 
 const EMPTY_SESSION: SessionInfo = {
   id: '', model: '', effort: '', cwd: '',
-  contextTokens: null, contextWindow: 0, rateLimits: [], proxied: false, remote: false, home: '',
+  contextTokens: null, contextWindow: 0, rateLimits: [], proxied: false, home: '',
 }
-const EMPTY_ABOUT: SessionAbout = { id: '', transcript: '', eventTitle: '', fileTitle: '', fileTitleAt: 0, request: '', start: '', root: '' }
+const EMPTY_ABOUT: SessionAbout = { id: '', transcript: '', eventTitle: '', fileTitle: '', fileTitleAt: 0, request: '', start: '', root: '', repo: '' }
 const EMPTY_CACHE: CacheInfo = { lastAt: 0, prompt: 0, read: 0, creation: 0, input: 0, ttlMs: 0, lastAnswer: '' }
 const EMPTY_UI: UiState = {
   switchStep: '', confirm: '', pending: [], notice: '', noticeIsError: false, busy: false,
@@ -84,6 +85,9 @@ const kitPath = (home: string, rest: string) => `${home}/.cache/cliproxy-kit/${r
 let running: Promise<void> | null = null
 let waiting: Promise<void> | null = null
 let waitingFull = false
+// Commands for a proxy read over the network, each sent with the next read of /band (see
+// sendCommand): plugin resources are read-only routes.
+const outbox: object[] = []
 
 function refresh($: $T, full: boolean): Promise<void> {
   if (!running) {
@@ -101,78 +105,76 @@ function refresh($: $T, full: boolean): Promise<void> {
 }
 
 async function refreshOnce($: $T, full: boolean): Promise<void> {
-  const [home, base, ttl, token] = await Promise.all([
+  const [home, base, ttl, authToken, apiKey] = await Promise.all([
     $.env.get('HOME'),
     $.env.get('ANTHROPIC_BASE_URL'),
     $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'),
     $.env.get('ANTHROPIC_AUTH_TOKEN'),
+    $.env.get('ANTHROPIC_API_KEY'),
   ])
   const [id, model, usage, cwd] = await Promise.all([$.session.id(), $.session.model(), $.session.usage(), $.session.cwd()])
   const proxied = Boolean(base)
   const now = await $.clock.now()
-  // Beside a proxy that runs as this user the snapshot is a file; when none reads here (another
-  // machine, a proxy in a container or run as another user) it comes over the network. The file
-  // is the proxy's only while it keeps it fresh: a stopped proxy leaves its last one behind.
-  const localBase = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/.test(base ?? '')
-  const file = home && (!proxied || localBase)
-    ? parseSnap(await $.fs.read(kitPath(home, 'snapshot.json')).catch(() => ''))
-    : null
-  const localSnap = file && (!proxied || snapIsLive(file, now)) ? file : null
-  const remote = proxied && !localSnap
   const prev = await read($, sessA)
   const next: SessionInfo = {
     ...prev,
-    id, model, cwd, proxied, remote, home: home ?? '',
+    id, model, cwd, proxied, home: home ?? '',
     contextTokens: usage.context.tokens ?? null,
     contextWindow: usage.context.window,
     rateLimits: usage.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: r.resetsAt })),
   }
   if (JSON.stringify(next) !== JSON.stringify(prev)) await update($, sessA, () => next)
-  const about = remote ? await learnAbout($, id, now) : EMPTY_ABOUT
   const ttlMs = cacheTtlMs(ttl, proxied)
   if ((await read($, cacheA)).ttlMs !== ttlMs) await update($, cacheA, c => ({ ...c, ttlMs }))
 
-  if (full && proxied && !remote && base && token) {
-    try {
-      const r = await $.http.fetch(`${base.replace(/\/+$/, '')}/v1/models`, { headers: { Authorization: `Bearer ${token}` } })
-      const list = r.ok ? parseModels(r.text) : null
-      if (list) await update($, modelsA, () => list)
-    } catch {
-      // The switch row then offers accounts only.
-    }
-  }
-
-  if (home || remote) {
-    let snap = localSnap
-    let error: BandError | null = null
-    if (remote && base && token) {
+  // Everything comes from the proxy, over the network, with the key Claude Code sends it (none for
+  // a proxy without api-keys): the same wherever the proxy runs (beside it, in a container, on a
+  // server).
+  const token = authToken || apiKey
+  if (base) {
+    const url = base.replace(/\/+$/, '')
+    const auth: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
+    if (full) {
       try {
-        // What the band knows of its session goes in headers, kept out of the proxy's request log.
-        const headers: Record<string, string> = { Authorization: `Bearer ${token}` }
-        const said: [string, string][] = [
-          ['X-Band-Session', id],
-          ['X-Band-Title', about.eventTitle || about.fileTitle || about.request],
-          ['X-Band-Cwd', about.start],
-          ['X-Band-Root', about.root],
-        ]
-        for (const [name, value] of said) if (value) headers[name] = encodeURIComponent(value)
-        const r = await $.http.fetch(`${base.replace(/\/+$/, '')}/v0/resource/plugins/quota-pilot/band`, { headers })
-        ;({ snap, error } = readBand(r.status, r.text))
-      } catch (err) {
-        snap = null
-        error = { kind: 'network', message: err instanceof Error ? err.message : String(err) }
+        const r = await $.http.fetch(`${url}/v1/models`, { headers: auth })
+        const list = r.ok ? parseModels(r.text) : null
+        if (list) await update($, modelsA, () => list)
+      } catch {
+        // The switch row then offers accounts only.
       }
     }
-    // Nothing fresher came: a stopped proxy's last snapshot shows, which the band marks as old,
-    // beside why the proxy gave none.
-    snap ??= file
+    // What only this device knows of the session goes in headers, kept out of the proxy's request
+    // log, with a command waiting to be sent (see sendCommand).
+    const about = await learnAbout($, id, now)
+    const headers: Record<string, string> = { ...auth }
+    const said: [string, string][] = [
+      ['X-Band-Session', id],
+      ['X-Band-Model', model],
+      ['X-Band-Title', about.eventTitle || about.fileTitle || about.request],
+      ['X-Band-Cwd', about.start],
+      ['X-Band-Root', about.root],
+      ['X-Band-Repo', about.repo],
+    ]
+    for (const [name, value] of said) if (value) headers[name] = encodeURIComponent(value)
+    const command = outbox.shift()
+    if (command) headers['X-Band-Command'] = encodeURIComponent(JSON.stringify(command))
+    if (outbox.length) void refresh($, false)
+    let snap: Snap | null = null
+    let error: BandError | null = null
+    try {
+      const r = await $.http.fetch(`${url}/v0/resource/plugins/quota-pilot/band`, { headers })
+      ;({ snap, error } = readBand(r.status, r.text))
+    } catch (err) {
+      error = { kind: 'network', message: err instanceof Error ? err.message : String(err) }
+    }
+    // A read that fails keeps the last snapshot, which the band marks as old, beside the reason.
     const old = await read($, snapA)
-    if (snap?.sequence !== old?.sequence || snap?.boot_id !== old?.boot_id || snap?.generated_at !== old?.generated_at) {
+    if (snap && (snap.sequence !== old?.sequence || snap.boot_id !== old?.boot_id || snap.generated_at !== old?.generated_at)) {
       await update($, snapA, () => snap)
     }
     if (JSON.stringify(error) !== JSON.stringify(await read($, bandErrorA))) await update($, bandErrorA, () => error)
     // Every read, changed or not: a command can also expire, or its proxy be gone.
-    await settle($, snap, now)
+    await settle($, snap ?? old, now)
   }
   await update($, nowA, () => now)
 }
@@ -189,8 +191,10 @@ async function learnAbout($: $T, id: string, now: number): Promise<SessionAbout>
   const known = seen.id === id ? { ...EMPTY_ABOUT, ...seen } : { ...EMPTY_ABOUT, id }
   const learned: Partial<SessionAbout> = {}
   if (!known.start) {
+    const repo = await $.session.repo().catch(() => null)
     learned.start = await $.session.root()
-    learned.root = (await $.session.repo().catch(() => null))?.root ?? ''
+    learned.root = repo?.root ?? ''
+    learned.repo = repoOf(repo?.remote)
   }
   if (known.transcript && !known.eventTitle && now - known.fileTitleAt >= TITLE_EVERY_MS) {
     const read = await readTranscript($, known.transcript, !known.request)
@@ -307,23 +311,23 @@ async function settle($: $T, snap: Snap | null, now: number): Promise<void> {
   })
 }
 
-/** Write a command for quota-pilot and track it until the snapshot acknowledges it. */
+/**
+ * Send a command to quota-pilot with the next read of /band, and track it until the snapshot that
+ * read returns, or a later one, acknowledges it.
+ */
 async function sendCommand($: $T, action: string, fields: Record<string, string>, text: string): Promise<void> {
-  const [sess, snap] = await Promise.all([read($, sessA), read($, snapA)])
-  if (sess.remote) {
-    await setUi($, { notice: 'Account and route changes are made on the proxy host', noticeIsError: true, confirm: '' })
-    return
-  }
-  if (!snap || !sess.home) {
-    await setUi($, { notice: 'The proxy plugin is not running', noticeIsError: true, confirm: '' })
+  const [sess, snap, bandError] = await Promise.all([read($, sessA), read($, snapA), read($, bandErrorA)])
+  if (!snap || bandError) {
+    await setUi($, { notice: bandError ? bandErrorText(bandError) : 'The proxy plugin is not running', noticeIsError: true, confirm: '' })
     return
   }
   const id = crypto.randomUUID()
   const at = await $.clock.now()
   const doc = { command_id: id, session: sess.id, boot_id: snap.boot_id, created_at: new Date(at).toISOString(), action, ...fields }
-  await $.fs.write(kitPath(sess.home, `commands/${id}.json`), JSON.stringify(doc))
   const pending = { id, text, boot: snap.boot_id, at }
   await update($, uiA, (u: UiState): UiState => ({ ...u, confirm: '', switchStep: '', notice: `${text}…`, noticeIsError: false, pending: [...u.pending, pending] }))
+  outbox.push(doc)
+  await refresh($, false)
 }
 
 async function setNotice($: $T, notice: string, isError: boolean): Promise<void> {
@@ -412,9 +416,12 @@ export const register: Register = on => {
     if (!e.agentId && r?.usage) {
       const u = r.usage
       const now = await $.clock.now()
+      // Only a reply that read or wrote the cache says it is warm; one that did neither, as one under
+      // the provider's smallest cached prompt, leaves it unknown.
+      const cached = u.cache_read_input_tokens + u.cache_creation_input_tokens > 0
       await update($, cacheA, c => ({
         ...c,
-        lastAt: now,
+        lastAt: cached ? now : 0,
         prompt: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
         read: u.cache_read_input_tokens,
         creation: u.cache_creation_input_tokens,
@@ -556,7 +563,9 @@ export const register: Register = on => {
     const switchProviders = acct && snap
       ? Object.keys(snap.providers).filter(p => (route ? p !== original : p !== acct.provider) && latestModels(models, p).length)
       : []
-    const canSwitch = Boolean(acct && !sess.remote && (acct.view.credentials.length > 1 || switchProviders.length || acct.session.route))
+    // Commands reach the proxy as the snapshot does: not while it gives none.
+    const canSend = !bandError
+    const canSwitch = Boolean(acct && canSend && (acct.view.credentials.length > 1 || switchProviders.length || acct.session.route))
     const toggleSwitch = () => setUi($, { confirm: ui.confirm === 'switch' ? '' : 'switch', switchStep: '' })
 
     // -- rows above the band: a confirmation, a notice or an alert --
@@ -601,7 +610,7 @@ export const register: Register = on => {
           </Box>,
         ]))
       } else {
-        const others = acct.view.credentials.filter(c => c.id !== acct.session.auth_id)
+        const others = otherAccounts(acct.view, acct.session.auth_id)
         const ready = new Set(switchTargets(acct.view, acct.session.auth_id, acct.session.blocked).map(c => c.id))
         top.push(rowBox('ask', C.askBg, [
           say('? ', C.accent, 'Switch this session to:'),
@@ -633,7 +642,7 @@ export const register: Register = on => {
         const [fbProvider, fbModel] = (fallback ?? ':').split(':')
         top.push(rowBox('alert', alert.level === 'warn' ? C.warnBg : C.infoBg, [
           say(alert.level === 'warn' ? '! ' : '↪ ', alert.level === 'warn' ? C.orange : C.aqua, alert.text),
-          alert.action === 'route' && fbProvider && fbModel && !sess.remote
+          alert.action === 'route' && fbProvider && fbModel && canSend
             ? link('route', `use ${fbModel}`, () => sendCommand($, 'route', { provider: fbProvider, model: fbModel }, `Route to ${fbModel}`))
             : alert.action === 'handoff' && !working
               ? link('alert-handoff', 'hand off', () => setUi($, { confirm: 'handoff' }))
@@ -774,7 +783,7 @@ export const register: Register = on => {
           ? (
             <Box justifyContent="space-between" gap={1}>
               <Text color={C.aqua} wrap="truncate-end">{`→ ${route.model}`}</Text>
-              {sess.remote ? null : link('unroute', 'back', () => sendCommand($, 'unroute', {}, `Back to ${providerTitle(original)}`))}
+              {canSend ? link('unroute', 'back', () => sendCommand($, 'unroute', {}, `Back to ${providerTitle(original)}`)) : null}
             </Box>
           )
           : <Text color={C.dim} wrap="truncate-end">{acctNote}</Text>}
@@ -850,19 +859,21 @@ export const register: Register = on => {
           <Text color={health[1]}>{health[0]}</Text>
         </Box>,
       )
-      // Every kind any account of the provider reports, so the accounts line up row by row.
-      const kinds = [...new Set(view.credentials.flatMap(c => c.windows.map(w => w.kind)))]
+      // Every kind any account of the provider reports, or says it has not, so the accounts line up
+      // row by row.
+      const kinds = [...new Set(view.credentials.flatMap(c => [...c.windows.map(w => w.kind), ...(c.absent ?? [])]))]
         .sort((a, b) => (a === '5h' ? -1 : b === '5h' ? 1 : a === '7d' ? -1 : b === '7d' ? 1 : a.localeCompare(b)))
       for (const c of view.credentials) {
         const mine = acct?.session.auth_id === c.id
         const blocked = c.tier === 3
+        const same = c.same_as ? view.credentials.find(x => x.id === c.same_as)?.label : undefined
         rows.push(
           <Box key={`c-${c.id}`} marginTop={1} width={cols} justifyContent="space-between">
             <Text bold color={mine ? C.accent : C.fg}>{c.label}</Text>
             {mine ? <Text color={C.accent}>this session</Text> : null}
           </Box>,
           <Text key={`s-${c.id}`} color={blocked ? C.orange : C.dim} wrap="truncate-end">
-            {[c.plan, blocked ? blockedOthers({ ...view, credentials: [c] }, '', now).replace(`${c.label} `, '') : '', !blocked && c.sessions ? `${c.sessions} ${c.sessions === 1 ? 'session' : 'sessions'}` : ''].filter(Boolean).join(' · ') || ' '}
+            {[c.plan, same ? `same account as ${same}` : '', blocked ? blockedOthers({ ...view, credentials: [c] }, '', now).replace(`${c.label} `, '') : '', !blocked && c.sessions ? `${c.sessions} ${c.sessions === 1 ? 'session' : 'sessions'}` : ''].filter(Boolean).join(' · ') || ' '}
           </Text>,
         )
         for (const kind of kinds) {
@@ -870,16 +881,16 @@ export const register: Register = on => {
           const left = w ? Math.round(w.remaining * 100) : 0
           const tone = !w || w.stale ? C.dim : sev(left)
           const fill = w ? barFill(1 - w.remaining, barCells) : 0
-          const label = w?.label ?? view.credentials.flatMap(x => x.windows).find(x => x.kind === kind)?.label ?? kind
+          const label = w?.label ?? kindLabel(kind)
           rows.push(
             <Box key={`w-${c.id}-${kind}`} width={cols}>
               <Box width={LABEL}><Text color={C.dim}>{label}</Text></Box>
-              <Box width={PCT} justifyContent="flex-end"><Text bold color={tone}>{w ? `${100 - left}%` : '—'}</Text></Box>
+              <Box width={PCT} justifyContent="flex-end"><Text bold color={tone}>{w ? `${100 - left}%${w.stale ? '~' : ''}` : '—'}</Text></Box>
               <Box width={barCells + 2} paddingX={1} flexShrink={0}>
                 <Text color={tone}>{'━'.repeat(fill)}</Text>
                 <Text color={C.track}>{'━'.repeat(barCells - fill)}</Text>
               </Box>
-              <Text color={C.dim} wrap="truncate-end">{w ? untilIso(w.reset_at, now) : 'not reported'}</Text>
+              <Text color={C.dim} wrap="truncate-end">{w ? untilIso(w.reset_at, now) : missingText(c, kind)}</Text>
             </Box>,
           )
         }
@@ -887,7 +898,9 @@ export const register: Register = on => {
     }
     // What the plugin is set to, in words, as a two-column list.
     const fallbacks = Object.entries(snap.config.fallback_map)
-    const age = Math.max(0, now - Date.parse(snap.generated_at))
+    // When the newest quota reading was taken, not when the snapshot was: a meter's own reading
+    // grown old shows "~".
+    const lastRead = Math.max(0, ...Object.values(snap.providers).flatMap(v => v.credentials.flatMap(c => c.windows.map(w => Date.parse(w.observed_at) || 0))))
     const settings: [string, string][] = [
       ...fallbacks.map(([from, to]): [string, string] => {
         const [provider, model] = to.split(':')
@@ -895,7 +908,7 @@ export const register: Register = on => {
       }),
       ['Switch automatically', snap.config.cross_provider === 'auto' ? 'on' : 'off'],
       ['New sessions avoid', `accounts that have used over ${100 - snap.config.min_five_hour_left_percent}% of their 5-hour quota`],
-      ['Updated', age < 30_000 ? 'just now' : `${fmtDuration(age)} ago`],
+      ['Quota last read', lastRead ? (now - lastRead < 30_000 ? 'just now' : `${fmtDuration(now - lastRead)} ago`) : 'not yet'],
     ]
     const keyWidth = Math.max(...settings.map(([k]) => k.length)) + 2
     rows.push(<Text key="rule" color={C.track}>{'─'.repeat(cols)}</Text>)

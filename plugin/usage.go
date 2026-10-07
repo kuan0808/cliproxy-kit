@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,8 +24,7 @@ import (
 )
 
 // The usage log on disk: one JSON line per request or poll, one file per month, kept for about
-// three months. history.jsonl holds what scripts/usage-backfill.py recovered from Claude Code's
-// transcripts for the time before the log began (tokens only, no account).
+// three months.
 
 const usageMonths = 3
 
@@ -159,30 +159,27 @@ func readEntries(path string) []core.LogEntry {
 	return out
 }
 
-// ---- sessions: project and title from Claude Code's transcripts ----
+// ---- sessions: project and title ----
 
 type sessionInfo struct {
-	Project string // the project's name as shown
-	Path    string // the project's folder: the repository root, or the session's folder outside one
-	Repo    bool   // Path is a repository, so subfolders of it are not projects of their own
-	Title   string
-	Origin  string // what ran it: Claude Code's entrypoint when not the CLI, or Codex's originator
-	Remote  bool   // it ran on another device, as it said when it was named
-	at      time.Time
-	stamp   fileStamp // the transcript as it was read
-	cwd     string    // the folder it ran in, placed in a project again as repositories come and go
+	Project    string // the project's name as shown
+	Path       string // the project's folder: the repository root, or the session's folder outside one
+	Repo       bool   // Path is a repository, so subfolders of it are not projects of their own
+	Repository string // the repository by its remote, as the band names it, the same on every device
+	Title      string
+	Origin     string // what ran it: Claude Code's entrypoint when not the CLI, or Codex's originator
+	Remote     bool   // it ran on another device, as its requests said
+	Device     string // that device's name, where known
+	addr       string // and its address, which tells devices apart where names may not
 }
 
 // fileStamp tells a file that changed from one that did not.
 type fileStamp struct{ size, mod int64 }
 
-// Folders become repositories, so where a session belongs is looked at again after a while.
-const metaTTL = 10 * time.Minute
-
 var (
 	metaMu      sync.Mutex
-	metaCache   = map[string]sessionInfo{}
-	transcripts = map[string]string{} // session id to transcript path
+	transcripts = map[string]string{}    // session id to transcript path
+	readStamps  = map[string]fileStamp{} // each transcript as it was last read
 	indexedAt   time.Time
 )
 
@@ -193,75 +190,52 @@ var (
 	entryField  = regexp.MustCompile(`"entrypoint":"([a-z-]+)"`)
 )
 
-// sessionMeta finds a session's transcript and reads its folder and title: the name the user
-// gave it, else Claude Code's latest. A transcript is read again only once it changed, and outside
-// the lock, so a report over hundreds of sessions reads only the ones that went on. Sessions with
-// no transcript here, on another machine or in Codex, are as they named themselves.
+// sessionMeta is a session's title and project for the report: what its transcript here says,
+// read again once it changed, over what the band and its requests said (see noteSession).
 func sessionMeta(id string) sessionInfo {
 	if id == "" {
 		return sessionInfo{}
 	}
+	noteTranscript(id)
+	info, _ := namedMeta(id)
+	return info
+}
+
+// noteTranscript reads a session's transcript on this machine, when it changed since it was last
+// read, for its folder, how Claude Code was run, its title (the name the user gave it, else Claude
+// Code's latest) and its first request. It is read outside the lock, so a report over hundreds of
+// sessions reads only the ones that went on.
+func noteTranscript(id string) {
 	metaMu.Lock()
-	cached, have := metaCache[id]
 	path, ok := transcripts[id]
 	if !ok && time.Since(indexedAt) > time.Minute {
 		indexTranscripts()
 		path, ok = transcripts[id]
 	}
+	last := readStamps[id]
 	metaMu.Unlock()
-	var stamp fileStamp
-	if st, errStat := os.Stat(path); ok && errStat == nil {
-		stamp = fileStamp{st.Size(), st.ModTime().UnixNano()}
-	} else {
-		ok = false
+	st, errStat := os.Stat(path)
+	if !ok || errStat != nil {
+		return
 	}
-	if !ok {
-		// Read fresh each time: what a session says of itself can change.
-		info, _ := namedMeta(id)
-		return info
+	stamp := fileStamp{st.Size(), st.ModTime().UnixNano()}
+	if stamp == last {
+		return
 	}
-	fresh := time.Since(cached.at) < metaTTL
-	switch {
-	case have && fresh && (ok && cached.stamp == stamp || !ok):
-		return cached
-	case have && ok && cached.stamp == stamp:
-		// The transcript is as it was; only its folder's place may have changed.
-		cached.at = time.Now()
-		if cached.cwd != "" {
-			placeSession(id, cached.cwd, &cached)
-		}
-		metaMu.Lock()
-		metaCache[id] = cached
-		metaMu.Unlock()
-		return cached
-	}
-	info := transcriptMeta(id, path)
-	info.stamp = stamp
-	metaMu.Lock()
-	metaCache[id] = info
-	metaMu.Unlock()
-	return info
-}
-
-func transcriptMeta(id, path string) sessionInfo {
-	info := sessionInfo{at: time.Now()}
 	head := readTranscriptHead(path)
-	if head.cwd != "" {
-		info.cwd = head.cwd
-		placeSession(id, head.cwd, &info)
-	}
-	if head.entrypoint != "cli" {
-		info.Origin = head.entrypoint // how Claude Code was run: an SDK, claude -p, Claude Desktop
-	}
 	tail := readTail(path, 8<<20)
-	info.Title = lastMatch(tail, customField, true)
-	if info.Title == "" {
-		info.Title = lastMatch(tail, titleField, true)
+	title := lastMatch(tail, customField, true)
+	if title == "" {
+		title = lastMatch(tail, titleField, true)
 	}
-	if info.Title == "" {
-		info.Title = head.prompt // no title yet, or a run that never gets one (claude -p, SDKs)
+	origin := head.entrypoint // how Claude Code was run: an SDK, claude -p, Claude Desktop
+	if origin == "cli" {
+		origin = ""
 	}
-	return info
+	noteSession(id, namedSession{Title: title, Asked: head.prompt, Cwd: head.cwd, Origin: origin, Here: true}, time.Now())
+	metaMu.Lock()
+	readStamps[id] = stamp
+	metaMu.Unlock()
 }
 
 type transcriptHead struct{ cwd, entrypoint, prompt string }
@@ -338,7 +312,7 @@ func userPrompt(line []byte) string {
 func requestTitle(texts []string) string {
 	for _, t := range texts {
 		t = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(t), "Codex Companion Task:"))
-		if strings.HasPrefix(t, "Caveat:") || strings.HasPrefix(t, "# AGENTS.md") {
+		if strings.HasPrefix(t, "Caveat:") || strings.HasPrefix(t, "# AGENTS.md") || strings.HasPrefix(t, "This session is being continued") {
 			continue
 		}
 		if m := openingTag.FindStringSubmatch(t); m != nil {
@@ -375,81 +349,20 @@ func visible(r rune) rune {
 }
 
 // placeSession sets a session's project from its folder. While the folder exists the answer is
-// remembered, so a session in a worktree keeps its project after the worktree is removed; a folder
-// never seen here is its own project.
-func placeSession(id, cwd string, info *sessionInfo) {
+// remembered, so a session in a worktree keeps its project after the worktree is removed. False for
+// a folder never seen here.
+func placeSession(id, cwd string, remembered *placedProject, info *sessionInfo) bool {
 	if _, errStat := os.Stat(cwd); errStat == nil {
 		info.Path, info.Repo = gitRoot(cwd)
 		info.Project = projectName(info.Path)
-		rememberProject(id, *info)
-		return
+		rememberProject(id, placedProject{Project: info.Project, Path: info.Path, Repo: info.Repo})
+		return true
 	}
-	if p, ok := rememberedProject(id); ok {
-		info.Path, info.Repo, info.Project = p.Path, p.Repo, p.Project
-		return
+	if remembered != nil {
+		info.Path, info.Repo, info.Project = remembered.Path, remembered.Repo, remembered.Project
+		return true
 	}
-	info.Path, info.Project = cwd, projectName(cwd)
-}
-
-// ---- projects remembered per session ----
-
-type placedProject struct {
-	Project string `json:"project"`
-	Path    string `json:"path"`
-	Repo    bool   `json:"repo,omitempty"`
-}
-
-var (
-	placedMu    sync.Mutex
-	placed      map[string]placedProject
-	placedDirty bool
-)
-
-func placedPath() string { return filepath.Join(usageDir(), "projects.json") }
-
-func loadPlacedLocked() {
-	if placed != nil {
-		return
-	}
-	placed = map[string]placedProject{}
-	if body, errRead := os.ReadFile(placedPath()); errRead == nil {
-		_ = json.Unmarshal(body, &placed)
-	}
-}
-
-func rememberProject(id string, info sessionInfo) {
-	placedMu.Lock()
-	defer placedMu.Unlock()
-	loadPlacedLocked()
-	p := placedProject{Project: info.Project, Path: info.Path, Repo: info.Repo}
-	if placed[id] != p {
-		placed[id], placedDirty = p, true
-	}
-}
-
-func rememberedProject(id string) (placedProject, bool) {
-	placedMu.Lock()
-	defer placedMu.Unlock()
-	loadPlacedLocked()
-	p, ok := placed[id]
-	return p, ok
-}
-
-// savePlaced writes the remembered projects when they changed.
-func savePlaced() {
-	placedMu.Lock()
-	defer placedMu.Unlock()
-	if !placedDirty {
-		return
-	}
-	body, errMarshal := json.Marshal(placed)
-	if errMarshal != nil {
-		return
-	}
-	tmp := placedPath() + ".tmp"
-	if os.WriteFile(tmp, body, 0o600) == nil && os.Rename(tmp, placedPath()) == nil {
-		placedDirty = false
-	}
+	return false
 }
 
 func indexTranscripts() {
@@ -581,6 +494,7 @@ type usageSession struct {
 	Accounts []string      `json:"accounts"`         // accounts that served it in the period, most used first
 	Origin   string        `json:"origin,omitempty"` // what ran it, as sessionInfo.Origin; "" for Claude Code's CLI
 	Remote   bool          `json:"remote,omitempty"` // it ran on another device
+	Device   string        `json:"device,omitempty"` // that device's name, where known
 	// Mode all: the session's part of each provider's weekly quota, in that provider's unit.
 	UsedBy map[string]float64 `json:"used_by,omitempty"`
 	// Metered is false for a session known only by its tokens: none of its requests fell where
@@ -779,8 +693,6 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 	if n := rangeDays(rng); n > 0 {
 		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		u.from = today.AddDate(0, 0, 1-n).UnixMilli()
-		// Before the log began only Claude Code's transcripts know the tokens, without accounts.
-		entries = append(entries, history(logStart)...)
 	}
 	u.entries = entries
 	for _, e := range entries {
@@ -930,8 +842,8 @@ const day = 24 * 3600 * 1000
 
 // covers tells which lines a scope counts and which accounts it holds: each account's own lines
 // from where its counting starts. Over 7 or 30 days a provider or every provider also counts the
-// lines whose account is not known (history recovered from transcripts), which add tokens
-// without a part of any quota. False for an unknown scope.
+// lines whose account is not known (one the proxy no longer holds and never read), which add
+// tokens without a part of any quota. False for an unknown scope.
 func (u *reading) covers(scope string) (func(core.LogEntry) bool, []string, bool) {
 	var accounts []string
 	provider, isProvider := strings.CutPrefix(scope, "provider:")
@@ -963,8 +875,8 @@ func (u *reading) covers(scope string) (func(core.LogEntry) bool, []string, bool
 
 // warmReport reads the transcript of every session in the current weeks once, shortly after
 // start, so the first report a page asks for does not wait on that: after a restart a cold report
-// takes seconds per hundred sessions, longer than the page waits. It writes nothing, and a stop
-// ends it between two transcripts.
+// takes seconds per hundred sessions, longer than the page waits. What it reads is what the report
+// would (see noteTranscript); a stop ends it between two transcripts.
 func warmReport(ctx context.Context) {
 	select {
 	case <-ctx.Done():
@@ -1084,7 +996,7 @@ func usageResponse(query url.Values) ([]byte, error) {
 			du = &dayUse{weights: map[string]float64{}}
 			used7[e.Provider][d] = du
 		}
-		du.requests += max(e.Count, 1)
+		du.requests++
 		du.tokens.Add(e)
 		du.weights[id] += e.Weight()
 		if usedProviders[id] == nil {
@@ -1101,7 +1013,7 @@ func usageResponse(query url.Values) ([]byte, error) {
 				shares[e.Session] = &core.Share{Session: e.Session}
 			}
 			sh := shares[e.Session]
-			sh.Requests += max(e.Count, 1)
+			sh.Requests++
 			sh.Tokens.Input += e.Input
 			sh.Tokens.Output += e.Output
 			sh.Tokens.CacheRead += e.CacheRead
@@ -1156,7 +1068,6 @@ func usageResponse(query url.Values) ([]byte, error) {
 			sort.SliceStable(list, func(i, j int) bool { return list[i].From < list[j].From })
 			doc.Windows[provider] = list
 		}
-		savePlaced()
 		return marshalUsage(doc)
 	}
 	// Each provider's days: over a range, the range's; over the week, from the day its earliest
@@ -1175,7 +1086,6 @@ func usageResponse(query url.Values) ([]byte, error) {
 		}
 		doc.Daily[provider] = days(all, used7[provider], refs, from, now)
 	}
-	savePlaced()
 	return marshalUsage(doc)
 }
 
@@ -1330,7 +1240,6 @@ func usageSessionResponse(query url.Values) ([]byte, error) {
 		served = append(served, a)
 	}
 	meta := sessionMeta(id)
-	savePlaced()
 	body, errMarshal := json.Marshal(struct {
 		ID      string `json:"id"`
 		Title   string `json:"title"`
@@ -1345,19 +1254,6 @@ func usageSessionResponse(query url.Values) ([]byte, error) {
 		return nil, errMarshal
 	}
 	return httpResponse(http.StatusOK, body)
-}
-
-// history is the token history recovered from Claude Code's transcripts for the time before the
-// log began, without accounts.
-func history(logStart int64) []core.LogEntry {
-	var out []core.LogEntry
-	for _, e := range readEntries(filepath.Join(usageDir(), "history.jsonl")) {
-		if e.T < logStart {
-			e.History = true
-			out = append(out, e)
-		}
-	}
-	return out
 }
 
 // offProxyEmail is what a credential id tells of the email of an account the proxy no longer
@@ -1406,8 +1302,10 @@ type projectRef struct {
 // holds it, since without a repository nothing says where a project begins: a session started in
 // a folder of folders (~/Documents) would take every project under it. One that sits directly
 // in another project's folder is named after both (web-app/docs). A project known only by
-// its git remote (a removed worktree) joins the local project of the same name. Two projects left
-// with one name are told apart by their parent folder.
+// its git remote (a removed worktree) joins the local project of the same name. A repository the
+// band names by its remote is one project on every device, and a session in its folder that no
+// band named, as a Codex session, joins it. Two projects left with one name are told apart by
+// their parent folder.
 func placeProjects(ids map[string]bool) map[string]projectRef {
 	infos := map[string]sessionInfo{}
 	for id := range ids {
@@ -1419,21 +1317,50 @@ func placeProjects(ids map[string]bool) map[string]projectRef {
 
 func mergeProjects(infos map[string]sessionInfo, home string) map[string]projectRef {
 	type project struct {
-		name, path string
-		repo       bool
+		name, path, device, addr string
+		repo, here               bool
+	}
+	// A folder is a device's: two devices may each have a /home/me/app of their own.
+	folderOf := func(info sessionInfo) string {
+		device := ""
+		if info.Remote {
+			device = cmp.Or(info.addr, info.Device, "other")
+		}
+		return device + "\x00" + info.Path
+	}
+	repoAt := map[string]string{} // a repository's folder on a device to its remote
+	for _, info := range infos {
+		if info.Repository != "" && info.Path != "" {
+			repoAt[folderOf(info)] = info.Repository
+		}
 	}
 	keyOf := func(info sessionInfo) string {
+		if repo := cmp.Or(info.Repository, repoAt[folderOf(info)]); repo != "" {
+			return "repo:" + repo
+		}
+		if info.Repo && info.Remote {
+			return "dev:" + folderOf(info) // a repository known by no remote is its device's own
+		}
 		if info.Path != "" {
 			return info.Path
 		}
 		return "name:" + info.Project
 	}
 	byKey := map[string]project{}
-	keys := map[string]string{} // session to its project key
+	keys := map[string]string{}  // session to its project key
+	folders := map[string]bool{} // every project's folder, on any device
 	for id, info := range infos {
 		k := keyOf(info)
 		keys[id] = k
-		byKey[k] = project{name: info.Project, path: info.Path, repo: info.Repo}
+		folders[info.Path] = info.Path != ""
+		// A repository on several devices is shown by its folder here, else by the first one.
+		p := project{name: info.Project, path: info.Path, repo: info.Repo, here: !info.Remote}
+		if info.Remote {
+			p.device, p.addr = cmp.Or(info.Device, info.addr), info.addr
+		}
+		if old, ok := byKey[k]; !ok || p.here && !old.here || p.here == old.here && p.path < old.path {
+			byKey[k] = p
+		}
 	}
 	parent := map[string]string{}
 	for k, p := range byKey {
@@ -1476,7 +1403,7 @@ func mergeProjects(infos map[string]sessionInfo, home string) map[string]project
 		}
 		shown[k] = p.name
 		if dir := filepath.Dir(p.path); !p.repo && p.path != "" && dir != home && dir != "/" {
-			if _, ok := byKey[dir]; ok {
+			if folders[dir] {
 				depth[k], shown[k] = 1, withParents(k, 1)
 			}
 		}
@@ -1499,6 +1426,32 @@ func mergeProjects(infos map[string]sessionInfo, home string) map[string]project
 					shown[k], clash = withParents(k, depth[k]), true
 				}
 			}
+		}
+	}
+	// Two repositories at one path, on two devices, are told apart by their remotes, else by the
+	// device.
+	byName := map[string]int{}
+	for _, name := range shown {
+		byName[name]++
+	}
+	for k, name := range shown {
+		if byName[name] < 2 {
+			continue
+		}
+		if repo, ok := strings.CutPrefix(k, "repo:"); ok {
+			shown[k] = repo
+		} else if p := byKey[k]; strings.HasPrefix(k, "dev:") && p.device != "" {
+			shown[k] = p.name + " · " + p.device // parent folders cannot part one path
+		}
+	}
+	// Two devices DNS names alike are told apart by their addresses.
+	byName = map[string]int{}
+	for _, name := range shown {
+		byName[name]++
+	}
+	for k, name := range shown {
+		if p := byKey[k]; byName[name] > 1 && strings.HasPrefix(k, "dev:") && p.addr != "" {
+			shown[k] = p.name + " · " + p.addr
 		}
 	}
 	out := map[string]projectRef{}
@@ -1571,7 +1524,7 @@ func groupByProject(shares map[string]*core.Share, served, usedBy map[string]map
 			used = append(used, provider)
 		}
 		sort.Strings(used)
-		p.Sessions = append(p.Sessions, usageSession{ID: id, Title: meta.Title, Used: sh.Used, Requests: sh.Requests, Last: sh.Last, Tokens: sh.Tokens, Accounts: accounts, Origin: meta.Origin, Remote: meta.Remote || remote[id], UsedBy: usedBy[id], Metered: sh.Metered, Providers: used})
+		p.Sessions = append(p.Sessions, usageSession{ID: id, Title: meta.Title, Used: sh.Used, Requests: sh.Requests, Last: sh.Last, Tokens: sh.Tokens, Accounts: accounts, Origin: meta.Origin, Remote: meta.Remote || remote[id], Device: meta.Device, UsedBy: usedBy[id], Metered: sh.Metered, Providers: used})
 	}
 	out := make([]usageProject, 0, len(byName))
 	for _, p := range byName {

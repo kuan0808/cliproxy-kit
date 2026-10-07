@@ -132,7 +132,8 @@ export function UsageTable({
         : sessionSources(
             session.origin,
             codexView || (all && session.providers.includes('codex')),
-            session.remote
+            session.remote,
+            session.device
           ),
     [codexView, all]
   );
@@ -889,7 +890,6 @@ export function SessionDetailView({
             .join(t('quota_usage.list_separator')),
         })
       : '',
-    d.history ? t('quota_usage.detail_history') : '',
   ].filter(Boolean);
 
   return (

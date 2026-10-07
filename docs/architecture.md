@@ -14,13 +14,14 @@ flowchart LR
     qp["quota-pilot<br/>scheduler · model router · usage observer<br/>management routes · page"]
   end
   cc["Claude Code<br/>+ quota-band"] -- "requests (session id in headers)" --> proxy
+  cx["Codex<br/>+ hooks"] -- "requests" --> proxy
   proxy -- "upstream requests" --> up["Anthropic · OpenAI"]
   qp -- "quota polls" --> up
-  qp -- "snapshot.json" --> files[("~/.cache/cliproxy-kit")]
-  files -- "same machine" --> cc
-  cc -. "other machine: GET /band (band token)" .-> qp
+  cc -. "GET /band (client key)" .-> qp
+  cx -. "GET /codex (client key)" .-> qp
   panel["management panel"] -- "management API (management key)" --> qp
-  qp -- "reads" --> logs[("Claude Code transcripts")]
+  qp -- "state, log, sessions" --> files[("~/.cache/cliproxy-kit")]
+  qp -. "reads, when beside them" .-> logs[("Claude Code transcripts")]
 ```
 
 ## quota-pilot
@@ -60,9 +61,10 @@ An account read as used up often answers a while longer, so its sessions stay un
 request away; from then on each of them leaves at its next request for a ready account, without
 waiting to be refused itself. It also moves when its session has been idle for an hour, so its
 prompt cache is gone anyway, while its account is no longer one a new session would get: the next
-request goes to the best account at no cost. A session the user switched stays. Bindings and routes
-live in `state.json` for 24 hours after their last use, so a resumed session keeps its account and
-prompt cache.
+request goes to the best account at no cost. A session the user switched stays. A binding or route
+the proxy chose lives in `state.json` for 24 hours after its last use, and one the user chose for 30
+days, as long as Claude Code keeps a session to resume, so a resumed session keeps its account,
+route and prompt cache.
 
 ### Moving a session to another provider
 
@@ -70,8 +72,9 @@ prompt cache.
 the model `fallback_map` names. `auto` moves a session only when every account of its provider is
 used up on fresh data, never on unknown data, with an account list read in the last 30 seconds, and
 only when the conversation fits the target model's context (`context_lengths`, else a table by
-model family). What a conversation needs is the larger of its last request's input tokens and its
-body (a token per 3 bytes, 1,600 per image or file), plus the output it asks for. A thread
+model family). What a conversation needs is the larger of its last turn's tokens (Codex's cached
+input counted once, kept across a restart) and its body (a token per 3 bytes, 1,600 per image or
+file), plus the output it asks for. A thread
 continuation sent to another provider is answered `400 thread_unsupported_request`, which makes
 Claude Code resend the whole conversation. Moving to another provider is for Claude Code sessions:
 Codex chooses its own model.
@@ -138,18 +141,30 @@ windows of the last day, told apart by the reset each reading names (logged from
 earlier windows are not listed). For an idle account Claude still names a reset, a later one with
 each reading: a window that used nothing and served no request shows as not running.
 
-Claude Code sessions are named from their transcripts (the user's rename, else Claude Code's
-title, else the first request); a Codex session, whose records the proxy does not read, by its
-first request: the folder in its environment context and what it asked, kept as long as it runs.
+Each session has one record (`usage/sessions.json`, kept as long as the log), filled by whichever
+source knows it. Its title is the current one, from its transcript on the proxy's machine (the
+user's rename, else Claude Code's title) or from the band on any device; until it has one, its
+first request. The folder it started in, how it was run and its first request also come from its
+own requests: Claude Code's system prompt and User-Agent, Codex's environment context and
+originator. What a transcript said stays after Claude Code deletes it (30 days by default).
+
 A request came from another device when the last `X-Forwarded-For` entry (which a reverse proxy
 such as Tailscale Serve appends, so a client cannot forge it) is not one of this machine's
-addresses; a container on this machine that reaches the port directly is not told apart. A session's
-device and what ran it are two tags on the page. Sessions are placed in projects by their
-repository: the nearest `.git`, `.jj` or `.hg`, with worktrees (relative ones, and those of a bare
-repository) under their main repository. A folder outside any repository is its own project. A
-folder on another device, on Windows or on a share is never looked up: its project is its name.
-Codex counts only what goes through the proxy, as Claude does, so Codex should be set up to use it
-(see the README).
+addresses; a container on this machine that reaches the port directly is not told apart. That
+device is named by the name DNS gives its address (MagicDNS on a tailnet), looked up apart from the
+request. A session's device and what ran it are two tags on the page.
+
+Sessions are placed in projects by their repository. The band names it by its remote
+(`github.com/owner/name`), the same on every device and in every worktree, and a session no band
+named in one of that device's folders, as a Codex session, joins it. Otherwise a session that ran
+on the proxy's machine (its transcript is here, or no band placed it) is placed by the nearest
+`.git`, `.jj` or `.hg`, with worktrees (relative ones, and those of a bare repository) under their
+main repository, remembered once the folder is gone. A folder outside any repository is its own
+project. A session its band placed, and a folder on another device, on Windows or on a share, is
+never looked up: its project is the repository root its device named, else its folder's name. A
+repository known by no remote on another device stays that device's own; one path on two devices is
+told apart by the repository's remote, else the device's name. Codex counts only what goes
+through the proxy, as Claude does, so Codex should be set up to use it (see the README).
 
 ### Files
 
@@ -157,19 +172,30 @@ All under `~/.cache/cliproxy-kit/` of the user the proxy runs as, mode 0600, so 
 
 | File | What |
 | --- | --- |
-| `snapshot.json` | accounts, quota, sessions and routes, for the band (rewritten atomically) |
-| `state.json` | bindings, routes and the last quota readings |
-| `commands/` | the band's switch and route requests, applied once and acknowledged in the snapshot |
-| `usage/` | the request log, recovered history, and the sessions named by their requests or by the band on another machine |
+| `state.json` | bindings, routes, sessions, the last quota readings, and the client keys the proxy accepted (as hashes) |
+| `usage/` | the request log (`YYYY-MM.jsonl`) and what is known of each session (`sessions.json`) |
+
+Nothing else reads them: the band and Codex hooks ask the proxy over the network, so the proxy can
+run in a container or on a server that runs no client. A container needs a volume for this folder,
+or a restart loses the log and the state.
 
 ### Management routes and the page
 
 Under `/v0/management/quota-pilot/`, behind the management key: `snapshot`, `usage` and
 `usage/session` (each with `tz`, the page's time zone), and `POST refresh`, which answers
-`{read, failed: [{account, label, failure, status}], complete}`. Two resources, which CLIProxyAPI serves without
-authentication: `/v0/resource/plugins/quota-pilot/ui`, the page (it carries no data and asks the
-management routes for everything), and `/band`, the snapshot for a band on another machine, which
-needs a key listed in `band_tokens` and carries opaque account ids.
+`{read, failed: [{account, label, failure, status}], complete}`. Three resources, which CLIProxyAPI
+serves without authentication under `/v0/resource/plugins/quota-pilot/`: `ui`, the page (it carries
+no data and asks the management routes for everything); `band`, the snapshot for the band; and
+`codex`, the notices for Codex hooks.
+
+`band` and `codex` need a client key the proxy accepted for a request in the last week: a usage
+record names the key the proxy let in, and the plugin keeps its SHA-256, never the key. A proxy
+without `api-keys` lets every client in, and so every band, until a request with a key shows it
+asks for keys; one without a key sent before that, answered late, does not open it again. The
+band's snapshot carries opaque account ids and no emails or paths. A session belongs to the key
+whose request it first served, for as long as an account or a route the user chose for it lasts:
+only that key's band sees it, switches it and names it, and only that key's Codex hook hears of it;
+anyone may name a session the proxy has not seen.
 
 ## The page
 
@@ -183,16 +209,31 @@ follows the panel's theme, language and width.
 ## quota-band
 
 The band draws above the Claude Code prompt: tiles while Claude waits, one line while it works or
-when the terminal is narrow, and one line also when another mod draws beneath it. It reads
-`snapshot.json` when `ANTHROPIC_BASE_URL` is `localhost` or `127.0.0.1` and the file is at most 2
-minutes old (the plugin rewrites it at least every minute); otherwise it reads `/band` with
-`ANTHROPIC_AUTH_TOKEN` and sends the session's title, start folder and repository in `X-Band-*`
-headers, so sessions on other machines are named in the usage report. When `/band` gives nothing it
-says why (a key not in `band_tokens`, no plugin there, no answer) and shows the last snapshot as
-old. Switching a session's account or provider writes to `commands/`, so it is offered only on the
-machine that runs the proxy; the list leaves out accounts that cannot serve the session's model,
-and a switch not confirmed within a minute, or across a proxy restart, says so. `compact` and
-`handoff` work everywhere.
+when the terminal is narrow, and one line also when another mod draws beneath it. Everything it
+shows of accounts comes from `/band`, read every 10 seconds at `ANTHROPIC_BASE_URL` with
+`ANTHROPIC_AUTH_TOKEN` (else `ANTHROPIC_API_KEY`, else no key, for a proxy without `api-keys`),
+the same wherever the proxy runs. Each read sends what only the band's device knows of the session
+in `X-Band-*` headers, kept out of the proxy's request log: its title, the folder it started in, its
+repository's root and remote, and the model it uses, for which the snapshot names the account a
+new session gets, ranked as a pick ranks them (an estimate: the host may also leave out an account
+that does not serve the model).
+Resources are read-only routes, so a switch, route or back goes with the next read in
+`X-Band-Command`, and the snapshot that read returns acknowledges it; one not acknowledged within a
+minute, or across a proxy restart, says so. When `/band` gives nothing the band says why (a key the
+proxy has not accepted yet, no plugin there, no answer) and keeps the last snapshot, marked old.
+The switch list leaves out accounts that cannot serve the session's model and second credentials
+of an account. The cache meter starts only after a reply that read or wrote the cache. `compact`
+and `handoff` run in Claude Code itself.
+
+## Codex hooks
+
+Codex shows no custom status line, so its quota comes through hooks (see the README). A
+`SessionStart` hook and a `Stop` hook send the session's id to `/codex`, which answers in Codex's
+hook output: at the start, a line on the account and how much of it is used (after the first turn
+instead, when the start came before the key's first request); after a turn, a line only when
+another account took the session, or a window of its account passed 80% or ran out.
+Codex shows it as a notice, apart from the model's context. Without the hooks Codex shows nothing of
+quota through the proxy: CLIProxyAPI does not pass on the rate-limit events its own footer reads.
 
 ## Upstream behaviour it relies on
 
@@ -203,7 +244,9 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.289:
   subagent) and `parent_session_id`.
 - Usage records arrive once per upstream attempt, failures included, with the rate-limit headers.
 - Resources registered by a plugin are served under `/v0/resource/plugins/<id>/` without
-  authentication; its management routes need the management key.
+  authentication, for GET only and without a body; its management routes need the management key.
+- A usage record names the client key the proxy accepted (`config-api-key`'s principal), and none
+  when the proxy has no `api-keys`.
 - A plugin library replaced in place is loaded again only when the proxy restarts.
 - Claude Code sends its session id in `X-Claude-Code-Session-Id`, and continues server-side message
   threads; an expired thread is answered `404 thread_not_found`, which CLIProxyAPI 8.0.14 and later
@@ -215,8 +258,10 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.289:
   non-Claude model's context size, so its auto-compact timing may be off.
 - Remote Control, voice dictation and claude.ai connectors do not work through a proxy.
 - The cache countdown is an estimate: the server's cache state cannot be observed.
-- Sessions are named from transcripts on the machine that runs the proxy, so it must run as the
-  same user as Claude Code there; other machines need the band.
+- Transcripts are read only on the machine that runs the proxy, as the same user as Claude Code.
+  Elsewhere, and in a container, the band names a session, else its requests do; without the band a
+  session there keeps the title of its first request, and its project is its folder's.
+- A client key removed from the proxy can read quota with `/band` and `/codex` for up to a week.
 - A proxy in a container that clients reach directly sees no `X-Forwarded-For`, so their requests
   are not marked as from another device.
 - The plugin is trusted in-process code: a crash takes the proxy down with it.

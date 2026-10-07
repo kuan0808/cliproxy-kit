@@ -33,14 +33,6 @@ type LogEntry struct {
 	TierServed string   `json:"ts,omitempty"`   // the service tier the provider reported serving it at
 	Remote     bool     `json:"rm,omitempty"`   // it reached the proxy from another device
 	Plan       string   `json:"pl,omitempty"`   // a line of its own: the account's plan changed to this
-	Count      int      `json:"n,omitempty"`    // requests the line sums: recovered history sums an hour; 0 is one
-	First      int64    `json:"f,omitempty"`    // a line summing several requests: when the first ran (T is the last)
-	History    bool     `json:"-"`              // recovered from Claude Code's transcripts rather than logged
-}
-
-// requests is how many requests the line stands for.
-func (e LogEntry) requests() int {
-	return max(e.Count, 1)
 }
 
 // DayOf names the calendar day, in loc, of a unix-millisecond time.
@@ -104,13 +96,17 @@ func modelTier(model string) float64 {
 	return 1
 }
 
-// Weight is a request's usage relative to other requests: output costs five times input, cache
-// writes twice (Claude Code writes the one-hour cache), cache reads a tenth, scaled by the model's
-// price tier and the speed it ran at. Only the ratios between requests matter; the provider's own
-// quota readings set the totals.
-func (e LogEntry) Weight() float64 {
-	w := e.weights()
-	return w.Input + w.Output + w.CacheRead + w.CacheWrite
+// Weight is a request's draw on its account's quota relative to other requests: its cost at the
+// speed it ran at. Only the ratios between requests matter; the provider's own quota readings set
+// the totals.
+func (e LogEntry) Weight() float64 { return e.Cost() * e.speedFactor() }
+
+// Cost is what a request ran relative to other requests, whatever its speed: output costs five
+// times input, cache writes twice (Claude Code writes the one-hour cache), cache reads a tenth,
+// scaled by the model's price tier. A session's token mix, models and timeline show it.
+func (e LogEntry) Cost() float64 {
+	c := e.cost()
+	return c.Input + c.Output + c.CacheRead + c.CacheWrite
 }
 
 // speedFactor is how much faster than standard speed a request draws on its account's plan quota.
@@ -126,7 +122,7 @@ func (e LogEntry) speedFactor() float64 {
 	return 1
 }
 
-// Weights is weight split by kind of token.
+// Weights is cost split by kind of token.
 type Weights struct {
 	Input      float64 `json:"input"`
 	Output     float64 `json:"output"`
@@ -137,15 +133,15 @@ type Weights struct {
 // free tells a request that draws nothing on its account's plan quota (Claude's fast mode).
 func (e LogEntry) free() bool { return e.speedFactor() == 0 }
 
-func (e LogEntry) weights() Weights {
-	tier := modelTier(e.Model) * e.speedFactor()
+func (e LogEntry) cost() Weights {
+	tier := modelTier(e.Model)
 	return Weights{
 		Input: float64(e.Input) * tier, Output: 5 * float64(e.Output) * tier,
 		CacheRead: 0.1 * float64(e.CacheRead) * tier, CacheWrite: 2 * float64(e.CacheWrite) * tier,
 	}
 }
 
-// Composition sums requests, tokens and weight by kind of token.
+// Composition sums requests, tokens and cost by kind of token.
 type Composition struct {
 	Requests int      `json:"requests"`
 	Tokens   TokenSum `json:"tokens"`
@@ -157,9 +153,9 @@ func (c *Composition) Add(e LogEntry) {
 	if e.Poll {
 		return
 	}
-	c.Requests += e.requests()
+	c.Requests++
 	c.Tokens.Add(e)
-	w := e.weights()
+	w := e.cost()
 	c.Weights.Input += w.Input
 	c.Weights.Output += w.Output
 	c.Weights.CacheRead += w.CacheRead
@@ -577,7 +573,7 @@ func (a *Attribution) ran(requests []LogEntry, countFrom int64) {
 	}
 	for _, e := range requests {
 		if e.T >= countFrom {
-			p.Requests += e.requests()
+			p.Requests++
 			p.Tokens.Add(e)
 		}
 	}
@@ -640,7 +636,7 @@ func (a *Attribution) count(e LogEntry, countFrom int64) {
 		return
 	}
 	sh := a.share(e.Session)
-	sh.Requests += e.requests()
+	sh.Requests++
 	sh.Tokens.Add(e)
 	if e.T > sh.Last {
 		sh.Last = e.T
@@ -767,13 +763,13 @@ type Part struct {
 // what used it.
 type Bucket struct {
 	At        int64    `json:"at"`
-	Weight    float64  `json:"weight"`
+	Weight    float64  `json:"weight"` // what it ran: its requests' cost (see LogEntry.Cost)
 	Requests  int      `json:"requests"`
 	Tokens    TokenSum `json:"tokens"`
-	Agent     float64  `json:"agent"`     // weight sent by subagents
-	Models    []Part   `json:"models"`    // weight by model, largest first
-	Accounts  []Part   `json:"accounts"`  // weight by account; "" when not known
-	Providers []Part   `json:"providers"` // weight by provider
+	Agent     float64  `json:"agent"`     // cost sent by subagents
+	Models    []Part   `json:"models"`    // cost by model, largest first
+	Accounts  []Part   `json:"accounts"`  // cost by account; "" when not known
+	Providers []Part   `json:"providers"` // cost by provider
 	// Quota is each provider's part of one account's weekly quota in the stretch, from the
 	// requests readings settled; a provider whose requests none settled is not in it.
 	Quota map[string]float64 `json:"quota,omitempty"`
@@ -787,8 +783,7 @@ type SessionDetail struct {
 	Unit        string      `json:"unit"` // bucket length: "10m", "hour" or "day"
 	Buckets     []Bucket    `json:"buckets"`
 	Models      []Part      `json:"models"`
-	Agent       float64     `json:"agent"`   // weight sent by subagents
-	History     bool        `json:"history"` // includes lines recovered from transcripts, which sum an hour
+	Agent       float64     `json:"agent"` // cost sent by subagents
 	Accounts    []Part      `json:"accounts"`
 	Tiers       []Tier      `json:"tiers"` // most requests first
 }
@@ -813,25 +808,20 @@ func Detail(entries []LogEntry, pieces []Piece, loc *time.Location) SessionDetai
 		if e.Poll {
 			continue
 		}
-		first := e.T
-		if e.First > 0 && e.First < first {
-			first = e.First
-		}
-		if out.First == 0 || first < out.First {
-			out.First = first
+		if out.First == 0 || e.T < out.First {
+			out.First = e.T
 		}
 		if e.T > out.Last {
 			out.Last = e.T
 		}
 		out.Composition.Add(e)
-		w := e.Weight()
+		w := e.Cost()
 		models[e.Model] += w
 		if e.Agent {
 			out.Agent += w
 		}
-		out.History = out.History || e.History
 		accounts[e.Account] += w // "" when the account is not known
-		tiers[Tier{Provider: e.Provider, Asked: e.TierAsked, Served: e.TierServed}] += e.requests()
+		tiers[Tier{Provider: e.Provider, Asked: e.TierAsked, Served: e.TierServed}]++
 	}
 	out.Models, out.Accounts = parts(models), parts(accounts)
 	for t, n := range tiers {
@@ -856,7 +846,7 @@ func Detail(entries []LogEntry, pieces []Piece, loc *time.Location) SessionDetai
 		out.Unit = "day"
 		start = func(t time.Time) time.Time { return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc) }
 		step = func(t time.Time) time.Time { return t.AddDate(0, 0, 1) }
-	case span > 3*time.Hour || out.History: // a recovered line sums an hour
+	case span > 3*time.Hour:
 		out.Unit = "hour"
 		start = func(t time.Time) time.Time { return t.Truncate(time.Hour) }
 		step = func(t time.Time) time.Time { return t.Add(time.Hour) }
@@ -881,12 +871,12 @@ func Detail(entries []LogEntry, pieces []Piece, loc *time.Location) SessionDetai
 		if e.Poll || !ok {
 			continue
 		}
-		b, m, w := &out.Buckets[i], &mixes[i], e.Weight()
+		b, m, w := &out.Buckets[i], &mixes[i], e.Cost()
 		if m.models == nil {
 			m.models, m.accounts, m.providers = map[string]float64{}, map[string]float64{}, map[string]float64{}
 		}
 		b.Weight += w
-		b.Requests += e.requests()
+		b.Requests++
 		b.Tokens.Add(e)
 		if e.Agent {
 			b.Agent += w
