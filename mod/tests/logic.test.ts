@@ -296,7 +296,7 @@ describe('accounts', () => {
 
   test("the proxy's /band answer, or why there is none", async () => {
     expect(readBand(200, JSON.stringify(SNAP)).snap?.sequence).toBe(7)
-    expect(readBand(401, '{"error":"band token required"}').error).toEqual({ kind: 'status', status: 401 })
+    expect(readBand(401, '{"error":"a client key the proxy accepted in the last week is required"}').error).toEqual({ kind: 'status', status: 401 })
     expect(readBand(200, '<html>').error).toEqual({ kind: 'body' })
     expect(bandErrorText({ kind: 'status', status: 401 })).toBe('quota data comes once this key has sent a request through the proxy')
     expect(bandErrorText({ kind: 'status', status: 404 })).toMatch(/no quota-pilot band route \(404\)/)

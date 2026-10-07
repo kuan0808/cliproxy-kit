@@ -274,7 +274,11 @@ On the panel's **Plugins** page, or under `plugins.configs.quota-pilot` in `conf
 ## Update and uninstall
 
 - **Update:** the panel's Plugin Store offers new versions of quota-pilot;
-  `claude plugin update quota-band@cliproxy-kit` updates the band.
+  `claude plugin update quota-band@cliproxy-kit` updates the band. Update both: they change
+  together.
+- **From 0.1.6:** the band reads everything over the network, with the key Claude Code already
+  uses, so `band_tokens` is no longer read: remove it from `config.yaml`. Sessions, projects and
+  remembered folders move into `usage/sessions.json` by themselves.
 - **Uninstall:** delete Quota Pilot on the panel's **Plugins** page, then undo the rest as the table
   above says.
 

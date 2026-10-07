@@ -237,7 +237,8 @@ quota-pilot 單獨就能運作；額度列補上只有 Claude Code 裡才能顯�
 
 ## 更新與移除
 
-- **更新：** 面板的插件商店會提供 quota-pilot 的新版本；額度列用 `claude plugin update quota-band@cliproxy-kit` 更新。
+- **更新：** 面板的插件商店會提供 quota-pilot 的新版本；額度列用 `claude plugin update quota-band@cliproxy-kit` 更新。兩者一起改版，請一起更新。
+- **從 0.1.6 升級：** 額度列改成全部走網路，用 Claude Code 本來就在用的 key，所以 `band_tokens` 不再讀取，可以從 `config.yaml` 刪掉。session、專案和記住的資料夾會自動移進 `usage/sessions.json`。
 - **移除：** 在面板的**插件**頁面刪除 Quota Pilot，其餘照上表還原。
 
 ## 疑難排解

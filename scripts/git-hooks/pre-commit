@@ -86,8 +86,8 @@ def private_details():
         for key in keys:
             value = record.get(key)
             found.update(value if isinstance(value, list) else [value] if isinstance(value, str) else [])
-    # The proxy's configuration, wherever it is kept: its client keys, band tokens, upstream keys and
-    # management key.
+    # The proxy's configuration, wherever it is kept: its client keys, upstream keys and management
+    # key, and the band tokens 0.1.6 kept there.
     for path in [os.environ.get('CLIPROXY_CONFIG', ''), '/opt/homebrew/etc/cliproxyapi.conf',
                  '/usr/local/etc/cliproxyapi.conf', '~/.cli-proxy-api/config.yaml', 'config.yaml']:
         found.update(config_secrets(read(path)) if path else [])

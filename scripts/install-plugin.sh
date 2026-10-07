@@ -58,8 +58,8 @@ go build -buildmode=c-shared -ldflags "-X main.version=$stamp" -o "$build/quota-
 # to this unversioned one, takes an unversioned one there before one here, and while the store's
 # record in the plugin's settings (plugins.configs.quota-pilot.store) names a version, loads only
 # that version. So for this build to load, those copies and that record go, kept in a backup folder.
-# The panel's delete is not used: it also removes the plugin's other settings (band_tokens,
-# fallback_map, thresholds), which stay.
+# The panel's delete is not used: it also removes the plugin's other settings (fallback_map,
+# thresholds), which stay.
 backup=$HOME/.cache/cliproxy-kit/install-backup-$(date +%Y%m%d-%H%M%S)
 undo=
 # fail ends the install, saying how to go back to the store's copy when it was moved aside.
