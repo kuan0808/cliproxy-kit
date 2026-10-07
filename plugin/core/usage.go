@@ -26,6 +26,7 @@ type LogEntry struct {
 	CacheWrite int64    `json:"cw,omitempty"`
 	Poll       bool     `json:"poll,omitempty"` // a reading with no request behind it: a poll, or a refused request
 	Used5h     *float64 `json:"u5,omitempty"`   // part of the 5-hour window used, as the provider reported it
+	Reset5     int64    `json:"r5,omitempty"`   // when that 5-hour window resets (unix milliseconds), when the reading says
 	Used7d     *float64 `json:"u7,omitempty"`   // part of the weekly window used
 	Reset7     int64    `json:"r7,omitempty"`   // when that weekly window resets (unix milliseconds), when the reading says
 	Count      int      `json:"n,omitempty"`    // requests the line sums: recovered history sums an hour; 0 is one
@@ -42,7 +43,7 @@ func (e LogEntry) requests() int {
 var DayOf = func(ms int64) string { return time.UnixMilli(ms).Format("2006-01-02") }
 
 // readingOf is a log line holding what observed windows read: the used part of the 5-hour and
-// weekly windows, and when the weekly one resets.
+// weekly windows, and when each resets.
 func readingOf(windows []Window) (LogEntry, bool) {
 	var e LogEntry
 	for _, w := range windows {
@@ -50,6 +51,9 @@ func readingOf(windows []Window) (LogEntry, bool) {
 		switch w.Kind {
 		case KindFiveHour:
 			e.Used5h = &used
+			if !w.ResetAt.IsZero() {
+				e.Reset5 = w.ResetAt.UnixMilli()
+			}
 		case KindWeekly:
 			e.Used7d = &used
 			if !w.ResetAt.IsZero() {
@@ -210,11 +214,11 @@ func (s *Share) Add(o *Share) {
 	}
 }
 
-// Attribution is how an account's weekly quota in a span splits across sessions. Only what
-// happened from the counting start on is counted; the walk before it learns the rate and the
+// Attribution is how an account's weekly (or 5-hour) quota in a span splits across sessions. Only
+// what happened from the counting start on is counted; the walk before it learns the rate and the
 // reading, so both are right where the counting begins.
 type Attribution struct {
-	Used      float64 // the account's weekly use at the last reading in the span
+	Used      float64 // the account's use of its window at the last reading in the span
 	Counted   float64 // what the counted part used: sessions, before logging and outside
 	BeforeLog float64 // used before the log began, in a window that began inside the counted part
 	Outside   float64 // used while no request went through the proxy (claude.ai, other tools)
@@ -223,13 +227,32 @@ type Attribution struct {
 	// request explains.
 	Unplaced float64
 	// Undated is the part of Outside read across midnight: it counts, but on no day.
-	Undated     float64
-	Seen        bool               // a reading of the span's window fell in the counted part; without one, Used is not known
-	Restart     int64              // over one week, when a new window started it over: the earliest a request of it can have run
+	Undated float64
+	Seen    bool // a reading of the span's window fell in the counted part; without one, Used is not known
+	// Restart is, over one window, where a new window that started it over begins counting: its
+	// earliest request, else the reading that told it. The requests before ran in the window before.
+	Restart     int64
 	Sessions    map[string]*Share  // by session id; "" for requests without one
 	Pieces      []Piece            // each settled request's part, for the sessions the span keeps
 	OutsideDays map[string]float64 // Outside read within one local day, by that day
 	ReadDays    map[string]bool    // local days with a quota reading
+	// Periods are the windows the walk went through, oldest first, each with what it used: a range
+	// walk can go through several.
+	Periods []Period
+}
+
+// Period is one window an attribution walked: when it began, when it ended or resets, and what its
+// counted part used.
+type Period struct {
+	From      int64              // when it began: where its reset time says, else where the walk saw it begin
+	Reset     int64              // when it resets, when its readings say; 0 when they do not
+	Ended     int64              // when the next window began, when that came before Reset; 0 otherwise
+	Used      float64            // its last reading
+	BeforeLog float64            // the first reading of a window that began before the log
+	Outside   float64            // what no request explains
+	Parts     map[string]float64 // each session's part, by session id
+	Requests  int
+	Tokens    TokenSum
 }
 
 // Span is the stretch of an account's log an attribution walks, and the part of it that counts.
@@ -238,11 +261,13 @@ type Span struct {
 	CountFrom int64 // what happened before it is walked, not counted
 	LogStart  int64 // when the account's log began; when after From, the first reading holds use from before
 	// Range walks across weekly windows: a reset begins the next window and the counting goes on.
-	// Otherwise the span is one week, which an early reset starts over.
+	// Otherwise the span is one window, which an early reset starts over.
 	Range bool
-	// Week is when the account's current weekly window began. A reading that does not say when its
-	// window resets is placed on the weekly schedule that leads to it.
-	Week int64
+	// Five walks the 5-hour window instead of the weekly one: its readings, its resets, its length.
+	Five bool
+	// WindowStart is when the account's current window began. A reading that does not say when its
+	// window resets is placed on the schedule that leads to it.
+	WindowStart int64
 	// Keep names sessions whose settled requests are kept one by one in Pieces; nil keeps none.
 	Keep func(session string) bool
 }
@@ -254,16 +279,17 @@ type Piece struct {
 	Provider string // set by whoever gathers pieces of several accounts
 }
 
-// Attribute splits an account's weekly quota over a span across sessions. Each time the weekly
-// reading rises, the rise is shared among the requests served since the last rise, in proportion
-// to their weight; a rise with no such request counts as outside the proxy. The provider reports
-// whole percents, so requests keep collecting until the reading moves.
+// Attribute splits an account's weekly quota over a span across sessions, or its 5-hour quota when
+// the span says Five. Each time the window's reading rises, the rise is shared among the requests
+// served since the last rise, in proportion to their weight; a rise with no such request counts as
+// outside the proxy. The provider reports whole percents, so requests keep collecting until the
+// reading moves.
 //
-// Each reading belongs to a weekly window, named by its reset time or else by the account's weekly
-// schedule. Within a window the walk follows the highest reading, as polls and response headers
-// can trail each other (96, 97, 96, 97); a reading of an earlier window, read late, is passed over.
-// A new window shows as a later window, or, from readings that do not say theirs, as a fall of more
-// than resetDrop.
+// Each reading belongs to a window, named by its reset time or else by the account's schedule.
+// Within a window the walk follows the highest reading, as polls and response headers can trail
+// each other (96, 97, 96, 97); a reading of an earlier window, read late, is passed over. A new
+// window shows as a later window, or as a fall that holds (see startsOver): a plan change or a reset
+// the user asked for starts a window over without moving its reset.
 func Attribute(entries []LogEntry, account string, s Span) Attribution {
 	out := newAttribution()
 	var last *float64
@@ -295,28 +321,30 @@ func Attribute(entries []LogEntry, account string, s Span) Attribution {
 			seen.learn(rise, pending)
 		}
 		out.spread(rise, pending, from, at, s.CountFrom, edge, s.Keep)
+		out.ran(pending, s.CountFrom)
 		pending = nil
 	}
 	ordered := append([]LogEntry(nil), entries...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].T < ordered[j].T })
-	for _, e := range ordered {
+	over, stale := startsOver(ordered, account, s)
+	for i, e := range ordered {
 		if e.Account != account || e.T < s.From || e.T > s.To {
 			continue
 		}
 		// A request's reading comes with its response headers, before the request itself counts:
 		// the reading settles the requests before it, then the request joins the pending ones.
-		if e.Used7d != nil {
-			u, w := *e.Used7d, windowStart(e, s)
-			earlier := last != nil && w < window-WindowJitter ||
-				!s.Range && s.Week > 0 && w < s.Week-WindowJitter // over one week, a window before it
+		if used, reset := s.reading(e); used != nil {
+			u, w := *used, windowStart(e, s)
+			earlier := last != nil && w < window-WindowJitter || s.before(w) || stale[i]
 			if !earlier && e.T >= s.CountFrom {
 				out.Seen = true
 				out.ReadDays[DayOf(e.T)] = true
 			}
 			switch {
 			case earlier:
-				// A reading of an earlier window, read late: it says nothing of this one.
-			case last == nil || w > window+WindowJitter || e.Reset7 == 0 && u < *last-resetDrop:
+				// A reading of an earlier window, or of the one before a start-over, read late: it says
+				// nothing of this one.
+			case last == nil || w > window+WindowJitter || over[i]:
 				// The walk's first reading, or a new window's. Requests from before the window began ran
 				// in an earlier one, whose reading after them never came; those just before it, within
 				// what the reset times tell, may have run in either. A window known only by the fall of
@@ -328,16 +356,29 @@ func Attribute(entries []LogEntry, account string, s Span) Attribution {
 				if unsure {
 					begun = baseAt
 				}
-				pending = since(pending, begun-WindowJitter)
+				if over[i] {
+					// Started over in place, as a plan change does: what a request uses is learned anew.
+					seen = rate{}
+				}
+				// Those left behind ran in the window before.
+				kept := since(pending, begun-WindowJitter)
+				out.ran(pending[:len(pending)-len(kept)], s.CountFrom)
+				pending = kept
 				edge := int64(math.MaxInt64)
 				if begun+WindowJitter >= s.CountFrom {
 					edge = begun - WindowJitter
 				}
 				if last != nil && !s.Range {
-					// Over one week the window came early: the week starts over.
+					// Over one window the next came early: the span starts over, with the requests it holds.
 					days := out.ReadDays
 					out = newAttribution()
-					out.Seen, out.Restart, out.ReadDays = true, begun-WindowJitter, days
+					out.Seen, out.Restart, out.ReadDays = true, e.T, days
+					if len(pending) > 0 {
+						out.Restart = pending[0].T
+					}
+				}
+				out.begin(begun, reset, over[i])
+				if last != nil && !s.Range {
 					for _, p := range pending {
 						out.count(p, s.CountFrom)
 					}
@@ -350,9 +391,11 @@ func Attribute(entries []LogEntry, account string, s Span) Attribution {
 					case w >= s.CountFrom:
 						out.BeforeLog += u
 						out.Counted += u
+						out.period().BeforeLog += u
 					case e.T >= s.CountFrom:
 						out.Unplaced += u
 					}
+					out.ran(pending, s.CountFrom)
 					pending = nil
 				} else {
 					// All of the window's first reading is use since it began.
@@ -369,6 +412,12 @@ func Attribute(entries []LogEntry, account string, s Span) Attribution {
 				}
 				lastAt = e.T
 			}
+			if p := out.period(); p != nil {
+				p.Used = *last
+				if p.Reset == 0 && reset > 0 && windowStart(e, s) == window {
+					p.Reset = reset
+				}
+			}
 		}
 		if !e.Poll {
 			out.count(e, s.CountFrom)
@@ -378,7 +427,75 @@ func Attribute(entries []LogEntry, account string, s Span) Attribution {
 	if last != nil {
 		out.Used = *last
 	}
+	out.ran(pending, s.CountFrom)
 	return out
+}
+
+// lateReading is how far readings trail each other: the usage endpoint and the response headers by
+// seconds, a reading in flight across a reset by a request's length.
+const lateReading = 5 * 60 * 1000
+
+// startsOver finds the readings at which a window starts over without a later reset time, and the
+// readings of the window before that came after it did. A reading more than resetDrop below the
+// window's highest starts it over when the readings settle there: the last of the window's readings
+// within lateReading after it, before a later window's, is nearer the fall than the highest, or none
+// comes. A fall that settles back up was a late reading of the same window (50, 40, 50); within
+// lateReading after a start-over a reading nearer the old highest (26, 0, 26, 0) is a late reading of
+// the window before, passed over, so the window starts over at the first fall, while one nearer the
+// fall is use of the new window (26, 0, 10). The walk passes over the same readings the attribution
+// does.
+func startsOver(ordered []LogEntry, account string, s Span) (over, stale map[int]bool) {
+	type read struct {
+		i    int
+		t, w int64
+		u    float64
+	}
+	var reads []read
+	for i, e := range ordered {
+		if e.Account != account || e.T < s.From || e.T > s.To {
+			continue
+		}
+		if used, _ := s.reading(e); used != nil {
+			reads = append(reads, read{i, e.T, windowStart(e, s), *used})
+		}
+	}
+	over, stale = map[int]bool{}, map[int]bool{}
+	started, window, peak := false, int64(0), 0.0
+	// After a start-over: until when the window before may still be read, and above what a reading
+	// is nearer its highest than the fall.
+	until, mid := int64(0), 0.0
+	settles := func(k int) bool {
+		low, half := true, (peak+reads[k].u)/2
+		for _, r := range reads[k+1:] {
+			if r.t-reads[k].t > lateReading || r.w > window+WindowJitter {
+				break
+			}
+			if r.w >= window-WindowJitter {
+				low = r.u <= half
+			}
+		}
+		return low
+	}
+	for k, r := range reads {
+		switch {
+		case started && r.w < window-WindowJitter || s.before(r.w):
+			continue // a reading of an earlier window, read late
+		case !started || r.w > window+WindowJitter:
+			started, window, peak, until = true, r.w, r.u, 0
+		case r.t <= until && r.u > mid:
+			stale[r.i] = true
+		case r.u < peak-resetDrop && settles(k):
+			over[r.i], until, mid, peak = true, r.t+lateReading, (peak+r.u)/2, r.u
+		default:
+			peak = max(peak, r.u)
+		}
+	}
+	return over, stale
+}
+
+// before tells whether a window began before the one a single-window span walks.
+func (s Span) before(w int64) bool {
+	return !s.Range && s.WindowStart > 0 && w < s.WindowStart-WindowJitter
 }
 
 // since keeps the requests from t on.
@@ -394,25 +511,76 @@ func since(requests []LogEntry, t int64) []LogEntry {
 
 const weekMs = 7 * 24 * 3600 * 1000
 
+// FiveMs is how long a 5-hour window runs.
+const FiveMs = 5 * 3600 * 1000
+
+// reading is what a line read of the span's window: its used part, and when that window resets.
+func (s Span) reading(e LogEntry) (*float64, int64) {
+	if s.Five {
+		return e.Used5h, e.Reset5
+	}
+	return e.Used7d, e.Reset7
+}
+
+func (s Span) period() int64 {
+	if s.Five {
+		return FiveMs
+	}
+	return weekMs
+}
+
 // WindowJitter is how far apart a provider reports one weekly window's reset, and so its start:
 // readings of one window name resets up to a minute apart, the next window's lie hours on.
 const WindowJitter = 2 * 60 * 1000
 
-// windowStart is when a reading's weekly window began: a week before its reset when the reading
-// says it, else on the weekly schedule that leads to the account's current window, else the walk's
+// windowStart is when a reading's window began: a window's length before its reset when the
+// reading says it, else on the schedule that leads to the account's current window, else the walk's
 // start.
 func windowStart(e LogEntry, s Span) int64 {
+	_, reset := s.reading(e)
 	switch {
-	case e.Reset7 > 0:
-		return e.Reset7 - weekMs
-	case s.Week > 0:
-		w := s.Week
+	case reset > 0:
+		return reset - s.period()
+	case s.WindowStart > 0:
+		w := s.WindowStart
 		for w > e.T {
-			w -= weekMs
+			w -= s.period()
 		}
 		return w
 	}
 	return s.From
+}
+
+// begin opens the window the walk entered at from: the window before it ended there, when it
+// started over in place or that came before its reset.
+func (a *Attribution) begin(from, reset int64, inPlace bool) {
+	if p := a.period(); p != nil && (inPlace || p.Reset == 0 || from < p.Reset-WindowJitter) {
+		p.Ended = from
+	}
+	a.Periods = append(a.Periods, Period{From: from, Reset: reset, Parts: map[string]float64{}})
+}
+
+// ran adds counted requests to the window they ran in, the one the walk is in when they leave the
+// pending ones: settled by its reading, left behind by the next window, or still pending at the end.
+func (a *Attribution) ran(requests []LogEntry, countFrom int64) {
+	p := a.period()
+	if p == nil {
+		return
+	}
+	for _, e := range requests {
+		if e.T >= countFrom {
+			p.Requests += e.requests()
+			p.Tokens.Add(e)
+		}
+	}
+}
+
+// period is the window the walk is in; nil before its first reading.
+func (a *Attribution) period() *Period {
+	if len(a.Periods) == 0 {
+		return nil
+	}
+	return &a.Periods[len(a.Periods)-1]
 }
 
 func newAttribution() Attribution {
@@ -454,8 +622,7 @@ func weightOf(requests []LogEntry) float64 {
 	return total
 }
 
-// resetDrop is how far a weekly reading must fall to count as a reset rather than a trailing
-// reading. A reset that comes earlier than scheduled from below it goes unnoticed and leaves at
+// resetDrop is how far a reading must fall to count as a reset rather than a trailing reading. A reset that comes earlier than scheduled from below it goes unnoticed and leaves at
 // most this much unattributed.
 const resetDrop = 0.05
 
@@ -492,6 +659,9 @@ func (a *Attribution) outside(x float64, from, at, countFrom int64) {
 	default:
 		a.Outside += x
 		a.Counted += x
+		if p := a.period(); p != nil {
+			p.Outside += x
+		}
 		if day := DayOf(at); day == DayOf(from) {
 			a.OutsideDays[day] += x
 		} else {
@@ -525,6 +695,9 @@ func (a *Attribution) spread(rise float64, requests []LogEntry, from, at, countF
 			sh.Used += rise * part
 			sh.Days[DayOf(e.T)] += rise * part
 			a.Counted += rise * part
+			if p := a.period(); p != nil {
+				p.Parts[e.Session] += rise * part
+			}
 		case e.T >= edge:
 			a.Unplaced += rise * part
 		}

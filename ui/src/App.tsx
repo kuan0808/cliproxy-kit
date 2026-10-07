@@ -156,6 +156,7 @@ function QuotaPilotPage({ resolvedTheme }: { resolvedTheme: ResolvedTheme }) {
             <input
               ref={searchRef}
               className={pageStyles.searchInput}
+              name="search"
               type="search"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
@@ -226,6 +227,7 @@ function KeyPrompt() {
         <span>{t('quota_pilot.key_label')}</span>
         <input
           className="input"
+          name="management-key"
           type="password"
           autoComplete="off"
           autoFocus

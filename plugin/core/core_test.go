@@ -870,6 +870,27 @@ func TestASideRequestLeavesTheSessionModel(t *testing.T) {
 	}
 }
 
+// Use that falls back without a new period (a plan change) is taken, and marked so the plan is read
+// again; a step back is a trailing reading.
+func TestAWindowThatStartsOverIsMarked(t *testing.T) {
+	s, c := newTestState()
+	setQuota(s, c, "claude-a", 0.9, 0.74, 24*time.Hour)
+	c.t = c.t.Add(time.Minute)
+	setQuota(s, c, "claude-a", 0.9, 0.73, 24*time.Hour)
+	if !s.StartedOver("claude-a").IsZero() {
+		t.Fatal("a step back marked a start over")
+	}
+	c.t = c.t.Add(time.Minute)
+	setQuota(s, c, "claude-a", 0.9, 1, 24*time.Hour)
+	info, _ := s.Account("claude-a")
+	if s.StartedOver("claude-a") != c.t || info.ResetAt != c.t.Add(24*time.Hour) {
+		t.Fatalf("started over %v reset %v", s.StartedOver("claude-a"), info.ResetAt)
+	}
+	if v := s.Build().Providers["claude"].Credentials[0]; v.Windows[1].Remaining != 1 {
+		t.Fatalf("weekly window = %+v", v.Windows)
+	}
+}
+
 func TestAReadingThatTrailsByAStepKeepsTheHigherUse(t *testing.T) {
 	s, c := newTestState()
 	reset := c.t.Add(3 * 24 * time.Hour)
@@ -896,6 +917,14 @@ func TestARefusedRequestStillLogsItsReading(t *testing.T) {
 	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t, Failed: true, ResponseHeader: h})
 	log := s.TakeLog()
 	if len(log) != 1 || !log[0].Poll || log[0].Used7d == nil || !near(*log[0].Used7d, 1) || log[0].Output != 0 {
+		t.Fatalf("log = %+v", log)
+	}
+	// The 5-hour window's reading and reset are logged too.
+	h.Set("anthropic-ratelimit-unified-5h-utilization", "0.25")
+	h.Set("anthropic-ratelimit-unified-5h-reset", fmt.Sprint(c.t.Add(3*time.Hour).Unix()))
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t, Output: 10, ResponseHeader: h})
+	log = s.TakeLog()
+	if len(log) != 1 || log[0].Used5h == nil || !near(*log[0].Used5h, 0.25) || log[0].Reset5 != c.t.Add(3*time.Hour).UnixMilli() {
 		t.Fatalf("log = %+v", log)
 	}
 }

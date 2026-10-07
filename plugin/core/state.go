@@ -80,6 +80,9 @@ type Cred struct {
 	// refusedAt is when the account last turned a request away while read as used up; a request
 	// it answers clears it. Kept in memory: after a restart one more refusal says it again.
 	refusedAt time.Time
+	// startedOver is when a window's use last fell back without a new period: what a plan change
+	// does, so the plan is read again. In memory only.
+	startedOver time.Time
 }
 
 // CredInfo is the inventory the host reports for a credential.
@@ -451,6 +454,19 @@ func (s *State) Account(authID string) (AccountInfo, bool) {
 	return AccountInfo{ID: c.ID, Label: MaskEmail(c.Email), Plan: c.Plan, Provider: c.Provider, ResetAt: reset}, true
 }
 
+// FiveHour tells when an account's 5-hour window resets, zero when none runs or it is not known,
+// and whether the account has a 5-hour window at all (a Codex account may have only a weekly one).
+func (s *State) FiveHour(authID string) (reset time.Time, present bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.creds[authID]
+	if c == nil {
+		return time.Time{}, false
+	}
+	_, reset, present, _ = s.effective(c, KindFiveHour, s.now())
+	return reset, present
+}
+
 // Accounts lists a provider's credentials for the usage view, by id.
 func (s *State) Accounts(provider string) []AccountInfo {
 	s.mu.Lock()
@@ -504,12 +520,27 @@ func (s *State) mergeWindowsLocked(authID, provider string, windows []Window) {
 		}
 		// Within one period use only grows. The usage endpoint and the response headers can
 		// trail each other by a step, so the newer reading is not always the higher one.
-		if ok && samePeriod(old.ResetAt, w.ResetAt) && w.Remaining > old.Remaining && w.Remaining-old.Remaining <= resetDrop {
-			w.Remaining = old.Remaining
+		if ok && samePeriod(old.ResetAt, w.ResetAt) && w.Remaining > old.Remaining {
+			if w.Remaining-old.Remaining <= resetDrop {
+				w.Remaining = old.Remaining
+			} else {
+				c.startedOver = w.ObservedAt
+			}
 		}
 		c.Windows[w.Kind] = w
 	}
 	s.dirty = true
+}
+
+// StartedOver tells when a window of the account last started over without a new period, zero when
+// none did since the proxy started.
+func (s *State) StartedOver(authID string) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c := s.creds[authID]; c != nil {
+		return c.startedOver
+	}
+	return time.Time{}
 }
 
 // samePeriod reports whether two readings end at the same reset; sources round it differently.

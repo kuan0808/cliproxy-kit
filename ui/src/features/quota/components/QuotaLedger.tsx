@@ -113,6 +113,7 @@ export function QuotaLedgerView({
           {live && <SnapshotAge generatedAtMs={live.generatedAtMs} now={nowProp} />}
         </p>
         <ToggleSwitch
+          name="show-emails"
           checked={showEmails}
           onChange={onShowEmailsChange}
           label={t('quota_ledger.show_emails')}

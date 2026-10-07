@@ -30,8 +30,9 @@
   quota resets soonest, among those with enough of their 5-hour window left, so quota that would
   expire unused goes first. A session then stays on its account and keeps its prompt cache; after an
   hour idle, when its cache is gone anyway, it moves off an account that is running low.
-- **Shows where the quota went.** A page in the management panel splits every account's week, or the
-  last 7 or 30 days, by project and session, from the requests that went through the proxy.
+- **Shows where the quota went.** A page in the management panel splits every account's 5-hour
+  window, its week, or the last 7 or 30 days, by project and session, from the requests that went
+  through the proxy.
 - **Shows the quota where you work.** A band above the Claude Code prompt shows the account, its
   5-hour and weekly use, the context, the prompt cache and every account's state, with one-press
   account and provider switching.
@@ -193,11 +194,13 @@ controls:
 | View | Shows |
 | --- | --- |
 | Ledger | Every account in the order new sessions get them, with each window and the reason. |
-| Usage | Each account's week, or 7 or 30 days, by project and session, with a tag on sessions a program or another device ran; tokens, cache hit rate, days. |
+| Usage | Each account's 5-hour window or week, or 7 or 30 days, by project and session, with a tag on sessions a program or another device ran; tokens, cache hit rate, days, and over 5 hours the windows of the last day. |
 
 ![The projects and sessions behind an account's week](docs/images/projects.png)
 
-Days before quota-pilot was installed have no quota readings. `python3 scripts/usage-backfill.py`,
+When a window starts over before its reset, as a plan change does, the page counts it from then and
+says so; the use before stays in the 7- and 30-day views. Days before quota-pilot was installed have
+no quota readings. `python3 scripts/usage-backfill.py`,
 run once on the proxy's machine, recovers their token counts from Claude Code's transcripts.
 
 ## Configuration
@@ -236,8 +239,9 @@ cd mod && claude plugin test . && claude plugin validate .   # the band
 ```
 
 `scripts/install-plugin.sh` installs a local build; `git config core.hooksPath scripts/git-hooks`
-turns on a pre-commit check for credentials (it needs PyYAML). A `v<version>` tag publishes the release the plugin store
-installs from; it must match the band's version in `mod/.claude-plugin/plugin.json`.
+turns on a pre-commit check for credentials (it needs PyYAML). A `v<version>` tag publishes the
+release the plugin store installs from; it must match the band's version in
+`mod/.claude-plugin/plugin.json`.
 
 ## Disclaimer
 

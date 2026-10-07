@@ -1,18 +1,21 @@
 /**
  * The usage view's summary card. Each provider in the scope gets a block in its own unit, a part of
- * one of its accounts' weekly quota, never added to another provider's. Over the current week a
- * block shows each account's week as a bar; over 7 or 30 days, what each day used. Below the
- * blocks: what the tokens were and how well the cache worked.
+ * one of its accounts' weekly quota (5-hour quota over 5h), never added to another provider's. Over
+ * the current week or 5-hour window a block shows each account's window as a bar, and beneath it
+ * the days of the week or the 5-hour windows of the last day; over 7 or 30 days, what each day
+ * used. Below the blocks: what the tokens were and how well the cache worked.
  */
 
 import { Fragment, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import type {
   QuotaPilotComposition,
   QuotaPilotUsage,
   QuotaPilotUsageAccount,
   QuotaPilotUsageDay,
   QuotaPilotUsageProject,
+  QuotaPilotUsageWindow,
 } from '@/types';
 import {
   averageContext,
@@ -24,7 +27,9 @@ import {
   formatDayTime,
   formatRate,
   formatShare,
+  formatTime,
   formatTokens,
+  isWindowRange,
   projectColours,
   projectLabel,
   providerColour,
@@ -34,6 +39,7 @@ import {
   ranLine,
   scopeAccounts,
   sessionLabel,
+  windowKey,
 } from '../usageFormat';
 import { BarCard, PickableBars } from './QuotaUsageBars';
 import { focusUsageSession } from '../usageFocus';
@@ -132,16 +138,16 @@ export function UsageSummary({ usage, now }: { usage: QuotaPilotUsage; now: numb
             {t(rangeKey(usage.range))}
           </div>
           <span className={styles.period}>
-            {usage.range === 'week'
-              ? t('quota_usage.all_week_hint')
+            {isWindowRange(usage.range)
+              ? t(windowKey('all_week_hint', usage.range))
               : periodText(usage.fromMs, now, locale)}
           </span>
         </div>
       )}
       {blocks.map((block) => (
         <div key={block.provider} className={all ? styles.block : undefined}>
-          {usage.range === 'week' ? (
-            <WeekBlock usage={usage} block={block} all={all} colourOf={colourOf} />
+          {isWindowRange(usage.range) ? (
+            <WindowBlock usage={usage} block={block} all={all} colourOf={colourOf} />
           ) : (
             <RangeBlock usage={usage} block={block} all={all} colourOf={colourOf} now={now} />
           )}
@@ -152,8 +158,8 @@ export function UsageSummary({ usage, now }: { usage: QuotaPilotUsage; now: numb
           <Composition
             composition={usage.composition}
             note={
-              usage.range === 'week' && anyBefore
-                ? t('quota_usage.composition_week')
+              isWindowRange(usage.range) && anyBefore
+                ? t(windowKey('composition_week', usage.range))
                 : t(rangeKey(usage.range))
             }
             noCacheWrite={blocks.every((b) => b.provider === 'codex')}
@@ -199,8 +205,11 @@ function BlockHead({ block, all, period }: { block: Block; all: boolean; period:
   );
 }
 
-/** Over the current week: the readings out of the accounts' quota, and each account's week. */
-function WeekBlock({
+/**
+ * Over the current week or 5-hour window: the readings out of the accounts' quota, and each
+ * account's window. Over 5h an account with a weekly quota only has no window to show.
+ */
+function WindowBlock({
   usage,
   block,
   all,
@@ -213,8 +222,10 @@ function WeekBlock({
 }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage;
+  const range = usage.range;
   const whenOf = (ms: number | null) => (ms ? formatDayTime(ms, locale) : '—');
-  const { accounts, account } = block;
+  const { account } = block;
+  const accounts = block.accounts.filter((a) => !a.noWindow);
   const anyKnown = accounts.some((a) => a.known);
   const parts: Record<string, number> = {};
   accounts.forEach((a) =>
@@ -238,22 +249,49 @@ function WeekBlock({
       })
     );
   }
-  if (!anyKnown) notes.push(t('quota_usage.not_read_note'));
+  // A window that started over before its reset (a plan change) counts from then. Over 5h the
+  // window before shows as a bar, unless its readings did not name their reset.
+  const barred = (id: string) =>
+    Object.values(usage.windows).some((list) => list.some((w) => w.account === id && !w.running));
+  accounts
+    .filter((a) => a.restartedAtMs !== null)
+    .forEach((a) =>
+      notes.push(
+        t(
+          range === '5h' && !barred(a.id)
+            ? 'quota_usage.restart_note_5h_unlisted'
+            : windowKey('restart_note', range),
+          { account: a.label, when: formatDayTime(a.restartedAtMs ?? 0, locale) }
+        )
+      )
+    );
+  if (!anyKnown) notes.push(t(windowKey('not_read_note', range)));
   // Nothing used is said only when every account was read.
   else if (block.used === 0 && accounts.every((a) => a.known))
-    notes.push(t('quota_usage.unused_note'));
+    notes.push(t(windowKey('unused_note', range)));
   else if (Object.keys(parts).length === 0 && block.used > block.beforeLog + block.outside) {
     notes.push(
       t('quota_usage.not_logged_note')
     );
   }
 
-  const period = all
-    ? t('quota_usage.period_week_own')
-    : account
-      ? t('quota_usage.period_week', { from: whenOf(usage.fromMs), to: whenOf(account.resetAtMs) })
-      : t('quota_usage.period_week_own');
+  const period =
+    !all && account?.resetAtMs
+      ? t(windowKey('period_week', range), {
+          from: whenOf(usage.fromMs),
+          to: whenOf(account.resetAtMs),
+        })
+      : t(windowKey('period_week_own', range));
 
+  if (accounts.length === 0) {
+    // Over 5h: accounts with a weekly quota only.
+    return (
+      <>
+        <BlockHead block={block} all={all} period="" />
+        <p className={styles.foot}>{t('quota_usage.five_none_note')}</p>
+      </>
+    );
+  }
   return (
     <>
       <BlockHead block={block} all={all} period={period} />
@@ -264,8 +302,8 @@ function WeekBlock({
         </span>
         <span className={styles.bigHint}>
           {block.capacity > 1
-            ? t('quota_usage.capacity_accounts', { count: block.capacity })
-            : t('quota_usage.capacity_single')}
+            ? t(windowKey('capacity_accounts', range), { count: block.capacity })
+            : t(windowKey('capacity_single', range))}
         </span>
       </div>
       <div className={styles.slots} data-many={accounts.length > 1 ? 'true' : undefined}>
@@ -274,12 +312,15 @@ function WeekBlock({
             <div className={styles.slotHead}>
               <strong>{a.label}</strong>
               <span className={styles.slotValue}>
-                {a.known ? formatShare(a.used) : t('quota_usage.not_read')}
+                {a.known ? formatShare(a.used) : t(windowKey('not_read', range))}
               </span>
-              {a.resetAtMs && (
+              {a.resetAtMs ? (
                 <span className={styles.slotReset}>
                   {t('quota_usage.resets_at', { when: whenOf(a.resetAtMs) })}
                 </span>
+              ) : (
+                range === '5h' &&
+                a.known && <span className={styles.slotReset}>{t('quota_usage.five_idle')}</span>
               )}
             </div>
             <AccountBar
@@ -298,7 +339,11 @@ function WeekBlock({
         outside={block.outside}
         colourOf={colourOf}
       />
-      <DailyChart usage={usage} block={block} named={named} colourOf={colourOf} />
+      {range === '5h' ? (
+        <WindowsChart usage={usage} block={block} named={named} colourOf={colourOf} />
+      ) : (
+        <DailyChart usage={usage} block={block} named={named} colourOf={colourOf} />
+      )}
       {notes.map((note) => (
         <p key={note} className={styles.foot}>
           {note}
@@ -308,7 +353,7 @@ function WeekBlock({
   );
 }
 
-/** One account's week: what was used before logging, each project, outside, and what is left. */
+/** One account's window: what was used before logging, each project, outside, and what is left. */
 function AccountBar({
   account,
   named,
@@ -618,6 +663,154 @@ function DailyChart({
         );
       }}
     />
+  );
+}
+
+/** A window's parts as a bar's segments: the block's named projects, the others, then outside. */
+function windowSegments(
+  w: QuotaPilotUsageWindow,
+  named: string[],
+  colourOf: (name: string) => string,
+  t: TFunction
+) {
+  return [
+    ...named.map((name) => ({
+      name: projectLabel(t, name),
+      project: true,
+      colour: colourOf(name),
+      x: w.projects[name] ?? 0,
+    })),
+    {
+      name: t('quota_usage.other_projects'),
+      project: false,
+      colour: REST_COLOUR,
+      x: Object.entries(w.projects)
+        .filter(([name]) => !named.includes(name))
+        .reduce((a, [, x]) => a + x, 0),
+    },
+    {
+      name: t('quota_usage.before_log'),
+      project: false,
+      colour: 'var(--usage-hatch)',
+      x: w.beforeLog,
+    },
+    { name: t('quota_usage.outside'), project: false, colour: 'var(--usage-other)', x: w.outside },
+  ].filter((s) => s.x > 0);
+}
+
+/**
+ * The 5-hour windows of the last day, one bar each on the scale of one window, coloured by project
+ * as the block's legend is. Picking one shows when it ran, what it used by project, its largest
+ * sessions (those of the running window open in the table below) and what its requests ran.
+ */
+function WindowsChart({
+  usage,
+  block,
+  named,
+  colourOf,
+}: {
+  usage: QuotaPilotUsage;
+  block: Block;
+  named: string[];
+  colourOf: (name: string) => string;
+}) {
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage;
+  const windows = usage.windows[block.provider] ?? [];
+  const labels = new Map(block.accounts.map((a) => [a.id, a.label]));
+  const many = new Set(windows.map((w) => w.account)).size > 1;
+  const listed = new Set(usage.projects.flatMap((p) => p.sessions.map((s) => s.id)));
+  const since =
+    usage.windowsFromMs !== null
+      ? t('quota_usage.windows_from_note', { when: formatDayTime(usage.windowsFromMs, locale) })
+      : '';
+  if (windows.length === 0) return since ? <p className={styles.foot}>{since}</p> : null;
+
+  const segmentsOf = (w: QuotaPilotUsageWindow) => windowSegments(w, named, colourOf, t);
+  const spanOf = (w: QuotaPilotUsageWindow) =>
+    `${formatDayTime(w.fromMs, locale)}–${formatTime(w.toMs, locale)}`;
+  const titleOf = (w: QuotaPilotUsageWindow) =>
+    [many ? labels.get(w.account) : '', spanOf(w), w.running ? t('quota_usage.window_running') : '']
+      .filter(Boolean)
+      .join(' · ');
+  const figureOf = (w: QuotaPilotUsageWindow) =>
+    t('quota_usage.window_used', { value: formatShare(w.used) });
+  const projectsOf = (w: QuotaPilotUsageWindow) => {
+    const segments = segmentsOf(w);
+    return [
+      ...segments.filter((s) => s.project).sort((a, b) => b.x - a.x),
+      ...segments.filter((s) => !s.project),
+    ]
+      .map((s) => `${s.name} ${formatShare(s.x)}`)
+      .join(t('quota_usage.list_separator'));
+  };
+  const sessionName = (s: QuotaPilotUsageWindow['sessions'][number]) =>
+    sessionLabel(t, s.id, s.title) + (s.used !== null ? ` ${formatShare(s.used)}` : '');
+
+  return (
+    <>
+      <PickableBars
+        label={t('quota_usage.windows_label')}
+        bars={windows.map((w) => ({
+          key: `${w.account}-${w.fromMs}`,
+          label: [
+            `${titleOf(w)}: ${figureOf(w)}`,
+            projectsOf(w),
+            w.sessions.map(sessionName).join(t('quota_usage.list_separator')),
+            ranLine(t, w.requests, w.tokens, locale),
+          ]
+            .filter((x) => x && x !== '—')
+            .join(' · '),
+          segments: segmentsOf(w),
+        }))}
+        peak={Math.max(1, ...windows.map((w) => w.used))}
+        axis={
+          <div className={styles.chartAxis} aria-hidden="true">
+            {windows.map((w) => (
+              <span key={`${w.account}-${w.fromMs}`}>{formatTime(w.fromMs, locale)}</span>
+            ))}
+          </div>
+        }
+        detail={(i) => {
+          const w = windows[i];
+          return (
+            <BarCard
+              title={titleOf(w)}
+              figure={figureOf(w)}
+              rows={[
+                { label: t('quota_usage.readout_projects'), value: projectsOf(w) },
+                {
+                  label: t('quota_usage.readout_sessions'),
+                  value: w.sessions.map((x, j) => (
+                    <Fragment key={x.id || '-'}>
+                      {j > 0 && t('quota_usage.list_separator')}
+                      {w.running && listed.has(x.id) ? (
+                        <button
+                          type="button"
+                          className={styles.barCardLink}
+                          title={sessionLabel(t, x.id, x.title)}
+                          onClick={() => focusUsageSession(x.id)}
+                        >
+                          {sessionLabel(t, x.id, x.title)}
+                        </button>
+                      ) : (
+                        sessionLabel(t, x.id, x.title)
+                      )}
+                      {x.used !== null && ` ${formatShare(x.used)}`}
+                    </Fragment>
+                  )),
+                },
+                {
+                  label: t('quota_usage.readout_use'),
+                  value: ranLine(t, w.requests, w.tokens, locale),
+                },
+              ]}
+            />
+          );
+        }}
+      />
+      {since && <p className={styles.foot}>{since}</p>}
+    </>
   );
 }
 

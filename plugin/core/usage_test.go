@@ -268,9 +268,9 @@ func TestARangeWalksWindowsThatDoNotAlign(t *testing.T) {
 	if !near(q.Counted, 0.15) || !near(q.Sessions["s3"].Used, 0.01) || !near(q.Outside, 0.11) {
 		t.Fatalf("new window read as one: counted %v s3 %v outside %v", q.Counted, q.Sessions["s3"].Used, q.Outside)
 	}
-	// Over one week the new window starts the week over.
+	// Over one week the new window starts the week over, counting from its first request.
 	w := Attribute(entries, "A", Span{From: 2 * day, To: 20 * day, CountFrom: 2 * day})
-	if w.Restart != 12*day-WindowJitter || !near(w.Used, 0.02) || len(w.Sessions) != 2 {
+	if w.Restart != 12*day || !near(w.Used, 0.02) || len(w.Sessions) != 2 {
 		t.Fatalf("week: restart %v used %v sessions %+v", w.Restart, w.Used, w.Sessions)
 	}
 }
@@ -299,7 +299,7 @@ func TestUseBeforeLoggingCountsWhereItsWindowBegan(t *testing.T) {
 	}
 	// Without a reset time the window follows the account's weekly schedule.
 	entries[0].Reset7, entries[1].Reset7 = 0, 0
-	r := Attribute(entries, "A", Span{To: 20 * day, CountFrom: 3 * day, LogStart: 5 * day, Range: true, Week: 11 * day})
+	r := Attribute(entries, "A", Span{To: 20 * day, CountFrom: 3 * day, LogStart: 5 * day, Range: true, WindowStart: 11 * day})
 	if !near(r.BeforeLog, 0.30) {
 		t.Fatalf("scheduled window began on day 4: before %v unplaced %v", r.BeforeLog, r.Unplaced)
 	}
@@ -345,7 +345,7 @@ func TestScheduledWindowsSplitWithoutResetTimes(t *testing.T) {
 			LogEntry{T: w*weekMs + 20, Session: "s", Account: "A", Output: 100},
 			LogEntry{T: w*weekMs + 30, Account: "A", Poll: true, Used7d: f(0.04)})
 	}
-	r := Attribute(entries, "A", Span{To: 4 * weekMs, Range: true, Week: 3 * weekMs})
+	r := Attribute(entries, "A", Span{To: 4 * weekMs, Range: true, WindowStart: 3 * weekMs})
 	if !near(r.Counted, 0.16) {
 		t.Fatalf("counted %v, want four windows of 4%%", r.Counted)
 	}
@@ -388,6 +388,167 @@ func TestABrokenStreamsTokensCount(t *testing.T) {
 	}
 }
 
+// A 5-hour span walks the 5-hour readings and their resets, as a week walks the weekly ones: a
+// reading of the window before is passed over, and the weekly readings say nothing of it.
+func TestAFiveHourSpanWalksTheFiveHourWindow(t *testing.T) {
+	start := int64(100 * FiveMs)
+	end := start + FiveMs
+	entries := []LogEntry{
+		{T: start - 60_000, Account: "A", Poll: true, Used5h: f(0.90), Reset5: start, Used7d: f(0.40)},
+		{T: start + 1000, Session: "s1", Account: "A", Model: "claude-opus-5-5", Output: 100},
+		// A request's reading is taken before it counts: this 2% is s1's.
+		{T: start + 2000, Session: "s2", Account: "A", Model: "claude-opus-5-5", Output: 300, Used5h: f(0.02), Reset5: end, Used7d: f(0.40)},
+		{T: start + 3000, Account: "A", Poll: true, Used5h: f(0.05), Reset5: end, Used7d: f(0.41)},
+	}
+	a := Attribute(entries, "A", Span{From: start - WindowJitter, To: end, CountFrom: start - WindowJitter, WindowStart: start, Five: true})
+	if !a.Seen || !near(a.Used, 0.05) || !near(a.Sessions["s1"].Used, 0.02) || !near(a.Sessions["s2"].Used, 0.03) {
+		t.Fatalf("used %v s1 %v s2 %v", a.Used, a.Sessions["s1"].Used, a.Sessions["s2"].Used)
+	}
+	// The 90% of the window before is passed over, and the weekly readings say nothing here.
+	if !near(a.Counted, 0.05) || a.Unplaced != 0 || a.BeforeLog != 0 || a.Outside != 0 {
+		t.Fatalf("counted %v unplaced %v before %v outside %v", a.Counted, a.Unplaced, a.BeforeLog, a.Outside)
+	}
+	// Readings that do not say their reset: a fall of the reading starts the next window, and the
+	// request before the fall ran in the window before.
+	old := []LogEntry{
+		{T: 1000, Account: "A", Poll: true, Used5h: f(0.80)},
+		{T: 1500, Session: "s1", Account: "A", Output: 100},
+		{T: 2000, Account: "A", Poll: true, Used5h: f(0.03)},
+	}
+	b := Attribute(old, "A", Span{To: 3000, Five: true})
+	if !near(b.Used, 0.03) {
+		t.Fatalf("used %v sessions %+v", b.Used, b.Sessions["s1"])
+	}
+}
+
+// A plan change starts a window over in place: the reading falls to nothing and settles there while
+// the reset stays. A high reading of the old window read just after (26, 0, 26, 0) is a late
+// reading: the window starts over at the first fall, and nothing is counted twice.
+func TestAWindowStartsOverInPlace(t *testing.T) {
+	week := int64(10 * weekMs)
+	reset := week + weekMs
+	at := func(ms int64) int64 { return week + ms }
+	entries := []LogEntry{
+		{T: at(1000), Account: "A", Poll: true, Used7d: f(0), Reset7: reset},
+		{T: at(2000), Session: "s1", Account: "A", Output: 100},
+		{T: at(3000), Account: "A", Poll: true, Used7d: f(0.26), Reset7: reset},
+		{T: at(4000), Account: "A", Poll: true, Used7d: f(0), Reset7: reset},
+		{T: at(5000), Account: "A", Poll: true, Used7d: f(0.26), Reset7: reset},
+		{T: at(6000), Account: "A", Poll: true, Used7d: f(0), Reset7: reset},
+		{T: at(7000), Session: "s2", Account: "A", Output: 100},
+		{T: at(8000), Account: "A", Poll: true, Used7d: f(0.02), Reset7: reset},
+	}
+	w := Attribute(entries, "A", Span{From: week - WindowJitter, To: at(day), CountFrom: week - WindowJitter, WindowStart: week})
+	// It holds no request from before the fall: it counts from the fall.
+	if !near(w.Used, 0.02) || w.Restart != at(4000) || w.Sessions["s1"] != nil || !near(w.Sessions["s2"].Used, 0.02) {
+		t.Fatalf("week: used %v restart %v sessions %+v", w.Used, w.Restart, w.Sessions)
+	}
+	if len(w.Periods) != 1 || w.Periods[0].From != at(3000) || !near(w.Periods[0].Parts["s2"], 0.02) {
+		t.Fatalf("week periods %+v", w.Periods)
+	}
+	// Over a range both windows count, the 26% once.
+	r := Attribute(entries, "A", Span{From: week - WindowJitter, To: at(day), CountFrom: week - WindowJitter, Range: true})
+	if !near(r.Counted, 0.28) || !near(r.Sessions["s1"].Used, 0.26) || !near(r.Sessions["s2"].Used, 0.02) {
+		t.Fatalf("range: counted %v sessions %+v", r.Counted, r.Sessions)
+	}
+	if len(r.Periods) != 2 || r.Periods[0].Ended != at(3000) || !near(r.Periods[0].Used, 0.26) || r.Periods[0].Requests != 1 ||
+		r.Periods[1].Reset != reset || !near(r.Periods[1].Used, 0.02) || r.Periods[1].Requests != 1 {
+		t.Fatalf("range periods %+v", r.Periods)
+	}
+}
+
+// A request whose reading tells the start-over belongs to the new window, though a late high
+// reading of the old one comes after it.
+func TestARequestAtTheFallIsTheNewWindows(t *testing.T) {
+	minute := int64(60 * 1000)
+	at := func(m int64) int64 { return 10*weekMs + m*minute }
+	reset := int64(11 * weekMs)
+	entries := []LogEntry{
+		{T: at(0), Account: "A", Poll: true, Used7d: f(0.26), Reset7: reset},
+		{T: at(1), Session: "s1", Account: "A", Output: 100, Used7d: f(0), Reset7: reset},
+		{T: at(4), Account: "A", Poll: true, Used7d: f(0.26), Reset7: reset},
+		{T: at(5), Account: "A", Poll: true, Used7d: f(0), Reset7: reset},
+		{T: at(6), Account: "A", Poll: true, Used7d: f(0.01), Reset7: reset},
+	}
+	w := Attribute(entries, "A", Span{From: at(-10), To: at(60), CountFrom: at(-10), WindowStart: 10 * weekMs})
+	if w.Restart != at(1) || !near(w.Used, 0.01) || !near(w.Sessions["s1"].Used, 0.01) || w.Periods[0].Requests != 1 {
+		t.Fatalf("restart %v used %v sessions %+v periods %+v", w.Restart, w.Used, w.Sessions, w.Periods)
+	}
+}
+
+// Within lateReading after a start-over, a reading nearer the fall than the old highest is use of
+// the new window; and a late reading of the old window after a later one began has no say.
+func TestUseRightAfterAStartOverCounts(t *testing.T) {
+	minute := int64(60 * 1000)
+	at := func(m int64) int64 { return 10*weekMs + m*minute }
+	reset := int64(11 * weekMs)
+	entries := []LogEntry{
+		{T: at(0), Account: "A", Poll: true, Used7d: f(0.26), Reset7: reset},
+		{T: at(1), Session: "s1", Account: "A", Output: 100, Used7d: f(0), Reset7: reset},
+		{T: at(3), Account: "A", Poll: true, Used7d: f(0.10), Reset7: reset},
+	}
+	w := Attribute(entries, "A", Span{From: at(-10), To: at(60), CountFrom: at(-10), WindowStart: 10 * weekMs})
+	if w.Restart != at(1) || !near(w.Used, 0.10) || !near(w.Sessions["s1"].Used, 0.10) {
+		t.Fatalf("restart %v used %v sessions %+v", w.Restart, w.Used, w.Sessions)
+	}
+	later := int64(12 * weekMs)
+	entries = []LogEntry{
+		{T: at(0), Account: "A", Poll: true, Used7d: f(0.50), Reset7: reset},
+		{T: at(1), Account: "A", Poll: true, Used7d: f(0), Reset7: reset},
+		{T: at(2), Session: "s1", Account: "A", Output: 100},
+		{T: at(2) + 1000, Account: "A", Poll: true, Used7d: f(0.02), Reset7: reset},
+		{T: at(3), Account: "A", Poll: true, Used7d: f(0.01), Reset7: later},
+		{T: at(4), Account: "A", Poll: true, Used7d: f(0.50), Reset7: reset},
+	}
+	r := Attribute(entries, "A", Span{From: at(-10), To: at(60), CountFrom: at(-10), Range: true})
+	if len(r.Periods) != 3 || !near(r.Periods[1].Used, 0.02) || !near(r.Sessions["s1"].Used, 0.02) {
+		t.Fatalf("periods %+v sessions %+v", r.Periods, r.Sessions)
+	}
+}
+
+// After a window starts over in place the rate is learned anew: a plan change changes what a
+// request uses, and the old rate would call the new use outside.
+func TestARateIsLearnedAnewAfterAStartOver(t *testing.T) {
+	minute := int64(60 * 1000)
+	at := func(m int64) int64 { return 10*weekMs + m*minute }
+	reset := int64(11 * weekMs)
+	entries := []LogEntry{{T: at(0), Account: "A", Poll: true, Used7d: f(0.50), Reset7: reset}}
+	for i := int64(1); i <= 4; i++ { // 1% a request
+		entries = append(entries, LogEntry{T: at(2 * i), Session: "old", Account: "A", Output: 100},
+			LogEntry{T: at(2*i + 1), Account: "A", Poll: true, Used7d: f(0.50 + 0.01*float64(i)), Reset7: reset})
+	}
+	entries = append(entries,
+		LogEntry{T: at(20), Account: "A", Poll: true, Used7d: f(0), Reset7: reset},
+		LogEntry{T: at(30), Session: "new", Account: "A", Output: 100},
+		LogEntry{T: at(31), Account: "A", Poll: true, Used7d: f(0.10), Reset7: reset})
+	w := Attribute(entries, "A", Span{From: at(-10), To: at(60), CountFrom: at(-10), WindowStart: 10 * weekMs})
+	if !near(w.Used, 0.10) || !near(w.Sessions["new"].Used, 0.10) || !near(w.Outside, 0) {
+		t.Fatalf("used %v outside %v sessions %+v", w.Used, w.Outside, w.Sessions)
+	}
+}
+
+// A reading that falls and comes back up within lateReading is a late reading, whether or not the
+// readings name their reset; one that comes back later was a new window, used since.
+func TestAFallThatComesBackIsALateReading(t *testing.T) {
+	late := []LogEntry{
+		{T: 1000, Account: "A", Poll: true, Used7d: f(0.50)},
+		{T: 2000, Account: "A", Poll: true, Used7d: f(0.40)},
+		{T: 3000, Account: "A", Poll: true, Used7d: f(0.50)},
+	}
+	// The first reading has no request before it: it is use outside, once.
+	if a := Attribute(late, "A", Span{To: day}); !near(a.Used, 0.50) || !near(a.Outside, 0.50) || a.Restart != 0 || len(a.Periods) != 1 {
+		t.Fatalf("late: used %v outside %v restart %v periods %d", a.Used, a.Outside, a.Restart, len(a.Periods))
+	}
+	reset := []LogEntry{
+		{T: 1000, Account: "A", Poll: true, Used7d: f(0.50)},
+		{T: 2000, Account: "A", Poll: true, Used7d: f(0.40)},
+		{T: 2000 + lateReading + 1000, Account: "A", Poll: true, Used7d: f(0.50)},
+	}
+	if a := Attribute(reset, "A", Span{To: day}); !near(a.Used, 0.50) || !near(a.Outside, 0.50) || len(a.Periods) != 1 || a.Restart == 0 {
+		t.Fatalf("reset: used %v outside %v periods %+v restart %v", a.Used, a.Outside, a.Periods, a.Restart)
+	}
+}
+
 // Lines the disk refused wait ahead of the newer ones.
 func TestUnwrittenLinesGoBackFirst(t *testing.T) {
 	s, _ := newTestState()
@@ -402,7 +563,7 @@ func TestUnwrittenLinesGoBackFirst(t *testing.T) {
 func TestAWeekIgnoresTheWeekBeforesReading(t *testing.T) {
 	week := int64(10 * weekMs)
 	entries := []LogEntry{{T: week - 60_000, Account: "A", Poll: true, Used7d: f(0.90), Reset7: week}}
-	w := Attribute(entries, "A", Span{From: week - WindowJitter, To: week + day, CountFrom: week - WindowJitter, Week: week})
+	w := Attribute(entries, "A", Span{From: week - WindowJitter, To: week + day, CountFrom: week - WindowJitter, WindowStart: week})
 	if w.Seen || w.Used != 0 || w.Unplaced != 0 {
 		t.Fatalf("seen %v used %v unplaced %v", w.Seen, w.Used, w.Unplaced)
 	}

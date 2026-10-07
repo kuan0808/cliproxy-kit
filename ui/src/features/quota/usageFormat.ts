@@ -287,8 +287,20 @@ export function coveredFrom(accounts: QuotaPilotUsageAccount[]): number | null {
 
 /** The i18n key naming a range. */
 export const rangeKey = (range: string) =>
-  range === '7d'
-    ? 'quota_usage.range_7d'
-    : range === '30d'
-      ? 'quota_usage.range_30d'
-      : 'quota_usage.range_week';
+  range === '5h'
+    ? 'quota_usage.range_5h'
+    : range === '7d'
+      ? 'quota_usage.range_7d'
+      : range === '30d'
+        ? 'quota_usage.range_30d'
+        : 'quota_usage.range_week';
+
+/** Whether a range is each account's current window (week or 5-hour), not a run of days. */
+export const isWindowRange = (range: string) => range === 'week' || range === '5h';
+
+/**
+ * The key of a text that speaks of the current window: the week's, or over 5h its own (`_5h`).
+ * Keys given here have both forms in every locale.
+ */
+export const windowKey = (key: string, range: string) =>
+  `quota_usage.${key}${range === '5h' ? '_5h' : ''}`;

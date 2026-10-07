@@ -345,7 +345,7 @@ func TestTheWeekComesFromTheLogUntilTheProxyReadsAgain(t *testing.T) {
 	}
 	attribute := func(info core.AccountInfo) core.Attribution {
 		ws := weekStart(info, now).UnixMilli()
-		return core.Attribute(lines, "a", core.Span{From: ws - core.WindowJitter, To: ms(now), CountFrom: ws - core.WindowJitter, LogStart: lines[0].T, Week: ws})
+		return core.Attribute(lines, "a", core.Span{From: ws - core.WindowJitter, To: ms(now), CountFrom: ws - core.WindowJitter, LogStart: lines[0].T, WindowStart: ws})
 	}
 	info := windowOf(core.AccountInfo{ID: "a", Provider: "claude"}, lines, now)
 	if !info.ResetAt.Equal(reset) {
@@ -364,5 +364,122 @@ func TestTheWeekComesFromTheLogUntilTheProxyReadsAgain(t *testing.T) {
 	}
 	if got := windowOf(core.AccountInfo{ID: "a"}, lines, reset.Add(8*day)); !got.ResetAt.Equal(reset.Add(14 * day)) {
 		t.Fatalf("rolled reset = %v", got.ResetAt)
+	}
+}
+
+// A window that started over just before its reset is listed once, as the running one.
+func TestFiveHourListsARunningWindowOnce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	ms := func(d time.Duration) int64 { return now.Add(d).UnixMilli() }
+	used := func(f float64) *float64 { return &f }
+	reset := ms(time.Minute)
+	line := func(at time.Duration, session string, u5 float64) core.LogEntry {
+		return core.LogEntry{T: ms(at), Account: "a", Provider: "claude", Session: session, Output: 100,
+			Poll: session == "", Used5h: used(u5), Reset5: reset}
+	}
+	lines := []core.LogEntry{line(-4*time.Hour, "", 0.30), line(-time.Minute, "", 0.30),
+		line(-30*time.Second, "s1", 0), line(-10*time.Second, "", 0.01)}
+	u := &reading{week: map[string]core.Attribution{}, ranged: map[string]core.Attribution{}, froms: map[string]int64{}, starts: map[string]int64{},
+		owner: map[string]string{}, windows: map[string][]fiveWindow{}, noWindow: map[string]bool{}, namedFrom: map[string]int64{}}
+	u.fiveHour(core.AccountInfo{ID: "a", Provider: "claude"}, lines, lines[0].T, now, nil)
+	if list := u.windows["a"]; len(list) != 2 || list[0].running || !list[1].running {
+		t.Fatalf("windows = %+v", list)
+	}
+}
+
+// A Claude plan is read again an hour on, on a refresh, and after a window started over in place.
+func TestAPlanIsReadAgainWhenItMayHaveChanged(t *testing.T) {
+	now := time.Date(2026, 10, 7, 6, 30, 0, 0, time.UTC)
+	read := now.Add(-10 * time.Minute)
+	switch {
+	case !planDue(time.Time{}, time.Time{}, now, false):
+		t.Fatal("never read: not due")
+	case planDue(read, time.Time{}, now, false):
+		t.Fatal("read 10 minutes ago: due")
+	case !planDue(now.Add(-planTTL), time.Time{}, now, false):
+		t.Fatal("read an hour ago: not due")
+	case !planDue(read, time.Time{}, now, true):
+		t.Fatal("refresh: not due")
+	case !planDue(read, read.Add(time.Minute), now, false):
+		t.Fatal("started over since the read: not due")
+	case planDue(read, read.Add(-time.Minute), now, false):
+		t.Fatal("started over before the read: due")
+	}
+}
+
+// Over 5h an account shows its running window as the week range shows its week, from where it
+// started over in place, and the windows of the last day beside it; readings that do not name their
+// reset list no window.
+func TestFiveHourShowsTheRunningWindowAndTheLastDays(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	ms := func(d time.Duration) int64 { return now.Add(d).UnixMilli() }
+	used := func(f float64) *float64 { return &f }
+	r1, r2 := ms(-5*time.Hour), ms(2*time.Hour)
+	line := func(at time.Duration, session string, u5 *float64, reset int64) core.LogEntry {
+		return core.LogEntry{T: ms(at), Account: "a", Provider: "claude", Session: session, Output: 100, Poll: session == "", Used5h: u5, Reset5: reset}
+	}
+	lines := []core.LogEntry{
+		line(-20*time.Hour, "", used(0.5), 0), // no reset named: no window of its own
+		// Watched closely: the rise is the request's.
+		line(-10*time.Hour, "", used(0), r1),
+		line(-10*time.Hour+10*time.Minute, "s1", nil, 0),
+		line(-10*time.Hour+20*time.Minute, "", used(0.30), r1),
+		line(-2*time.Hour, "s2", nil, 0),
+		line(-1*time.Hour, "", used(0.10), r2),
+		line(-30*time.Minute, "", used(0), r2), // started over in place, and held
+		line(-20*time.Minute, "s3", nil, 0),
+		line(-10*time.Minute, "", used(0.05), r2),
+	}
+	u := &reading{week: map[string]core.Attribution{}, ranged: map[string]core.Attribution{}, froms: map[string]int64{}, starts: map[string]int64{},
+		owner: map[string]string{}, windows: map[string][]fiveWindow{}, noWindow: map[string]bool{}, namedFrom: map[string]int64{}}
+	acct := u.fiveHour(core.AccountInfo{ID: "a", Provider: "claude"}, lines, lines[0].T, now, nil)
+	if !near(acct.Used, 0.05) || !acct.Known || acct.NoWindow || acct.ResetAt.UnixMilli() != r2 || acct.RestartedAt != ms(-time.Hour) {
+		t.Fatalf("account = %+v", acct)
+	}
+	if s := u.ranged["a"].Sessions; s["s2"] != nil || !near(s["s3"].Used, 0.05) {
+		t.Fatalf("running window sessions = %+v", s)
+	}
+	// Its tokens count from the fall, as no request since the last rise is left; it shows from the
+	// last reading before the fall.
+	if u.froms["a"] != ms(-30*time.Minute) || u.starts["a"] != ms(-time.Hour) {
+		t.Fatalf("counts from %v, shows from %v", u.froms["a"], u.starts["a"])
+	}
+	list := u.windows["a"]
+	if len(list) != 3 || u.namedFrom["a"] != ms(-10*time.Hour) {
+		t.Fatalf("windows = %+v, named from %v", list, u.namedFrom["a"])
+	}
+	first, cut, running := list[0], list[1], list[2]
+	if first.From != r1-core.FiveMs || windowEnd(first.Period) != r1 || !near(first.Used, 0.30) || !near(first.Parts["s1"], 0.30) || first.running {
+		t.Fatalf("first window = %+v", first)
+	}
+	if windowEnd(cut.Period) != ms(-time.Hour) || !near(cut.Used, 0.10) || !near(cut.Parts["s2"], 0.10) {
+		t.Fatalf("window cut short = %+v", cut)
+	}
+	if !running.running || running.From != ms(-time.Hour) || windowEnd(running.Period) != r2 || !near(running.Parts["s3"], 0.05) {
+		t.Fatalf("running window = %+v", running)
+	}
+	// An idle account loses no window, whether or not the provider names a reset for it: one that
+	// used nothing and served no request is not running.
+	idle := []core.LogEntry{{T: ms(-time.Hour), Account: "i", Provider: "claude", Poll: true, Used5h: used(0)},
+		{T: ms(-time.Minute), Account: "i", Provider: "claude", Poll: true, Used5h: used(0), Reset5: ms(5 * time.Hour)}}
+	acct = u.fiveHour(core.AccountInfo{ID: "i", Provider: "claude"}, idle, idle[0].T, now, nil)
+	if acct.NoWindow || !acct.Known || !acct.ResetAt.IsZero() || len(u.windows["i"]) != 0 || u.namedFrom["i"] != 0 {
+		t.Fatalf("idle = %+v, windows %v, named from %v", acct, u.windows["i"], u.namedFrom["i"])
+	}
+	// A recent reading that used some and named no reset (an older log's) leaves it unknown.
+	older := []core.LogEntry{{T: ms(-time.Hour), Account: "o", Provider: "claude", Poll: true, Used5h: used(0.30)}}
+	if acct = u.fiveHour(core.AccountInfo{ID: "o", Provider: "claude"}, older, older[0].T, now, nil); acct.Known || acct.NoWindow {
+		t.Fatalf("older = %+v", acct)
+	}
+	// An account read with a weekly window only has no 5-hour window; one not read at all is not known.
+	weekly := []core.LogEntry{{T: ms(-time.Hour), Account: "cx", Provider: "codex", Poll: true, Used7d: used(0.20)}}
+	codex := u.fiveHour(core.AccountInfo{ID: "cx", Provider: "codex"}, weekly, weekly[0].T, now, nil)
+	if !codex.NoWindow || codex.Known || !u.noWindow["cx"] || len(u.windows["cx"]) != 0 {
+		t.Fatalf("codex = %+v", codex)
+	}
+	if fresh := u.fiveHour(core.AccountInfo{ID: "n", Provider: "claude"}, nil, 0, now, nil); fresh.NoWindow || fresh.Known {
+		t.Fatalf("not read = %+v", fresh)
 	}
 }

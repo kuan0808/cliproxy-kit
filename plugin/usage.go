@@ -578,7 +578,7 @@ type usageProject struct {
 	Sessions []usageSession     `json:"sessions"`
 }
 
-// usageAccount is one account over its current weekly window.
+// usageAccount is one account over its current window of the range: its week, or over 5h its 5-hour window.
 type usageAccount struct {
 	core.AccountInfo
 	Order     int                `json:"order"`    // routing order; 1 is the account a new session gets
@@ -590,6 +590,10 @@ type usageAccount struct {
 	Projects  map[string]float64 `json:"projects"`            // project name to its part of this account's week
 	Covered   int64              `json:"covered_from"`        // when the log began to see this account; earlier use is before_log
 	OffProxy  bool               `json:"off_proxy,omitempty"` // named by the log, not held by the proxy
+	// RestartedAt is when its window started over before its reset (a plan change, a reset asked
+	// for): the window counts from then.
+	RestartedAt int64 `json:"restarted_at,omitempty"`
+	NoWindow    bool  `json:"no_window,omitempty"` // 5h: the account has no 5-hour window (a Codex account may have only a weekly one)
 }
 
 type usageProvider struct {
@@ -598,33 +602,38 @@ type usageProvider struct {
 }
 
 // usageDoc answers one scope over one range: an account, a provider's accounts or every
-// account; each account's current week (each over its own), or the last 7 or 30 local days.
-// Figures are parts of one account's weekly quota, never added across providers. Every answer also
-// carries every account's current week, so the picker and the scope show one reading of the log.
+// account; each account's current week or 5-hour window (each over its own), or the last 7 or 30
+// local days. Figures are parts of one account's weekly quota (of its 5-hour window over "5h"),
+// never added across providers. Every answer also carries every account's current window of the
+// range, so the picker and the scope show one reading of the log.
 type usageDoc struct {
 	// Mode "account" and "provider": `used` is the scope's part, added across its accounts. Mode
 	// "all": each provider's part is in Totals and `used_by`; `used` only orders the list.
 	Mode     string `json:"mode"`
 	Scope    string `json:"scope"`
-	Range    string `json:"range"` // "week", "7d" or "30d"
+	Range    string `json:"range"` // "week", "5h", "7d" or "30d"
 	Provider string `json:"provider,omitempty"`
 	Capacity int    `json:"capacity"` // accounts in the scope; in mode all see Totals
-	From     int64  `json:"from"`     // range start; for "week" the earliest week start in the scope
+	From     int64  `json:"from"`     // range start; for "week" and "5h" the earliest window start in the scope
 	To       int64  `json:"to"`
-	// Week: `used` is the accounts' weekly readings added. 7d and 30d: what the range used,
+	// Week and 5h: `used` is the accounts' readings added. 7d and 30d: what the range used,
 	// across the weeks it touches. Both hold before_log and outside.
-	Used        float64                `json:"used"`
-	Known       bool                   `json:"known"` // a reading fell in the range for some account of the scope
-	BeforeLog   float64                `json:"before_log"`
-	Unplaced    float64                `json:"unplaced"`         // 7d and 30d: what may lie on either side of the range start; not in used
-	Undated     float64                `json:"undated"`          // the part of outside read across midnight: in used, on no day
-	Unread      []string               `json:"unread,omitempty"` // 7d and 30d: accounts with no reading in the range
-	Outside     float64                `json:"outside"`
-	Totals      map[string]usageTotals `json:"totals,omitempty"`
-	Composition core.Composition       `json:"composition"`
-	Projects    []usageProject         `json:"projects"`
-	Providers   []usageProvider        `json:"providers"`
-	Daily       map[string][]usageDay  `json:"daily,omitempty"` // 7d and 30d: each provider's days, oldest first
+	Used        float64                  `json:"used"`
+	Known       bool                     `json:"known"` // a reading fell in the range for some account of the scope
+	BeforeLog   float64                  `json:"before_log"`
+	Unplaced    float64                  `json:"unplaced"`         // 7d and 30d: what may lie on either side of the range start; not in used
+	Undated     float64                  `json:"undated"`          // the part of outside read across midnight: in used, on no day
+	Unread      []string                 `json:"unread,omitempty"` // 7d and 30d: accounts with no reading in the range
+	Outside     float64                  `json:"outside"`
+	Totals      map[string]usageTotals   `json:"totals,omitempty"`
+	Composition core.Composition         `json:"composition"`
+	Projects    []usageProject           `json:"projects"`
+	Providers   []usageProvider          `json:"providers"`
+	Daily       map[string][]usageDay    `json:"daily,omitempty"`   // each provider's days, oldest first
+	Windows     map[string][]usageWindow `json:"windows,omitempty"` // 5h: each provider's windows of the last day, oldest first
+	// WindowsFrom is, over 5h, since when every reading of the scope that shows use names its 5-hour
+	// reset, when that is within the last day: some windows that ended before it are not listed.
+	WindowsFrom int64 `json:"windows_from,omitempty"`
 }
 
 // usageTotals is one provider's accounts in the range, in parts of one account's quota.
@@ -665,20 +674,33 @@ type dayUse struct {
 	weights  map[string]float64 // by session as the table lists it
 }
 
-// reading is the log read once for a report: every account's current week for the picker, and
-// every account over the requested range.
+// reading is the log read once for a report: every account's current window of the range (its
+// week, or its 5-hour window) for the picker, and every account over the requested range.
 type reading struct {
 	rng       string
 	from      int64 // range start for 7d and 30d
 	entries   []core.LogEntry
-	week      map[string]core.Attribution // each account's current week
-	ranged    map[string]core.Attribution // each account over the range (the week for "week")
+	week      map[string]core.Attribution // each account's current window: its week, or over 5h its 5-hour window
+	ranged    map[string]core.Attribution // each account over the range (the current window for "week" and "5h")
 	froms     map[string]int64            // where each account's counting starts
+	starts    map[string]int64            // where each account's period shown begins
 	owner     map[string]string           // account to provider
 	providers []usageProvider
+	windows   map[string][]fiveWindow // 5h: each account's windows of the last day
+	noWindow  map[string]bool         // 5h: accounts without a 5-hour window
+	namedFrom map[string]int64        // 5h: since when each account's readings that show use name their 5-hour reset
 }
 
-// rangeDays is how many local days a range covers; 0 for "week".
+// validRange is the range a report covers: "week" unless "5h", "7d" or "30d" is asked.
+func validRange(rng string) string {
+	switch rng {
+	case "5h", "7d", "30d":
+		return rng
+	}
+	return "week"
+}
+
+// rangeDays is how many local days a range covers; 0 for "week" and "5h".
 func rangeDays(rng string) int {
 	switch rng {
 	case "7d":
@@ -708,7 +730,8 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 		return logStart
 	}
 	u := &reading{rng: rng, week: map[string]core.Attribution{}, ranged: map[string]core.Attribution{},
-		froms: map[string]int64{}, owner: map[string]string{}}
+		froms: map[string]int64{}, starts: map[string]int64{}, owner: map[string]string{}, windows: map[string][]fiveWindow{}, noWindow: map[string]bool{},
+		namedFrom: map[string]int64{}}
 	if n := rangeDays(rng); n > 0 {
 		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		u.from = today.AddDate(0, 0, 1-n).UnixMilli()
@@ -750,18 +773,21 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 		}
 	}
 	for id, ls := range lines {
-		var latest *core.LogEntry
+		var latest, weekly *core.LogEntry // its latest reading, and its latest weekly one
 		for i := range ls {
-			if ls[i].Used7d != nil {
+			if ls[i].Used7d != nil || ls[i].Used5h != nil {
 				latest = &ls[i]
+			}
+			if ls[i].Used7d != nil {
+				weekly = &ls[i]
 			}
 		}
 		if held[id] || latest == nil || latest.Provider == "" {
 			continue
 		}
 		info := core.AccountInfo{ID: id, Label: offProxyLabel(id), Provider: latest.Provider}
-		if latest.Reset7 > 0 {
-			info.ResetAt = time.UnixMilli(latest.Reset7)
+		if weekly != nil && weekly.Reset7 > 0 {
+			info.ResetAt = time.UnixMilli(weekly.Reset7)
 		}
 		byProvider[latest.Provider] = append(byProvider[latest.Provider], account{info: info, order: math.MaxInt32, off: true})
 	}
@@ -782,6 +808,13 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 		up := usageProvider{Provider: name, Accounts: []usageAccount{}}
 		for _, a := range byProvider[name] {
 			id := a.info.ID
+			u.owner[id] = name
+			if rng == "5h" {
+				acct := u.fiveHour(a.info, lines[id], startOf(id), now, keep)
+				acct.Order, acct.Sessions, acct.Covered, acct.OffProxy = a.order, a.sessions, startOf(id), a.off
+				up.Accounts = append(up.Accounts, acct)
+				continue
+			}
 			// The weekly schedule, when known, places readings that do not say their window.
 			ws, schedule := weekStart(a.info, now).UnixMilli(), int64(0)
 			if !a.off || !a.info.ResetAt.IsZero() {
@@ -791,20 +824,21 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 				ws = now.UnixMilli() // its window is over, and the next one is not known
 			}
 			// The window's start is known to about a minute: the walk takes its first requests in.
-			span := core.Span{From: ws - core.WindowJitter, To: now.UnixMilli(), CountFrom: ws - core.WindowJitter, LogStart: startOf(id), Week: ws, Keep: keep}
+			span := core.Span{From: ws - core.WindowJitter, To: now.UnixMilli(), CountFrom: ws - core.WindowJitter, LogStart: startOf(id), WindowStart: ws, Keep: keep}
 			current := core.Attribute(lines[id], id, span)
-			u.week[id], u.owner[id] = current, name
+			u.week[id] = current
 			if u.from == 0 {
 				// After a new window the period, and its tokens, start where it began.
-				u.ranged[id], u.froms[id] = current, max(span.From, current.Restart)
+				u.ranged[id], u.froms[id], u.starts[id] = current, max(span.From, current.Restart), max(ws, restartedAt(current))
 			} else {
 				// One walk across the windows the range touches, begun a week early so the reading
 				// and the rate are known where the range begins.
-				span = core.Span{From: u.from - 7*day, To: now.UnixMilli(), CountFrom: u.from, LogStart: startOf(id), Week: schedule, Range: true, Keep: keep}
-				u.ranged[id], u.froms[id] = core.Attribute(lines[id], id, span), u.from
+				span = core.Span{From: u.from - 7*day, To: now.UnixMilli(), CountFrom: u.from, LogStart: startOf(id), WindowStart: schedule, Range: true, Keep: keep}
+				u.ranged[id], u.froms[id], u.starts[id] = core.Attribute(lines[id], id, span), u.from, u.from
 			}
 			up.Accounts = append(up.Accounts, usageAccount{AccountInfo: a.info, Order: a.order, Sessions: a.sessions,
-				Used: current.Used, Known: current.Seen, BeforeLog: current.BeforeLog, Outside: current.Outside, Covered: startOf(id), OffProxy: a.off})
+				Used: current.Used, Known: current.Seen, BeforeLog: current.BeforeLog, Outside: current.Outside, Covered: startOf(id),
+				OffProxy: a.off, RestartedAt: restartedAt(current)})
 		}
 		sort.SliceStable(up.Accounts, func(i, j int) bool {
 			a, b := up.Accounts[i], up.Accounts[j]
@@ -880,9 +914,7 @@ func usageResponse(query url.Values) ([]byte, error) {
 	if scope == "" {
 		scope = "all"
 	}
-	if rangeDays(rng) == 0 {
-		rng = "week"
-	}
+	rng = validRange(rng)
 	u := readUsage(now, rng, nil)
 	inScope, accounts, ok := u.covers(scope)
 	if !ok {
@@ -895,12 +927,10 @@ func usageResponse(query url.Values) ([]byte, error) {
 		var parts []core.Attribution
 		var unread []string
 		for _, id := range accounts {
-			if provider == "" || u.owner[id] == provider {
+			if (provider == "" || u.owner[id] == provider) && !u.noWindow[id] {
 				parts = append(parts, u.ranged[id])
-				// The walk takes in a minute or two before the window for its first requests; the
-				// period shown is the window.
-				doc.From = min(doc.From, u.froms[id]+core.WindowJitter)
-				if rng != "week" && !u.ranged[id].Seen {
+				doc.From = min(doc.From, u.starts[id])
+				if rangeDays(rng) > 0 && !u.ranged[id].Seen {
 					unread = append(unread, id)
 				}
 			}
@@ -908,7 +938,7 @@ func usageResponse(query url.Values) ([]byte, error) {
 		return core.Combine(parts), len(parts), unread
 	}
 	used := func(a core.Attribution) float64 {
-		if rng == "week" {
+		if rangeDays(rng) == 0 {
 			return a.Used
 		}
 		return a.Counted
@@ -1001,6 +1031,13 @@ func usageResponse(query url.Values) ([]byte, error) {
 			ids[core.ViewSession(id)] = true
 		}
 	}
+	for _, list := range u.windows {
+		for _, w := range list {
+			for id := range w.Parts {
+				ids[core.ViewSession(id)] = true
+			}
+		}
+	}
 	refs := placeProjects(ids)
 	for i := range doc.Providers {
 		for j := range doc.Providers[i].Accounts {
@@ -1009,6 +1046,30 @@ func usageResponse(query url.Values) ([]byte, error) {
 		}
 	}
 	doc.Projects = groupByProject(shares, served, usedBy, usedProviders, refs)
+	if rng == "5h" {
+		// Each provider's windows of the last day, of the scope's accounts, oldest first.
+		doc.Windows = map[string][]usageWindow{}
+		for _, id := range accounts {
+			doc.WindowsFrom = max(doc.WindowsFrom, u.namedFrom[id])
+		}
+		if doc.WindowsFrom <= now.UnixMilli()-day {
+			doc.WindowsFrom = 0
+		}
+		for _, provider := range providersIn {
+			list := []usageWindow{}
+			for _, id := range accounts {
+				if u.owner[id] == provider {
+					for _, w := range u.windows[id] {
+						list = append(list, windowDoc(id, w, refs))
+					}
+				}
+			}
+			sort.SliceStable(list, func(i, j int) bool { return list[i].From < list[j].From })
+			doc.Windows[provider] = list
+		}
+		savePlaced()
+		return marshalUsage(doc)
+	}
 	// Each provider's days: over a range, the range's; over the week, from the day its earliest
 	// window in the scope began.
 	doc.Daily = map[string][]usageDay{}
@@ -1019,14 +1080,17 @@ func usageResponse(query url.Values) ([]byte, error) {
 			from = now.UnixMilli()
 			for _, id := range accounts {
 				if u.owner[id] == provider {
-					from = min(from, u.froms[id]+core.WindowJitter)
+					from = min(from, u.starts[id])
 				}
 			}
 		}
 		doc.Daily[provider] = days(all, used7[provider], refs, from, now)
 	}
 	savePlaced()
+	return marshalUsage(doc)
+}
 
+func marshalUsage(doc usageDoc) ([]byte, error) {
 	body, errMarshal := json.Marshal(doc)
 	if errMarshal != nil {
 		return nil, errMarshal
@@ -1130,12 +1194,9 @@ func usageSessionResponse(query url.Values) ([]byte, error) {
 	if !query.Has("id") {
 		return httpResponse(http.StatusBadRequest, []byte(`{"error":"id required"}`))
 	}
-	id, scope, rng := query.Get("id"), query.Get("account"), query.Get("range")
+	id, scope, rng := query.Get("id"), query.Get("account"), validRange(query.Get("range"))
 	if scope == "" {
 		scope = "all"
-	}
-	if rangeDays(rng) == 0 {
-		rng = "week"
 	}
 	u := readUsage(time.Now(), rng, func(s string) bool { return core.ViewSession(s) == id })
 	inScope, accounts, ok := u.covers(scope)

@@ -39,6 +39,7 @@ import {
   formatTime,
   formatTokens,
   coveredFrom,
+  isWindowRange,
   modelName,
   projectColours,
   projectLabel,
@@ -53,6 +54,7 @@ import {
   sourceTag,
   sourceWhy,
   splitAutomated,
+  windowKey,
   type ProjectSources,
   type SessionSource,
 } from '../usageFormat';
@@ -349,9 +351,9 @@ export function UsageTable({
                       {t('quota_usage.col_provider_quota', { provider: providerTitle(p) })}
                     </span>
                   ))
-                ) : usage.range === 'week' ? (
+                ) : isWindowRange(usage.range) ? (
                   <span role="columnheader">
-                    {t('quota_usage.col_weekly')}
+                    {t(windowKey('col_weekly', usage.range))}
                     <span className={styles.optional}>
                       {t('quota_usage.col_weekly_of', { value: `${usage.capacity * 100}%` })}
                     </span>
@@ -762,7 +764,10 @@ export function SessionDetailView({
     if (b.requests === 0) return { text: t('quota_usage.stretch_idle'), quiet: true };
     if (parts.length === 0) return { text: t('quota_usage.stretch_unsettled'), quiet: true };
     if (parts.length === 1 && oneProvider)
-      return { text: t('quota_usage.day_used', { value: formatShare(parts[0][1]) }), quiet: false };
+      return {
+        text: t(windowKey('day_used', range), { value: formatShare(parts[0][1]) }),
+        quiet: false,
+      };
     return {
       text: parts.map(([p, x]) => `${providerTitle(p)} ${formatShare(x)}`).join(' · '),
       quiet: false,

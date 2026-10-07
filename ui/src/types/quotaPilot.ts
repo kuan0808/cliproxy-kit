@@ -109,7 +109,7 @@ export interface QuotaPilotUsageProject {
   sessions: QuotaPilotUsageSession[];
 }
 
-/** One account over its current weekly window. */
+/** One account over its current window of the range: its week, or over 5h its 5-hour window. */
 export interface QuotaPilotUsageAccount {
   id: string;
   label: string;
@@ -131,6 +131,10 @@ export interface QuotaPilotUsageAccount {
   coveredFromMs: number | null;
   /** Named by the log but not held by the proxy: one removed since, or a Codex login elsewhere. */
   offProxy: boolean;
+  /** When its window started over before its reset (a plan change): the window counts from then. */
+  restartedAtMs: number | null;
+  /** 5h: the account has no 5-hour window (a Codex account may have only a weekly one). */
+  noWindow: boolean;
 }
 
 export interface QuotaPilotUsageProvider {
@@ -155,6 +159,26 @@ export interface QuotaPilotUsageDay {
    * The day's largest sessions, up to three: those readings tell by their part (`used`), then the
    * rest by weight (`used` null).
    */
+  sessions: { id: string; title: string; used: number | null }[];
+}
+
+/** One 5-hour window of one account, in parts of that window. */
+export interface QuotaPilotUsageWindow {
+  account: string;
+  fromMs: number;
+  /** When it resets, or ended when the next began first. */
+  toMs: number;
+  /** The window the summary shows. */
+  running: boolean;
+  /** Its last reading. */
+  used: number;
+  beforeLog: number;
+  outside: number;
+  /** Project name to its part of the window. */
+  projects: Record<string, number>;
+  requests: number;
+  tokens: QuotaPilotTokens;
+  /** Its largest sessions, up to three, by their part. */
   sessions: { id: string; title: string; used: number | null }[];
 }
 
@@ -198,15 +222,19 @@ export interface QuotaPilotUsageTotals {
   unread: string[];
 }
 
-/** Each account's current week (each over its own), or the last 7 or 30 local days. */
-export type QuotaPilotUsageRange = 'week' | '7d' | '30d';
+/**
+ * Each account's current 5-hour window or week (each over its own), or the last 7 or 30 local
+ * days.
+ */
+export type QuotaPilotUsageRange = '5h' | 'week' | '7d' | '30d';
 
 /**
  * Where usage went, for one scope over one range. Mode `account`: one account. Mode `provider`:
  * a provider's accounts added up, in units of one account's weekly quota. Mode `all`: every
- * provider, each in its own unit (Totals and `usedBy`), never added across providers. Week:
- * `used` is the weekly readings; 7d and 30d: what the range used across the weeks it touches.
- * Every report also lists every account's current week, read in the same pass, for the picker.
+ * provider, each in its own unit (Totals and `usedBy`), never added across providers. 5h and week:
+ * `used` is the windows' readings; 7d and 30d: what the range used across the weeks it touches.
+ * Every report also lists every account's current window of the range, read in the same pass, for
+ * the picker. Over 5h the unit is one account's 5-hour window.
  */
 export interface QuotaPilotUsage {
   mode: 'account' | 'provider' | 'all';
@@ -236,8 +264,12 @@ export interface QuotaPilotUsage {
   composition: QuotaPilotComposition;
   projects: QuotaPilotUsageProject[];
   providers: QuotaPilotUsageProvider[];
-  /** 7d and 30d: each provider's days, oldest first. */
+  /** Each provider's days, oldest first; none over 5h. */
   daily: Record<string, QuotaPilotUsageDay[]>;
+  /** 5h: each provider's windows of the last day, oldest first. */
+  windows: Record<string, QuotaPilotUsageWindow[]>;
+  /** 5h: since when every 5-hour window of the scope is known, when that is within the last day. */
+  windowsFromMs: number | null;
 }
 
 /** One session within a scope and range. */

@@ -534,7 +534,7 @@ func pollLoop(ctx context.Context) {
 	for {
 		interval := time.Duration(state.Config().IdlePollMinutes) * time.Minute
 		if last.IsZero() || (!state.Idle() && time.Since(last) >= interval) {
-			if complete, _ := pollOnce(ctx, 0); complete {
+			if complete, _ := pollOnce(ctx, 0, false); complete {
 				last = time.Now()
 			}
 		}
@@ -546,14 +546,24 @@ func pollLoop(ctx context.Context) {
 	}
 }
 
-// One poll at a time, the loop's or one asked for, and when each account was last read, whose
-// plan was read since the proxy started, and since when the host has listed no account.
+// One poll at a time, the loop's or one asked for, and when each account was last read, when its
+// Claude plan was, and since when the host has listed no account.
 var (
 	pollMu       sync.Mutex
 	polledAt     = map[string]time.Time{}
-	planRead     = map[string]bool{}
+	planReadAt   = map[string]time.Time{}
 	emptiedSince time.Time
 )
+
+// planTTL is how long a Claude plan read is trusted when nothing says it changed.
+const planTTL = time.Hour
+
+// planDue tells whether a Claude plan read at readAt is read again now: never read since the proxy
+// started, read more than planTTL ago, asked for by a refresh, or a window started over since,
+// which a plan change does.
+func planDue(readAt, startedOver, now time.Time, asked bool) bool {
+	return readAt.IsZero() || now.Sub(readAt) >= planTTL || asked || startedOver.After(readAt)
+}
 
 // minRepoll is how soon an account read already is read again when asked: a refresh clicked
 // again and again does not press the provider's usage endpoint.
@@ -569,7 +579,7 @@ func due(at, now time.Time, fresh time.Duration) bool {
 func refreshResponse() ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	_, read := pollOnce(ctx, minRepoll)
+	_, read := pollOnce(ctx, minRepoll, true)
 	appendLog(state.TakeLog())
 	body, errMarshal := json.Marshal(map[string]int{"read": read})
 	if errMarshal != nil {
@@ -579,8 +589,9 @@ func refreshResponse() ([]byte, error) {
 }
 
 // pollOnce reads each account's quota, skipping those read within `fresh`, and reports whether
-// the inventory was complete (an incomplete one is retried soon) and how many it read.
-func pollOnce(ctx context.Context, fresh time.Duration) (complete bool, read int) {
+// the inventory was complete (an incomplete one is retried soon) and how many it read. A refresh
+// asks for each Claude plan too, read within `fresh` of the last plan read only once.
+func pollOnce(ctx context.Context, fresh time.Duration, asked bool) (complete bool, read int) {
 	pollMu.Lock()
 	defer pollMu.Unlock()
 	defer func() {
@@ -634,16 +645,25 @@ func pollOnce(ctx context.Context, fresh time.Duration) (complete bool, read int
 		if ctx.Err() != nil {
 			return true, read
 		}
-		if info.Disabled || !core.Supported(info.Provider) || !due(polledAt[info.ID], now, fresh) {
+		if info.Disabled || !core.Supported(info.Provider) {
 			continue
 		}
-		pollCredential(ctx, info)
-		polledAt[info.ID], read = time.Now(), read+1
+		usage := due(polledAt[info.ID], now, fresh)
+		plan := asked && info.Provider != "codex" && due(planReadAt[info.ID], now, fresh)
+		if !usage && !plan {
+			continue
+		}
+		pollCredential(ctx, info, usage, plan)
+		if usage {
+			polledAt[info.ID], read = time.Now(), read+1
+		}
 	}
 	return true, read
 }
 
-func pollCredential(ctx context.Context, info core.CredInfo) {
+// pollCredential reads an account's quota when usage is set, and its Claude plan when that is
+// due or asked for.
+func pollCredential(ctx context.Context, info core.CredInfo, usage, asked bool) {
 	raw, errGet := callHost(pluginabi.MethodHostAuthGet, pluginapi.HostAuthGetRequest{AuthIndex: info.Index})
 	if errGet != nil {
 		state.NoteError("auth get " + info.Index + ": " + errGet.Error())
@@ -673,27 +693,31 @@ func pollCredential(ctx context.Context, info core.CredInfo) {
 		headers["Content-Type"] = []string{"application/json"}
 		headers["User-Agent"] = []string{"claude-cli/2.1.288 (external, cli)"}
 	}
-	body, status, errDo := httpGet(ctx, url, headers)
-	if errDo != nil {
-		state.NoteError("usage " + info.Provider + " " + info.Index + ": " + errDo.Error())
-		return
+	if usage {
+		body, status, errDo := httpGet(ctx, url, headers)
+		if errDo != nil {
+			state.NoteError("usage " + info.Provider + " " + info.Index + ": " + errDo.Error())
+			return
+		}
+		if status != http.StatusOK {
+			state.NoteError(fmt.Sprintf("usage %s %s: HTTP %d", info.Provider, info.Index, status))
+			return
+		}
+		state.MergeWindows(info.ID, info.Provider, core.WindowsFromUsageBody(info.Provider, body, time.Now()))
+		if info.Provider == "codex" {
+			state.SetPlan(info.ID, info.Provider, core.CodexPlan(body))
+		}
 	}
-	if status != http.StatusOK {
-		state.NoteError(fmt.Sprintf("usage %s %s: HTTP %d", info.Provider, info.Index, status))
-		return
-	}
-	state.MergeWindows(info.ID, info.Provider, core.WindowsFromUsageBody(info.Provider, body, time.Now()))
 	if info.Provider == "codex" {
-		state.SetPlan(info.ID, info.Provider, core.CodexPlan(body))
 		return
 	}
-	// The Claude plan comes from the profile, read once per proxy start; it rarely changes. The
-	// plan kept from before the start shows until then.
-	if !planRead[info.ID] {
+	// The Claude plan comes from the profile, read when planDue says; the plan kept from before
+	// a start shows until then.
+	if now := time.Now(); planDue(planReadAt[info.ID], state.StartedOver(info.ID), now, asked) {
 		profile, code, errProfile := httpGet(ctx, "https://api.anthropic.com/api/oauth/profile", headers)
 		if errProfile == nil && code == http.StatusOK {
 			state.SetPlan(info.ID, info.Provider, core.ClaudePlan(profile))
-			planRead[info.ID] = true
+			planReadAt[info.ID] = now
 		}
 	}
 }

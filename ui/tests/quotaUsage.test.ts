@@ -533,6 +533,109 @@ describe('usage view', () => {
     expect(closed).toContain('role="row"');
   });
 
+  test("over 5 hours: the running windows, the last day's windows, and accounts without one", () => {
+    const fiveProviders = [
+      {
+        provider: 'claude',
+        accounts: [
+          account('claude-k.json', 'k•••', {
+            used: 0.07,
+            reset_at: new Date(NOW_MS + 4 * H).toISOString(),
+            restarted_at: NOW_MS - H,
+            projects: { 'cliproxy-kit': 0.07 },
+          }),
+          // No window running: the next request starts one.
+          account('claude-d.json', 'd•••', { order: 2, used: 0, reset_at: null }),
+        ],
+      },
+      {
+        provider: 'codex',
+        accounts: [
+          account('codex-k.json', 'k•••', {
+            provider: 'codex',
+            known: false,
+            used: 0,
+            no_window: true,
+          }),
+        ],
+      },
+    ];
+    const window = (
+      from: number,
+      to: number,
+      used: number,
+      extra: Record<string, unknown> = {}
+    ) => ({
+      account: 'claude-k.json',
+      from,
+      to,
+      used,
+      requests: 9,
+      tokens: { output: 900 },
+      projects: { 'cliproxy-kit': used },
+      sessions: [{ id: 'aaaaaaaa-1', title: 'Band redesign', used }],
+      ...extra,
+    });
+    const five = report({
+      range: '5h',
+      capacity: 2,
+      used: 0.07,
+      before_log: 0,
+      outside: 0,
+      providers: fiveProviders,
+      windows: {
+        claude: [
+          window(NOW_MS - 10 * H, NOW_MS - 5 * H, 0.6),
+          window(NOW_MS - H, NOW_MS + 4 * H, 0.07, { running: true }),
+        ],
+      },
+      windows_from: NOW_MS - 12 * H,
+    });
+    expect(five.range).toBe('5h');
+    expect(five.providers[0].accounts[0].restartedAtMs).toBe(NOW_MS - H);
+    expect(five.providers[1].accounts[0].noWindow).toBe(true);
+    expect(five.windows.claude).toHaveLength(2);
+    const markup = render({ range: '5h', state: { status: 'ready', usage: five, latest: five } });
+    expect(markup).toContain('<button type="button" aria-pressed="true">5-hour window</button>');
+    // The picker speaks of 5-hour quota; Codex has none.
+    expect(markup).toContain('2 accounts · 5-hour quota');
+    expect(markup).toContain('No window running: the next request starts one');
+    expect(markup).toContain('No 5-hour window');
+    // The summary: the running windows, the window that started over, and the last day's windows.
+    expect(markup).toContain('5-hour quota of 2 accounts added up');
+    expect(markup).toContain('k••• started over on');
+    expect(markup).toContain('this window counts from then. The window before shows in the bars above.');
+    expect(markup).toContain('aria-label="5-hour windows of the last day, coloured by project"');
+    expect(markup).toContain('60% of the window');
+    expect(markup).toContain('running: 7.0% of the window');
+    expect(markup).toContain('Some earlier 5-hour windows are not listed: readings before');
+    // The table counts in parts of a 5-hour window.
+    expect(markup).toContain('5-hour quota<span class="optional"> (of 200%)</span>');
+    expect(markup).toContain('5-hour window: each account');
+    expect(markup).not.toContain('Usage per day');
+    // The window before is not a bar when its readings did not name their reset.
+    const alone = { ...five, windows: { claude: five.windows.claude.filter((w) => w.running) } };
+    const aloneMarkup = render({ range: '5h', state: { status: 'ready', usage: alone, latest: alone } });
+    expect(aloneMarkup).toContain('this window counts from then.');
+    expect(aloneMarkup).not.toContain('The window before shows in the bars above.');
+  });
+
+  test('a week that started over in place counts from then', () => {
+    const restarted = report({
+      providers: providers.map((p) => ({
+        ...p,
+        accounts: p.accounts.map((a) =>
+          a.id === 'claude-k.json' ? { ...a, restarted_at: NOW_MS - 3 * H } : a
+        ),
+      })),
+    });
+    const markup = render({ state: { status: 'ready', usage: restarted, latest: restarted } });
+    expect(markup).toContain('k••• started over on');
+    expect(markup).toContain(
+      'this week counts from then. What it used before shows in the last 7 days.'
+    );
+  });
+
   test('an account without a reading shows no figure', () => {
     const unread = providers.map((p) => ({
       ...p,

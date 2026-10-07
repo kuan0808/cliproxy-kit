@@ -1,6 +1,7 @@
 /**
- * Usage view: where weekly quota went this week, by project and session, for one account or a
- * provider's accounts added up, or how all usage split over 30 days. Numbers come from the
+ * Usage view: where weekly quota went this week (or 5-hour quota in the running window), by project
+ * and session, for one account or a provider's accounts added up, or how all usage split over 30
+ * days. Numbers come from the
  * quota-pilot plugin's usage log; per-session parts of the weekly quota are estimates, and the
  * view says how they are made at the bottom.
  *
@@ -28,13 +29,21 @@ import {
 import type { QuotaTabId } from '../constants';
 import type { QuotaPilotSnapshotState } from '../hooks/useQuotaPilotSnapshot';
 import { useQuotaPilotUsage, type QuotaPilotUsageResult } from '../hooks/useQuotaPilotUsage';
-import { formatDayTime, formatShare, providerTitle, rangeKey, usedLevel } from '../usageFormat';
+import {
+  formatDayTime,
+  formatShare,
+  isWindowRange,
+  providerTitle,
+  rangeKey,
+  usedLevel,
+  windowKey,
+} from '../usageFormat';
 import { UsageSummary } from './QuotaUsageSummary';
 import { UsageTable } from './QuotaUsageTable';
 import styles from './QuotaUsage.module.scss';
 
 export const ALL_SCOPE = 'all';
-const RANGES: QuotaPilotUsageRange[] = ['week', '7d', '30d'];
+const RANGES: QuotaPilotUsageRange[] = ['5h', 'week', '7d', '30d'];
 const providerScope = (provider: string) => `provider:${provider}`;
 
 export interface QuotaUsageProps {
@@ -164,7 +173,8 @@ export function QuotaUsageView({
             <summary>{t('quota_usage.method_title')}</summary>
             <p>{t('quota_usage.method_quota')}</p>
             {usage.mode !== 'account' && <p>{t('quota_usage.method_total')}</p>}
-            {usage.range !== 'week' && <p>{t('quota_usage.method_range')}</p>}
+            {usage.range === '5h' && <p>{t('quota_usage.method_5h')}</p>}
+            {!isWindowRange(usage.range) && <p>{t('quota_usage.method_range')}</p>}
           </details>
         </>
       )}
@@ -180,12 +190,16 @@ interface PickerProps {
   resolvedTheme: ResolvedTheme;
 }
 
+/** The accounts that have a window of the range: over 5h, not those with a weekly quota only. */
+const windowed = (accounts: QuotaPilotUsageAccount[]) => accounts.filter((a) => !a.noWindow);
+
 /**
  * Each provider is a group: its accounts added up first, then each account beneath on a tree
  * line. All providers together stand apart, because their quotas are not in the same unit.
  */
 function Picker({ report, scope, onPick, tab, resolvedTheme }: PickerProps) {
   const { t } = useTranslation();
+  const range = report.range;
   // A provider with no account to pick (only its tokens, over a range) shows in the report, not here.
   const groups = report.providers.filter(
     (p) => p.accounts.length > 0 && (tab === 'all' || p.provider === tab)
@@ -203,6 +217,7 @@ function Picker({ report, scope, onPick, tab, resolvedTheme }: PickerProps) {
           <ProviderGroup
             key={group.provider}
             group={group}
+            range={range}
             scope={scope}
             onPick={onPick}
             resolvedTheme={resolvedTheme}
@@ -217,21 +232,28 @@ function Picker({ report, scope, onPick, tab, resolvedTheme }: PickerProps) {
           >
             <span className={styles.allHead}>
               <span className={styles.allTitle}>{t('quota_usage.all_providers')}</span>
-              <span className={styles.muted}>{t('quota_usage.all_providers_hint')}</span>
+              <span className={styles.muted}>{t(windowKey('all_providers_hint', range))}</span>
             </span>
-            {/* Each provider's week in its own unit, side by side, never added. */}
+            {/* Each provider's window in its own unit, side by side, never added. */}
             {groups.map((p) => {
-              const known = p.accounts.filter((a) => a.known);
+              const slots = windowed(p.accounts);
+              const known = slots.filter((a) => a.known);
               const total = known.reduce((sum, a) => sum + a.used, 0);
               return (
                 <span key={p.provider} className={styles.allLine}>
                   <span>{providerTitle(p.provider)}</span>
-                  <Meter slots={p.accounts} />
+                  <Meter slots={slots} />
                   <span className={styles.allValue}>
-                    {known.length ? formatShare(total) : '—'}
-                    <small>
-                      {t('quota_usage.of_capacity', { value: `${p.accounts.length * 100}%` })}
-                    </small>
+                    {slots.length === 0 ? (
+                      <small>{t('quota_usage.no_five_window')}</small>
+                    ) : (
+                      <>
+                        {known.length ? formatShare(total) : '—'}
+                        <small>
+                          {t('quota_usage.of_capacity', { value: `${slots.length * 100}%` })}
+                        </small>
+                      </>
+                    )}
                   </span>
                 </span>
               );
@@ -245,19 +267,22 @@ function Picker({ report, scope, onPick, tab, resolvedTheme }: PickerProps) {
 
 function ProviderGroup({
   group,
+  range,
   scope,
   onPick,
   resolvedTheme,
 }: {
   group: QuotaPilotUsageProvider;
+  range: QuotaPilotUsageRange;
   scope: string;
   onPick: (scope: string) => void;
   resolvedTheme: ResolvedTheme;
 }) {
   const { t } = useTranslation();
   const { provider, accounts } = group;
-  const total = accounts.reduce((sum, a) => sum + (a.known ? a.used : 0), 0);
-  const anyKnown = accounts.some((a) => a.known);
+  const slots = windowed(accounts);
+  const total = slots.reduce((sum, a) => sum + (a.known ? a.used : 0), 0);
+  const anyKnown = slots.some((a) => a.known);
 
   return (
     <div className={styles.group}>
@@ -265,7 +290,9 @@ function ProviderGroup({
         <ProviderIcon provider={provider} resolvedTheme={resolvedTheme} />
         <span className={styles.groupTitle}>{providerTitle(provider)}</span>
         <span className={styles.groupHint}>
-          {t('quota_usage.provider_accounts', { count: accounts.length })}
+          {slots.length === 0
+            ? t('quota_usage.no_five_window')
+            : t(windowKey('provider_accounts', range), { count: accounts.length })}
         </span>
       </div>
       {accounts.length > 1 ? (
@@ -278,22 +305,38 @@ function ProviderGroup({
           >
             <span className={styles.rowName}>{t('quota_usage.total')}</span>
             <span className={styles.rowSub}>{accounts.map((a) => a.label).join(' + ')}</span>
-            <Meter slots={accounts} />
+            <Meter slots={slots} />
             <span className={styles.rowValue}>
               {anyKnown ? formatShare(total) : '—'}
-              <small>{t('quota_usage.of_capacity', { value: `${accounts.length * 100}%` })}</small>
+              {slots.length > 0 && (
+                <small>{t('quota_usage.of_capacity', { value: `${slots.length * 100}%` })}</small>
+              )}
             </span>
-            <span className={styles.rowNote}>{t('quota_usage.total_hint')}</span>
+            <span className={styles.rowNote}>
+              {slots.length > 0 ? t(windowKey('total_hint', range)) : ''}
+            </span>
           </button>
           <div className={styles.tree}>
             {accounts.map((account) => (
-              <AccountRow key={account.id} account={account} scope={scope} onPick={onPick} />
+              <AccountRow
+                key={account.id}
+                account={account}
+                range={range}
+                scope={scope}
+                onPick={onPick}
+              />
             ))}
           </div>
         </>
       ) : (
         accounts.map((account) => (
-          <AccountRow key={account.id} account={account} scope={scope} onPick={onPick} />
+          <AccountRow
+            key={account.id}
+            account={account}
+            range={range}
+            scope={scope}
+            onPick={onPick}
+          />
         ))
       )}
     </div>
@@ -302,10 +345,12 @@ function ProviderGroup({
 
 function AccountRow({
   account,
+  range,
   scope,
   onPick,
 }: {
   account: QuotaPilotUsageAccount;
+  range: QuotaPilotUsageRange;
   scope: string;
   onPick: (scope: string) => void;
 }) {
@@ -326,22 +371,26 @@ function AccountRow({
           </span>
         )}
       </span>
-      <Meter slots={[account]} />
+      <Meter slots={account.noWindow ? [] : [account]} />
       <span className={styles.rowValue}>{account.known ? formatShare(account.used) : '—'}</span>
       <span className={styles.rowNote}>
-        {!account.known
-          ? t('quota_usage.not_read')
-          : account.resetAtMs
-            ? t('quota_usage.resets_at', {
-                when: formatDayTime(account.resetAtMs, i18n.resolvedLanguage),
-              })
-            : ''}
+        {account.noWindow
+          ? t('quota_usage.no_five_window')
+          : !account.known
+            ? t(windowKey('not_read', range))
+            : account.resetAtMs
+              ? t('quota_usage.resets_at', {
+                  when: formatDayTime(account.resetAtMs, i18n.resolvedLanguage),
+                })
+              : range === '5h'
+                ? t('quota_usage.five_idle')
+                : ''}
       </span>
     </button>
   );
 }
 
-/** One slot per account, each filled to its weekly use. */
+/** One slot per account, each filled to its use of its window. */
 function Meter({ slots }: { slots: QuotaPilotUsageAccount[] }) {
   return (
     <span className={styles.meter} aria-hidden="true">

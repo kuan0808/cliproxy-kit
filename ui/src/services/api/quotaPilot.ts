@@ -22,6 +22,7 @@ import type {
   QuotaPilotUsageSession,
   QuotaPilotUsageSessionDetail,
   QuotaPilotUsageTotals,
+  QuotaPilotUsageWindow,
   QuotaPilotWindow,
 } from '@/types';
 
@@ -241,6 +242,8 @@ const normalizeUsageAccount = (value: unknown): QuotaPilotUsageAccount | null =>
     projects: asWeights(value.projects),
     coveredFromMs: asMs(value.covered_from),
     offProxy: value.off_proxy === true,
+    restartedAtMs: asMs(value.restarted_at),
+    noWindow: value.no_window === true,
   };
 };
 
@@ -263,18 +266,40 @@ const normalizeUsageDay = (value: unknown): QuotaPilotUsageDay | null => {
         metered: value.metered === true,
         requests: asNumber(value.requests),
         tokens: normalizeTokens(value.tokens),
-        sessions: listOf(value.sessions, (x) =>
-          isRecord(x)
-            ? {
-                id: asString(x.id),
-                title: asString(x.title),
-                used:
-                  typeof x.used === 'number' && Number.isFinite(x.used)
-                    ? Math.max(0, x.used)
-                    : null,
-              }
-            : null
-        ),
+        sessions: daySessions(value.sessions),
+      }
+    : null;
+};
+
+const daySessions = (value: unknown) =>
+  listOf(value, (x) =>
+    isRecord(x)
+      ? {
+          id: asString(x.id),
+          title: asString(x.title),
+          used: typeof x.used === 'number' && Number.isFinite(x.used) ? Math.max(0, x.used) : null,
+        }
+      : null
+  );
+
+const normalizeUsageWindow = (value: unknown): QuotaPilotUsageWindow | null => {
+  if (!isRecord(value)) return null;
+  const account = asString(value.account);
+  const fromMs = asMs(value.from);
+  const toMs = asMs(value.to);
+  return account && fromMs !== null && toMs !== null
+    ? {
+        account,
+        fromMs,
+        toMs,
+        running: value.running === true,
+        used: fraction(value.used),
+        beforeLog: fraction(value.before_log),
+        outside: fraction(value.outside),
+        projects: asWeights(value.projects),
+        requests: asNumber(value.requests),
+        tokens: normalizeTokens(value.tokens),
+        sessions: daySessions(value.sessions),
       }
     : null;
 };
@@ -299,7 +324,7 @@ const normalizeTotals = (value: unknown): QuotaPilotUsageTotals => {
 };
 
 const USAGE_MODES = new Set(['account', 'provider', 'all']);
-const USAGE_RANGES = new Set(['week', '7d', '30d']);
+const USAGE_RANGES = new Set(['5h', 'week', '7d', '30d']);
 
 export function normalizeQuotaPilotUsage(value: unknown): QuotaPilotUsage | null {
   if (!isRecord(value) || typeof value.mode !== 'string' || !USAGE_MODES.has(value.mode))
@@ -315,6 +340,12 @@ export function normalizeQuotaPilotUsage(value: unknown): QuotaPilotUsage | null
   if (isRecord(value.daily)) {
     Object.entries(value.daily).forEach(([provider, days]) => {
       daily[provider.toLowerCase()] = listOf(days, normalizeUsageDay);
+    });
+  }
+  const windows: Record<string, QuotaPilotUsageWindow[]> = {};
+  if (isRecord(value.windows)) {
+    Object.entries(value.windows).forEach(([provider, list]) => {
+      windows[provider.toLowerCase()] = listOf(list, normalizeUsageWindow);
     });
   }
   return {
@@ -337,6 +368,8 @@ export function normalizeQuotaPilotUsage(value: unknown): QuotaPilotUsage | null
     projects: listOf(value.projects, normalizeUsageProject),
     providers: listOf(value.providers, normalizeUsageProvider),
     daily,
+    windows,
+    windowsFromMs: asMs(value.windows_from),
   };
 }
 

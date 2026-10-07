@@ -3,6 +3,7 @@ import styles from './ToggleSwitch.module.scss';
 
 interface ToggleSwitchProps {
   checked: boolean;
+  name: string;
   onChange: (value: boolean) => void;
   label?: ReactNode;
   ariaLabel?: string;
@@ -12,6 +13,7 @@ interface ToggleSwitchProps {
 
 export function ToggleSwitch({
   checked,
+  name,
   onChange,
   label,
   ariaLabel,
@@ -34,6 +36,7 @@ export function ToggleSwitch({
     <label className={className}>
       <input
         type="checkbox"
+        name={name}
         checked={checked}
         onChange={handleChange}
         disabled={disabled}

@@ -69,8 +69,12 @@ Quota comes from the rate-limit headers of every response (Claude's `anthropic-r
 Codex's `x-codex-*`) and, for idle accounts, from each provider's usage endpoint every
 `idle_poll_minutes`, using the account's own token through the host. Polling pauses after 15 minutes
 without any request, because a plugin turned off in the config is never told, and resumes with the
-next one; the page's Refresh reads every account at once. Within one window a reading only rises.
-The last readings survive a restart in `state.json`, marked stale as they age.
+next one; the page's Refresh reads every account at once. Within one window a reading only rises:
+a fall of up to 5 points is a late reading and keeps the higher one, a larger fall is the window
+starting over before its reset (a plan change, or a reset the user asked for). A Claude account's
+plan is read from its profile when first seen, every hour, on Refresh and after its window started
+over; a Codex plan comes with each usage reading. The last readings survive a restart in
+`state.json`, marked stale as they age.
 
 ### Where quota went
 
@@ -80,6 +84,20 @@ previous rise, weighted by tokens (output 5x, cache write 2x, cache read 0.1x) a
 rise no request explains, such as use on claude.ai or another tool, is reported as not matched to
 a request; use from before the log began is reported apart and never split. A range is known only
 from readings inside it, so an account without one shows as unknown, not as 0%.
+
+Each reading belongs to a window, named by the reset it reports, so a reading of an earlier window
+read late is passed over. A window can also start over in place: Claude keeps the reset time after
+a plan change. A fall of more than 5 points below the window's highest reading starts a new window
+when the readings settle there, the last one within 5 minutes after it nearer the fall than the
+highest; one that settles back up was a late reading. Within those 5 minutes a reading nearer the
+old highest is a late reading of the window before, one nearer the fall is use of the new window.
+The new window learns anew what a request uses, and the current week counts from where it started
+over; the page says so.
+
+Over 5 hours the same split runs on the 5-hour readings: each account's running window, and the
+windows of the last day, told apart by the reset each reading names (logged from 0.1.4 on, so
+earlier windows are not listed). For an idle account Claude still names a reset, a later one with
+each reading: a window that used nothing and served no request shows as not running.
 
 Claude Code sessions are named from their transcripts (the user's rename, else Claude Code's
 title, else the first request); a Codex session, whose records the proxy does not read, by its
