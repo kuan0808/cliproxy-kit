@@ -31,13 +31,55 @@ describe('ledger', () => {
     expect(codex.rows[0].next).toBe(true);
   });
 
-  test('sums weekly remaining as shown and finds the soonest weekly reset', () => {
-    expect(claude.pool).toEqual({ remaining: 63, capacity: 200 });
-    expect(claude.fiveHour).toEqual({ remaining: 168, capacity: 200 });
-    expect(codex.pool).toEqual({ remaining: 93, capacity: 100 });
+  test('sums weekly use as shown and finds the soonest weekly reset', () => {
+    expect(claude.pool).toEqual({ used: 137, capacity: 200, known: 2, unread: [] });
+    expect(claude.fiveHour).toEqual({ used: 32, capacity: 200, known: 2, unread: [] });
+    expect(codex.pool).toEqual({ used: 7, capacity: 100, known: 1, unread: [] });
     expect(codex.fiveHour).toBeNull();
     expect(claude.nextReset?.row.label).toBe('a•••');
     expect(claude.nextReset?.atMs).toBe(Date.parse('2026-10-04T11:59:59Z'));
+  });
+
+  test('a pool holds every account with the window, and names those not read yet', () => {
+    const window = (kind: string, remaining: number) => ({ kind, remaining, reset_at: '2026-10-10T00:00:00Z' });
+    const pools = normalizeQuotaPilotSnapshot({
+      providers: {
+        codex: {
+          credentials: [
+            { id: 'codex-a.json', label: 'a•••', windows: [window('5h', 0.8), window('7d', 0.7)] },
+            { id: 'codex-b.json', label: 'b•••', windows: [] },
+            { id: 'codex-c.json', label: 'c•••', windows: [window('7d', 0.9)], absent: ['5h'] },
+          ],
+        },
+      },
+    })!;
+    const [group] = buildLedger(pools, 'all', '', NOW_MS).groups;
+    // b's week is not known: not taken as unused, and named.
+    expect(group.pool).toMatchObject({ used: 40, capacity: 300, known: 2 });
+    expect(group.pool?.unread.map((row) => row.label)).toEqual(['b•••']);
+    // c has no 5-hour window at all, so it is not in that pool; b may have one.
+    expect(group.fiveHour).toMatchObject({ used: 20, capacity: 200, known: 1 });
+    expect(group.fiveHour?.unread.map((row) => row.label)).toEqual(['b•••']);
+    expect(group.rows[2].absent).toEqual(['5h']);
+    // A second credential of a's account adds no quota of its own.
+    const twins = normalizeQuotaPilotSnapshot({
+      providers: {
+        codex: {
+          credentials: [
+            { id: 'codex-a.json', label: 'a•••', windows: [window('7d', 0.7)] },
+            { id: 'codex-a-pro.json', label: 'a•••2', windows: [window('7d', 0.7)], same_as: 'codex-a.json' },
+          ],
+        },
+      },
+    })!;
+    const [one] = buildLedger(twins, 'all', '', NOW_MS).groups;
+    expect(one.pool).toMatchObject({ used: 30, capacity: 100, known: 1 });
+    expect(one.rows[1].sameAs).toBe('codex-a.json');
+    // A search that shows only the second credential still counts the account, and names its twin.
+    const [found] = buildLedger(twins, 'all', 'a-pro', NOW_MS).groups;
+    expect(found.rows.map((row) => row.key)).toEqual(['codex-a-pro.json']);
+    expect(found.pool).toMatchObject({ used: 30, capacity: 100, known: 1 });
+    expect(found.rows[0].twin?.fileName).toBe('codex-a.json');
   });
 
   test('lines window kinds up as 5-hour, weekly, then model windows', () => {

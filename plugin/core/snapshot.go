@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -78,7 +79,7 @@ func (s *State) applyLocked(cmd Command, root string, sess *session, now time.Ti
 		if r := s.classifyLocked(c, model, now); r.Blocked {
 			return "account cannot serve now: " + r.Reason
 		}
-		s.bindings[c.Provider+"|"+root] = &Binding{AuthID: c.ID, Reason: switchedReason, LastUsed: now}
+		s.bindings[c.Provider+"|"+root] = &Binding{AuthID: c.ID, Reason: switchedReason, LastUsed: now, At: now}
 	case "route":
 		if cmd.Provider == "" || cmd.Model == "" {
 			return "route needs provider and model"
@@ -157,6 +158,12 @@ type CredView struct {
 	Disabled    bool         `json:"disabled,omitempty"`
 	BackAt      time.Time    `json:"back_at,omitempty"` // when the window that limits it resets
 	Windows     []WindowView `json:"windows"`
+	// Absent names the window kinds the provider said the account does not have, apart from
+	// those not read yet.
+	Absent []string `json:"absent,omitempty"`
+	// SameAs is the credential the proxy also holds that logs in to the same provider account: its
+	// quota is that one's, counted once.
+	SameAs string `json:"same_as,omitempty"`
 }
 
 // WindowView is one window as displayed.
@@ -174,23 +181,26 @@ type WindowView struct {
 // else the provider of the model it asks for, and the account bound there. ServedAuthID is the
 // account that answered its last turn, which differs right after a switch.
 type SessionView struct {
-	Provider       string    `json:"provider"`
-	Model          string    `json:"model"`
-	RequestedModel string    `json:"requested_model,omitempty"`
-	RouteNote      string    `json:"route_note,omitempty"`
-	AuthID         string    `json:"auth_id"`
-	ServedAuthID   string    `json:"served_auth_id,omitempty"`
-	AuthLabel      string    `json:"auth_label"`
-	BindingReason  string    `json:"binding_reason"`
-	Switched       bool      `json:"switched,omitempty"` // the user chose this account
-	Route          *Route    `json:"route,omitempty"`
-	LastSwitch     *Switch   `json:"last_switch,omitempty"`
-	SwitchImminent bool      `json:"switch_imminent"`
-	SwitchReason   string    `json:"switch_reason,omitempty"`
-	NextAuthID     string    `json:"next_auth_id,omitempty"`
-	Totals         Tokens    `json:"totals"`
-	Last           Tokens    `json:"last"`
-	LastSeen       time.Time `json:"last_seen"`
+	Provider       string  `json:"provider"`
+	Model          string  `json:"model"`
+	RequestedModel string  `json:"requested_model,omitempty"`
+	RouteNote      string  `json:"route_note,omitempty"`
+	AuthID         string  `json:"auth_id"`
+	ServedAuthID   string  `json:"served_auth_id,omitempty"`
+	AuthLabel      string  `json:"auth_label"`
+	BindingReason  string  `json:"binding_reason"`
+	Switched       bool    `json:"switched,omitempty"` // the user chose this account
+	Route          *Route  `json:"route,omitempty"`
+	LastSwitch     *Switch `json:"last_switch,omitempty"`
+	SwitchImminent bool    `json:"switch_imminent"`
+	SwitchReason   string  `json:"switch_reason,omitempty"`
+	NextAuthID     string  `json:"next_auth_id,omitempty"`
+	// Blocked names the accounts of its provider that cannot serve its next model (used up, also
+	// on a model's own window, or disabled): the band does not offer a switch to them.
+	Blocked  []string  `json:"blocked,omitempty"`
+	Totals   Tokens    `json:"totals"`
+	Last     Tokens    `json:"last"`
+	LastSeen time.Time `json:"last_seen"`
 }
 
 // MaskEmail turns "dana@example.com" into "d•••".
@@ -202,10 +212,77 @@ func MaskEmail(email string) string {
 	return string([]rune(local)[:1]) + "•••"
 }
 
+// UniqueLabels masks each email as MaskEmail does, showing as many leading characters (up to four)
+// as it takes to tell it from the others given; ones still alike are numbered, in id order. Keyed
+// as given.
+func UniqueLabels(emails map[string]string) map[string]string {
+	locals := map[string][]rune{}
+	ids := make([]string, 0, len(emails))
+	for id, email := range emails {
+		local, _, _ := strings.Cut(email, "@")
+		locals[id] = []rune(local)
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	prefix := func(id string, n int) string { return string(locals[id][:min(n, len(locals[id]))]) }
+	out, taken := map[string]string{}, map[string]int{}
+	for _, id := range ids {
+		n := 1
+		for ; n < 4; n++ {
+			alone := true
+			for _, other := range ids {
+				if other != id && prefix(other, n) == prefix(id, n) {
+					alone = false
+					break
+				}
+			}
+			if alone {
+				break
+			}
+		}
+		label := prefix(id, n) + "•••"
+		if taken[label]++; taken[label] > 1 {
+			label = fmt.Sprintf("%s%d", label, taken[label])
+		}
+		out[id] = label
+	}
+	return out
+}
+
+// labelsLocked names each account of each provider apart from the others (UniqueLabels).
+func (s *State) labelsLocked() map[string]string {
+	byProvider := map[string]map[string]string{}
+	for id, c := range s.creds {
+		if byProvider[c.Provider] == nil {
+			byProvider[c.Provider] = map[string]string{}
+		}
+		byProvider[c.Provider][id] = c.Email
+	}
+	out := map[string]string{}
+	for _, emails := range byProvider {
+		for id, label := range UniqueLabels(emails) {
+			out[id] = label
+		}
+	}
+	return out
+}
+
 // Build renders the snapshot and advances the sequence.
 func (s *State) Build() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.buildLocked()
+}
+
+// BuildWithCanonical is the snapshot with the credentials counted under another (see Canonical),
+// read together, so a report counts each account once while polls go on.
+func (s *State) BuildWithCanonical() (Snapshot, map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buildLocked(), s.canonicalLocked()
+}
+
+func (s *State) buildLocked() Snapshot {
 	now := s.now()
 	s.sweepLocked(now)
 	s.sequence++
@@ -247,16 +324,23 @@ func (s *State) Build() Snapshot {
 		}
 		byProvider[c.Provider] = append(byProvider[c.Provider], Candidate{ID: c.ID, Provider: c.Provider})
 	}
-	labels := map[string]string{}
+	labels, masked, same := map[string]string{}, s.labelsLocked(), s.canonicalLocked()
 	for provider, cands := range byProvider {
-		ranked := s.rankLocked(cands, "", now)
+		ranked := s.rankLocked(cands, "", now, false)
 		pv := &ProviderView{Health: s.healthLocked(provider, "", now)}
 		for i, r := range ranked {
 			c := s.creds[r.ID]
-			v := &CredView{ID: c.ID, Index: c.Index, Label: MaskEmail(c.Email), Email: c.Email, Plan: c.Plan, Order: i + 1,
+			v := &CredView{ID: c.ID, Index: c.Index, Label: masked[c.ID], Email: c.Email, Plan: c.Plan, Order: i + 1,
 				Tier: r.Tier, Reason: r.Reason, Sessions: sessionsPerCred[c.ID],
 				Unavailable: c.Disabled || r.Blocked, Disabled: c.Disabled, BackAt: r.BackAt}
 			v.Windows = s.windowViewsLocked(c, now)
+			for kind := range c.Absent {
+				v.Absent = append(v.Absent, kind)
+			}
+			sort.Strings(v.Absent)
+			if to := same[c.ID]; s.creds[to] != nil {
+				v.SameAs = to
+			}
 			pv.Credentials = append(pv.Credentials, v)
 			labels[c.ID] = v.Label
 		}
@@ -297,6 +381,13 @@ func (s *State) sessionViewLocked(root string, sess *session) *SessionView {
 	} else if c := s.creds[sess.ServedAuth]; c != nil && c.Provider == v.Provider {
 		v.AuthID = sess.ServedAuth
 	}
+	now := s.now()
+	for _, c := range s.creds {
+		if c.Provider == v.Provider && s.classifyLocked(c, v.Model, now).Blocked {
+			v.Blocked = append(v.Blocked, c.ID)
+		}
+	}
+	sort.Strings(v.Blocked)
 	return v
 }
 
@@ -325,7 +416,7 @@ func (s *State) fillImminentLocked(v *SessionView, now time.Time) {
 		}
 	}
 	if len(cands) > 0 {
-		if next := s.rankLocked(cands, model, now)[0]; next.Tier < 3 {
+		if next := s.rankLocked(cands, model, now, false)[0]; next.Tier < 3 {
 			v.NextAuthID = next.ID
 		}
 	}
@@ -391,13 +482,25 @@ func (s *State) healthLocked(provider, model string, now time.Time) string {
 	return "exhausted"
 }
 
+// contextsLocked are the context windows of the models sessions run on through a route, configured
+// or by family, for the band to show a routed session's context against.
 func (s *State) contextsLocked() map[string]int {
 	out := map[string]int{}
-	for k, v := range defaultContextLengths {
-		out[k] = v
-	}
 	for k, v := range s.cfg.ContextLengths {
 		out[k] = v
+	}
+	var models []string
+	for _, r := range s.routes {
+		models = append(models, r.Model)
+	}
+	for _, target := range s.cfg.FallbackMap {
+		_, model, _ := strings.Cut(target, ":")
+		models = append(models, model)
+	}
+	for _, model := range models {
+		if n := s.contextLengthLocked(model); n > 0 && model != "" {
+			out[model] = n
+		}
 	}
 	return out
 }
@@ -417,11 +520,14 @@ func (s *State) BuildForBand(session string) Snapshot {
 	}
 	for _, pv := range snap.Providers {
 		for _, c := range pv.Credentials {
-			c.ID, c.Email = opaqueID(c.ID), ""
+			c.ID, c.Email, c.SameAs = opaqueID(c.ID), "", opaqueID(c.SameAs)
 		}
 	}
 	for _, v := range snap.Sessions {
 		v.AuthID, v.ServedAuthID, v.NextAuthID = opaqueID(v.AuthID), opaqueID(v.ServedAuthID), opaqueID(v.NextAuthID)
+		for i, id := range v.Blocked {
+			v.Blocked[i] = opaqueID(id)
+		}
 		if v.LastSwitch != nil {
 			sw := *v.LastSwitch
 			sw.From, sw.To = opaqueID(sw.From), opaqueID(sw.To)

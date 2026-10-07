@@ -73,6 +73,9 @@ func claudeHeaderKind(token string) string {
 }
 
 // claudePollKind maps the keys of the Claude OAuth usage endpoint body.
+// claudePollKinds are the window kinds a Claude usage reading can name.
+var claudePollKinds = []string{KindFiveHour, KindWeekly, "7d_opus", "7d_sonnet", "7d_fable"}
+
 func claudePollKind(key string) string {
 	switch key {
 	case "five_hour":
@@ -180,6 +183,9 @@ func codexHeaderWindows(headers http.Header, now time.Time) []Window {
 		w := Window{Kind: codexKind(minutes), Remaining: clamp01(1 - used/100), ObservedAt: now, Source: "header"}
 		if at, err := strconv.ParseInt(strings.TrimSpace(headers.Get("x-codex-"+slot+"-reset-at")), 10, 64); err == nil && at > 0 {
 			w.ResetAt = time.Unix(at, 0).UTC()
+		} else if after, err := strconv.ParseInt(strings.TrimSpace(headers.Get("x-codex-"+slot+"-reset-after-seconds")), 10, 64); err == nil && after > 0 {
+			// The proxy's WebSocket quota events say only how long is left.
+			w.ResetAt = now.Add(time.Duration(after) * time.Second).UTC()
 		}
 		out = append(out, w)
 	}
@@ -195,15 +201,25 @@ func codexKind(minutes int) string {
 	}
 }
 
-// WindowsFromUsageBody reads quota windows from a provider usage endpoint response.
-func WindowsFromUsageBody(provider string, body []byte, now time.Time) []Window {
+// WindowsFromUsageBody reads quota windows from a provider usage endpoint response, and whether
+// the response was one: a full reading, which names every window the account has.
+func WindowsFromUsageBody(provider string, body []byte, now time.Time) ([]Window, bool) {
 	var doc map[string]any
 	if json.Unmarshal(body, &doc) != nil {
-		return nil
+		return nil, false
 	}
 	var out []Window
 	switch provider {
 	case "claude":
+		// A usage reading names its windows, null for one the account lacks; an answer naming none
+		// ({"error": …}, null) says nothing of them.
+		named := false
+		for key := range doc {
+			named = named || claudePollKind(key) != ""
+		}
+		if !named {
+			return nil, false
+		}
 		for key, raw := range doc {
 			kind := claudePollKind(key)
 			window, ok := raw.(map[string]any)
@@ -225,7 +241,7 @@ func WindowsFromUsageBody(provider string, body []byte, now time.Time) []Window 
 	case "codex":
 		limits, ok := doc["rate_limit"].(map[string]any)
 		if !ok {
-			return nil
+			return nil, false
 		}
 		for _, name := range []string{"primary_window", "secondary_window"} {
 			window, okWindow := limits[name].(map[string]any)
@@ -240,11 +256,15 @@ func WindowsFromUsageBody(provider string, body []byte, now time.Time) []Window 
 			w := Window{Kind: codexKind(int(seconds / 60)), Remaining: clamp01(1 - used/100), ObservedAt: now, Source: "poll"}
 			if at, okAt := window["reset_at"].(float64); okAt && at > 0 {
 				w.ResetAt = time.Unix(int64(at), 0).UTC()
+			} else if after, okAfter := window["reset_after_seconds"].(float64); okAfter && after > 0 {
+				w.ResetAt = now.Add(time.Duration(after) * time.Second).UTC()
 			}
 			out = append(out, w)
 		}
+	default:
+		return nil, false
 	}
-	return out
+	return out, true
 }
 
 func clamp01(f float64) float64 {

@@ -700,7 +700,7 @@ $selected: color-mix(in srgb, var(--text-primary) 72%, transparent);
 // A session in a day's card: opens it in the table below.
 .barCardLink {
   display: inline-block;
-  max-width: 18em;
+  max-width: min(18em, 100%);
   padding: 0;
   border: none;
   background: none;

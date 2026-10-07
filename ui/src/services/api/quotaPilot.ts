@@ -11,6 +11,7 @@ import type {
   QuotaPilotCredential,
   QuotaPilotHealth,
   QuotaPilotProvider,
+  QuotaPilotRefreshResult,
   QuotaPilotSnapshot,
   QuotaPilotTokens,
   QuotaPilotUsage,
@@ -32,6 +33,9 @@ export const QUOTA_PILOT_USAGE_SESSION_PATH = '/v0/management/quota-pilot/usage/
 export const QUOTA_PILOT_REFRESH_PATH = '/v0/management/quota-pilot/refresh';
 
 const asString = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
+
+const asStrings = (value: unknown): string[] =>
+  Array.isArray(value) ? value.map(asString).filter(Boolean) : [];
 
 const asNumber = (value: unknown): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : 0;
@@ -79,6 +83,8 @@ const normalizeCredential = (value: unknown): QuotaPilotCredential | null => {
           .map(normalizeWindow)
           .filter((window): window is QuotaPilotWindow => window !== null)
       : [],
+    absent: asStrings(value.absent),
+    sameAs: asString(value.same_as),
   };
 };
 
@@ -149,9 +155,6 @@ const normalizeTokens = (value: unknown): QuotaPilotTokens => {
   };
 };
 
-const asStrings = (value: unknown): string[] =>
-  Array.isArray(value) ? value.map(asString).filter(Boolean) : [];
-
 /** A map of names to non-negative numbers. */
 /** Each provider's part of a row: a part of 0 is a reading that found none, not a missing one. */
 const asProviderParts = (value: unknown): Record<string, number> => {
@@ -202,6 +205,7 @@ const normalizeUsageSession = (value: unknown): QuotaPilotUsageSession | null =>
     tokens: normalizeTokens(value.tokens),
     accounts: asStrings(value.accounts),
     origin: asString(value.origin),
+    remote: value.remote === true,
     usedBy: asProviderParts(value.used_by),
     metered: value.metered === true,
     providers: asStrings(value.providers).map((p) => p.toLowerCase()),
@@ -264,6 +268,7 @@ const normalizeUsageDay = (value: unknown): QuotaPilotUsageDay | null => {
         projects: asWeights(value.projects),
         outside: asNumber(value.outside),
         metered: value.metered === true,
+        undated: value.undated === true,
         requests: asNumber(value.requests),
         tokens: normalizeTokens(value.tokens),
         sessions: daySessions(value.sessions),
@@ -417,6 +422,7 @@ export function normalizeQuotaPilotUsageSession(
     ),
     history: value.history === true,
     origin: asString(value.origin),
+    remote: value.remote === true,
     tiers: listOf(value.tiers, (x) =>
       isRecord(x)
         ? {
@@ -430,13 +436,41 @@ export function normalizeQuotaPilotUsageSession(
   };
 }
 
+export function normalizeQuotaPilotRefresh(value: unknown): QuotaPilotRefreshResult {
+  const record = isRecord(value) ? value : {};
+  return {
+    read: asNumber(record.read),
+    failed: listOf(record.failed, (f) =>
+      isRecord(f) && asString(f.account)
+        ? {
+            account: asString(f.account),
+            label: asString(f.label),
+            failure: asString(f.failure),
+            status: asNumber(f.status),
+          }
+        : null
+    ),
+    // An older plugin answers without it, having read what it listed.
+    complete: record.complete !== false,
+  };
+}
+
+/** The page's time zone, so a report's days are the reader's. */
+const timeZone = () => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? '';
+  } catch {
+    return '';
+  }
+};
+
 export const quotaPilotApi = {
   /**
    * Asks the plugin to read every account's quota now (an account read in the last minute is
-   * not read again) and Codex's own files, and to log what it read before it answers.
+   * not read again), and to log what it read before it answers which it could not read.
    */
-  async refresh(): Promise<void> {
-    await apiClient.post(QUOTA_PILOT_REFRESH_PATH);
+  async refresh(): Promise<QuotaPilotRefreshResult> {
+    return normalizeQuotaPilotRefresh(await apiClient.post(QUOTA_PILOT_REFRESH_PATH));
   },
 
   async getSnapshot(): Promise<QuotaPilotSnapshot> {
@@ -448,7 +482,7 @@ export const quotaPilotApi = {
 
   /** An account, `provider:<name>` for all its accounts, or `all`, over a range. */
   async getUsage(scope: string, range: QuotaPilotUsageRange): Promise<QuotaPilotUsage> {
-    const url = `${QUOTA_PILOT_USAGE_PATH}?account=${encodeURIComponent(scope)}&range=${range}`;
+    const url = `${QUOTA_PILOT_USAGE_PATH}?account=${encodeURIComponent(scope)}&range=${range}&tz=${encodeURIComponent(timeZone())}`;
     const usage = normalizeQuotaPilotUsage(await apiClient.get(url));
     if (!usage) throw new Error('quota-pilot returned a malformed usage report');
     return usage;
@@ -460,7 +494,7 @@ export const quotaPilotApi = {
     scope: string,
     range: QuotaPilotUsageRange
   ): Promise<QuotaPilotUsageSessionDetail> {
-    const url = `${QUOTA_PILOT_USAGE_SESSION_PATH}?id=${encodeURIComponent(id)}&account=${encodeURIComponent(scope)}&range=${range}`;
+    const url = `${QUOTA_PILOT_USAGE_SESSION_PATH}?id=${encodeURIComponent(id)}&account=${encodeURIComponent(scope)}&range=${range}&tz=${encodeURIComponent(timeZone())}`;
     const detail = normalizeQuotaPilotUsageSession(await apiClient.get(url));
     if (!detail) throw new Error('quota-pilot returned a malformed session report');
     return detail;

@@ -97,7 +97,7 @@ func TestAttributeStartsOverAfterAReset(t *testing.T) {
 		{T: 20, Session: "s2", Account: "A", Output: 10, Used7d: f(0.01)},
 		{T: 30, Session: "s2", Account: "A", Output: 10, Used7d: f(0.03)},
 	}
-	a := Attribute(entries, "A", Span{To: 100})
+	a := Attribute(entries, "A", Span{To: 10 * lateReading})
 	// Only the new period counts: the s1 request before the reset shares its first reading.
 	if !near(a.Sessions["s1"].Used, 0.01) || !near(a.Sessions["s2"].Used, 0.02) || !near(a.Used, 0.03) || a.Outside != 0 {
 		t.Fatalf("after reset: s1 %v s2 %v used %v outside %v", a.Sessions["s1"].Used, a.Sessions["s2"].Used, a.Used, a.Outside)
@@ -161,6 +161,36 @@ func TestCombineFollowsASessionAcrossASwitch(t *testing.T) {
 	}
 	if both.Sessions["s1"].Requests != 5 {
 		t.Fatalf("requests = %d", both.Sessions["s1"].Requests)
+	}
+}
+
+// A request draws on its plan by its speed: Codex's Fast at 2.5 times, Claude's fast mode not at
+// all (it is paid from usage credits).
+func TestSpeedScalesARequestsWeight(t *testing.T) {
+	base := LogEntry{Provider: "codex", Model: "gpt-6.1-sol", Output: 100}
+	fast, standard := base, base
+	fast.TierAsked, standard.TierAsked = "priority", "auto"
+	claude := LogEntry{Provider: "claude", Model: "claude-opus-5-5", Output: 100, TierAsked: "fast"}
+	if !near(fast.Weight(), 2.5*base.Weight()) || !near(standard.Weight(), base.Weight()) || claude.Weight() != 0 {
+		t.Fatalf("weights: fast %v standard %v base %v claude fast %v", fast.Weight(), standard.Weight(), base.Weight(), claude.Weight())
+	}
+}
+
+// Claude's fast mode draws nothing on the plan: a rise read beside only such requests is use
+// elsewhere, and they are settled at no part.
+func TestFreeRequestsTakeNoPartOfARise(t *testing.T) {
+	entries := []LogEntry{
+		{T: 1000, Account: "A", Poll: true, Used7d: f(0.10)},
+		{T: 2000, Session: "fast", Account: "A", Provider: "claude", Model: "claude-opus-5-5", Output: 100, TierAsked: "fast"},
+		{T: 3000, Account: "A", Poll: true, Used7d: f(0.20)},
+		{T: 4000, Session: "fast", Account: "A", Provider: "claude", Model: "claude-opus-5-5", Output: 100, TierAsked: "fast"},
+		{T: 4500, Session: "plain", Account: "A", Provider: "claude", Model: "claude-opus-5-5", Output: 100, TierAsked: "auto"},
+		{T: 5000, Account: "A", Poll: true, Used7d: f(0.21)},
+	}
+	r := Attribute(entries, "A", Span{To: 10_000})
+	// Outside: the first reading's 10%, which nothing before it explains, and the rise beside fast mode.
+	if fast := r.Sessions["fast"]; fast.Used != 0 || !fast.Metered || !near(r.Outside, 0.20) || !near(r.Sessions["plain"].Used, 0.01) {
+		t.Fatalf("fast %+v plain %+v outside %v", r.Sessions["fast"], r.Sessions["plain"], r.Outside)
 	}
 }
 
@@ -231,8 +261,8 @@ func TestUseElsewhereDuringLocalWorkCountsAsOutside(t *testing.T) {
 }
 
 func TestARangeInsideAWeekCountsOnlyItsPart(t *testing.T) {
-	DayOf = func(ms int64) string { return fmt.Sprint(ms / day) }
-	defer func() { DayOf = func(ms int64) string { return time.UnixMilli(ms).Format("2006-01-02") } }()
+	defer func(day func(int64, *time.Location) string) { DayOf = day }(DayOf)
+	DayOf = func(ms int64, _ *time.Location) string { return fmt.Sprint(ms / day) }
 	entries := []LogEntry{
 		{T: 1 * day, Session: "early", Account: "A", Model: "claude-opus-5-5", Output: 100, Used7d: f(0.10)},
 		{T: 1*day + 10, Account: "A", Poll: true, Used7d: f(0.12)}, // the early request's 2%
@@ -429,7 +459,7 @@ func TestAFiveHourSpanWalksTheFiveHourWindow(t *testing.T) {
 		{T: 1500, Session: "s1", Account: "A", Output: 100},
 		{T: 2000, Account: "A", Poll: true, Used5h: f(0.03)},
 	}
-	b := Attribute(old, "A", Span{To: 3000, Five: true})
+	b := Attribute(old, "A", Span{To: 10 * lateReading, Five: true})
 	if !near(b.Used, 0.03) {
 		t.Fatalf("used %v sessions %+v", b.Used, b.Sessions["s1"])
 	}
@@ -629,8 +659,8 @@ func TestKnownMeansReadInsideAndMeteredMeansSettled(t *testing.T) {
 
 // Use read across midnight counts in the total, on no day.
 func TestUseReadAcrossMidnightIsOnNoDay(t *testing.T) {
-	DayOf = func(ms int64) string { return fmt.Sprint(ms / day) }
-	defer func() { DayOf = func(ms int64) string { return time.UnixMilli(ms).Format("2006-01-02") } }()
+	defer func(day func(int64, *time.Location) string) { DayOf = day }(DayOf)
+	DayOf = func(ms int64, _ *time.Location) string { return fmt.Sprint(ms / day) }
 	entries := []LogEntry{
 		{T: day - 600_000, Account: "A", Poll: true, Used7d: f(0.10)},
 		{T: day + 600_000, Account: "A", Poll: true, Used7d: f(0.30)},
@@ -639,6 +669,56 @@ func TestUseReadAcrossMidnightIsOnNoDay(t *testing.T) {
 	r := Attribute(entries, "A", Span{To: 2 * day})
 	if !near(r.Outside, 0.35) || !near(r.Undated, 0.20) || !near(r.OutsideDays["0"], 0.10) || !near(r.OutsideDays["1"], 0.05) {
 		t.Fatalf("outside %v undated %v days %v", r.Outside, r.Undated, r.OutsideDays)
+	}
+	if len(r.UndatedDays) != 2 || !r.UndatedDays["0"] || !r.UndatedDays["1"] {
+		t.Fatalf("days the undated part may lie on = %v", r.UndatedDays)
+	}
+	// Across a day with no reading at all (the proxy was off), that day may hold it too.
+	gap := []LogEntry{
+		{T: day - 600_000, Account: "A", Poll: true, Used7d: f(0.10)},
+		{T: 2*day + 600_000, Account: "A", Poll: true, Used7d: f(0.30)},
+	}
+	if r := Attribute(gap, "A", Span{To: 3 * day}); len(r.UndatedDays) != 3 || !r.UndatedDays["1"] {
+		t.Fatalf("across a day without readings = %v", r.UndatedDays)
+	}
+}
+
+// Days are the span's time zone's: a request and its reading at 17:30 UTC fall on the 6th there and
+// on the 7th in Taipei.
+func TestDaysAreTheSpansTimeZone(t *testing.T) {
+	at := time.Date(2026, 10, 6, 17, 30, 0, 0, time.UTC).UnixMilli()
+	entries := []LogEntry{
+		{T: at - 60_000, Account: "A", Poll: true, Used7d: f(0.10)},
+		{T: at, Session: "s", Account: "A", Output: 100},
+		{T: at + 60_000, Account: "A", Poll: true, Used7d: f(0.12)},
+	}
+	taipei, errLoad := time.LoadLocation("Asia/Taipei")
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	for _, c := range []struct {
+		loc  *time.Location
+		want string
+	}{{time.UTC, "2026-10-06"}, {taipei, "2026-10-07"}} {
+		r := Attribute(entries, "A", Span{From: at - day, To: at + day, Loc: c.loc})
+		if !near(r.Sessions["s"].Days[c.want], 0.02) || !r.ReadDays[c.want] || len(r.ReadDays) != 1 {
+			t.Fatalf("%v: days %v read %v", c.loc, r.Sessions["s"].Days, r.ReadDays)
+		}
+	}
+}
+
+// A fall read within lateReading of the span's end still waits, as in the live state: the window
+// shows its highest until the readings after the fall settle it.
+func TestAFallAtTheEndOfTheSpanWaits(t *testing.T) {
+	entries := []LogEntry{
+		{T: 1000, Account: "A", Poll: true, Used7d: f(0.90)},
+		{T: 2000, Account: "A", Poll: true, Used7d: f(0.01)},
+	}
+	if a := Attribute(entries, "A", Span{To: 2000 + lateReading}); !near(a.Used, 0.90) || a.Restart != 0 {
+		t.Fatalf("waiting: used %v restart %v", a.Used, a.Restart)
+	}
+	if a := Attribute(entries, "A", Span{To: 2001 + lateReading}); !near(a.Used, 0.01) || a.Restart == 0 {
+		t.Fatalf("settled: used %v restart %v", a.Used, a.Restart)
 	}
 }
 
@@ -650,7 +730,7 @@ func TestAWindowKnownByAFallKeepsOnlyWhatRequestsExplain(t *testing.T) {
 		{T: 1300, Session: "late", Account: "A", Output: 100},
 		{T: 1600, Account: "A", Poll: true, Used7d: f(0.40)},
 	}
-	r := Attribute(entries, "A", Span{To: 10_000, Range: true})
+	r := Attribute(entries, "A", Span{To: 10 * lateReading, Range: true})
 	// The walk's first reading is the old window's 90%, read with no request; the new one's 40% keeps
 	// 1% for the request before it and the rest is unmatched.
 	if !near(r.Sessions["late"].Used, 0.01) || !near(r.Outside, 0.90+0.39) {

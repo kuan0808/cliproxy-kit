@@ -80,7 +80,26 @@ function QuotaPilotPage({ resolvedTheme }: { resolvedTheme: ResolvedTheme }) {
     setRefreshing(true);
     setError('');
     try {
-      await refreshUsage();
+      const result = await refreshUsage();
+      // The accounts it could not read say why; their figures are the last ones read.
+      if (!result.complete) setError(t('quota_pilot.refresh_incomplete'));
+      else if (result.failed.length > 0)
+        setError(
+          t('quota_pilot.refresh_partial', {
+            count: result.failed.length,
+            list: result.failed
+              .map((f) =>
+                t('quota_pilot.refresh_account', {
+                  account: f.label || f.account,
+                  why: t(`quota_pilot.refresh_why_${f.failure}`, {
+                    status: f.status,
+                    defaultValue: f.failure,
+                  }),
+                })
+              )
+              .join(t('quota_usage.list_separator')),
+          })
+        );
     } catch (err: unknown) {
       setError(
         `${t('quota_pilot.refresh_failed')}${err instanceof Error && err.message ? `: ${err.message}` : ''}`
@@ -160,8 +179,8 @@ function QuotaPilotPage({ resolvedTheme }: { resolvedTheme: ResolvedTheme }) {
               type="search"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder={t('quota_management.search_placeholder')}
-              aria-label={t('quota_management.search_label')}
+              placeholder={t(`quota_management.search_placeholder_${view}`)}
+              aria-label={t(`quota_management.search_label_${view}`)}
             />
             {search && (
               <button
@@ -201,7 +220,13 @@ function QuotaPilotPage({ resolvedTheme }: { resolvedTheme: ResolvedTheme }) {
         )}
 
         {view === 'usage' ? (
-          <QuotaUsage snapshot={snapshot} tab={tab} search={search} resolvedTheme={resolvedTheme} />
+          <QuotaUsage
+            snapshot={snapshot}
+            tab={tab}
+            search={search}
+            onClearSearch={() => setSearch('')}
+            resolvedTheme={resolvedTheme}
+          />
         ) : (
           <QuotaLedger snapshot={snapshot} tab={tab} search={search} resolvedTheme={resolvedTheme} />
         )}

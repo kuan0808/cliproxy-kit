@@ -32,10 +32,11 @@ type usageWindow struct {
 // from one walk begun a window earlier so the rate and the reading are known where they begin.
 func (u *reading) fiveHour(info core.AccountInfo, lines []core.LogEntry, logStart int64, now time.Time, keep func(string) bool) usageAccount {
 	id, nowMs := info.ID, now.UnixMilli()
-	reset, present := state.FiveHour(id)
+	reset, present, absent := state.FiveHour(id)
 	// Whether the account has a 5-hour window, whether it was read at all, and its latest 5-hour
-	// reading: a Codex account may have a weekly window only.
-	has, read := present, present || !info.ResetAt.IsZero()
+	// reading. A Codex account may have a weekly window only; the provider's last full reading says
+	// so, whatever older readings had.
+	has, read := present, present || absent || !info.ResetAt.IsZero()
 	var last *core.LogEntry
 	// The windows of the last day are walked from the readings that name their reset; the others
 	// cannot tell one window from the next across a pause. An idle window names none and loses none.
@@ -44,7 +45,7 @@ func (u *reading) fiveHour(info core.AccountInfo, lines []core.LogEntry, logStar
 	for i, e := range lines {
 		read = read || e.Used7d != nil || e.Used5h != nil
 		if e.Used5h != nil {
-			has, last = true, &lines[i]
+			has, last = !absent, &lines[i]
 		}
 		if e.Reset5 == 0 {
 			if e.Used5h != nil && *e.Used5h > 0 {

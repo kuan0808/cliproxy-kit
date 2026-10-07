@@ -33,7 +33,9 @@ describe('QuotaLedger rendering', () => {
     const markup = render();
     expect(markup).toContain('Live routing from the quota-pilot plugin');
     expect(markup).toContain('title="Sessions bound now: 2"');
-    expect(markup).toContain('title="A new session gets this account"');
+    expect(markup).toContain(
+      'title="New sessions get this account first, unless their model&#x27;s own quota on it is used up"'
+    );
     // Read as used, as the band and the usage view do, and said so.
     expect(markup).toContain('>Weekly used<');
     expect(markup).toContain('>137%<');

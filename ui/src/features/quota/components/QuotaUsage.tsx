@@ -50,50 +50,52 @@ export interface QuotaUsageProps {
   snapshot: QuotaPilotSnapshotState;
   tab: QuotaTabId;
   search: string;
+  onClearSearch?: () => void;
   resolvedTheme: ResolvedTheme;
 }
 
-export function QuotaUsage({ snapshot, tab, search, resolvedTheme }: QuotaUsageProps) {
-  const [picked, setPicked] = useState('');
+/** Picks a scope: an account id, `provider:<name>` or `all`, with its provider ('' for all). */
+type OnPick = (scope: string, provider: string) => void;
 
-  // The snapshot only chooses where to start and checks a pick still exists; the figures come
-  // from the usage report.
-  const { fallback, known } = useMemo(() => {
-    const scopes = new Map<string, string>();
-    let first = '';
-    if (snapshot.status === 'live') {
-      Object.entries(snapshot.snapshot.providers)
-        .filter(
-          ([provider, view]) => (tab === 'all' || provider === tab) && view.credentials.length > 0
-        )
-        .sort(([a], [b]) => a.localeCompare(b))
-        .forEach(([provider, view]) => {
-          const start =
-            view.credentials.length > 1 ? providerScope(provider) : view.credentials[0].id;
-          if (!first) first = start;
-          scopes.set(providerScope(provider), provider);
-          view.credentials.forEach((c) => scopes.set(c.id, provider));
-        });
-      if (tab === 'all') scopes.set(ALL_SCOPE, '');
-    }
-    return {
-      fallback: first || (snapshot.status === 'live' && tab === 'all' ? ALL_SCOPE : ''),
-      known: scopes,
-    };
+export function QuotaUsage({
+  snapshot,
+  tab,
+  search,
+  onClearSearch,
+  resolvedTheme,
+}: QuotaUsageProps) {
+  // A pick stands while its provider's tab shows; it may be an account the proxy no longer holds,
+  // which the report still names.
+  const [picked, setPicked] = useState<{ scope: string; provider: string } | null>(null);
+
+  // The snapshot only chooses where to start; the figures come from the usage report.
+  const fallback = useMemo(() => {
+    if (snapshot.status !== 'live') return '';
+    const first = Object.entries(snapshot.snapshot.providers)
+      .filter(([provider, view]) => (tab === 'all' || provider === tab) && view.credentials.length > 0)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([provider, view]) =>
+        view.credentials.length > 1 ? providerScope(provider) : view.credentials[0].id
+      )[0];
+    return first ?? (tab === 'all' ? ALL_SCOPE : '');
   }, [snapshot, tab]);
-  const scope = picked && known.has(picked) ? picked : fallback;
+  const scope =
+    picked && (tab === 'all' || (picked.provider !== '' && picked.provider === tab))
+      ? picked.scope
+      : fallback;
   const [range, setRange] = useState<QuotaPilotUsageRange>('week');
   const usage = useQuotaPilotUsage(scope, range);
 
   return (
     <QuotaUsageView
       scope={scope}
-      onPick={setPicked}
+      onPick={(next, provider) => setPicked({ scope: next, provider })}
       range={range}
       onRange={setRange}
       state={snapshot.status === 'unavailable' ? { status: 'unavailable', latest: null } : usage}
       tab={tab}
       search={search}
+      onClearSearch={onClearSearch}
       resolvedTheme={resolvedTheme}
     />
   );
@@ -101,12 +103,13 @@ export function QuotaUsage({ snapshot, tab, search, resolvedTheme }: QuotaUsageP
 
 export interface QuotaUsageViewProps {
   scope: string;
-  onPick: (scope: string) => void;
+  onPick: OnPick;
   range: QuotaPilotUsageRange;
   onRange: (range: QuotaPilotUsageRange) => void;
   state: QuotaPilotUsageResult;
   tab: QuotaTabId;
   search: string;
+  onClearSearch?: () => void;
   resolvedTheme: ResolvedTheme;
   /** Injectable for tests; defaults to the real clock. */
   now?: number;
@@ -120,6 +123,7 @@ export function QuotaUsageView({
   state,
   tab,
   search,
+  onClearSearch,
   resolvedTheme,
   now: nowProp,
 }: QuotaUsageViewProps) {
@@ -168,11 +172,13 @@ export function QuotaUsageView({
       ) : (
         <>
           <UsageSummary usage={usage} now={now} />
-          <UsageTable usage={usage} search={search} now={now} />
+          <UsageTable usage={usage} search={search} now={now} onClearSearch={onClearSearch} />
           <details className={styles.method}>
             <summary>{t('quota_usage.method_title')}</summary>
             <p>{t('quota_usage.method_quota')}</p>
-            {usage.mode !== 'account' && <p>{t('quota_usage.method_total')}</p>}
+            {usage.mode !== 'account' && isWindowRange(usage.range) && (
+              <p>{t(windowKey('method_total', usage.range))}</p>
+            )}
             {usage.range === '5h' && <p>{t('quota_usage.method_5h')}</p>}
             {!isWindowRange(usage.range) && <p>{t('quota_usage.method_range')}</p>}
             <p>{t('quota_usage.method_tier')}</p>
@@ -186,7 +192,7 @@ export function QuotaUsageView({
 interface PickerProps {
   report: QuotaPilotUsage;
   scope: string;
-  onPick: (scope: string) => void;
+  onPick: OnPick;
   tab: QuotaTabId;
   resolvedTheme: ResolvedTheme;
 }
@@ -229,7 +235,7 @@ function Picker({ report, scope, onPick, tab, resolvedTheme }: PickerProps) {
             type="button"
             className={styles.allCard}
             aria-pressed={scope === ALL_SCOPE}
-            onClick={() => onPick(ALL_SCOPE)}
+            onClick={() => onPick(ALL_SCOPE, '')}
           >
             <span className={styles.allHead}>
               <span className={styles.allTitle}>{t('quota_usage.all_providers')}</span>
@@ -276,7 +282,7 @@ function ProviderGroup({
   group: QuotaPilotUsageProvider;
   range: QuotaPilotUsageRange;
   scope: string;
-  onPick: (scope: string) => void;
+  onPick: OnPick;
   resolvedTheme: ResolvedTheme;
 }) {
   const { t } = useTranslation();
@@ -293,7 +299,7 @@ function ProviderGroup({
         <span className={styles.groupHint}>
           {slots.length === 0
             ? t('quota_usage.no_five_window')
-            : t(windowKey('provider_accounts', range), { count: accounts.length })}
+            : t(windowKey('provider_accounts', range), { count: slots.length })}
         </span>
       </div>
       {accounts.length > 1 ? (
@@ -302,7 +308,7 @@ function ProviderGroup({
             type="button"
             className={`${styles.scopeRow} ${styles.totalRow}`}
             aria-pressed={scope === providerScope(provider)}
-            onClick={() => onPick(providerScope(provider))}
+            onClick={() => onPick(providerScope(provider), provider)}
           >
             <span className={styles.rowName}>{t('quota_usage.total')}</span>
             <span className={styles.rowSub}>{accounts.map((a) => a.label).join(' + ')}</span>
@@ -353,7 +359,7 @@ function AccountRow({
   account: QuotaPilotUsageAccount;
   range: QuotaPilotUsageRange;
   scope: string;
-  onPick: (scope: string) => void;
+  onPick: OnPick;
 }) {
   const { t, i18n } = useTranslation();
   return (
@@ -361,7 +367,7 @@ function AccountRow({
       type="button"
       className={styles.scopeRow}
       aria-pressed={scope === account.id}
-      onClick={() => onPick(account.id)}
+      onClick={() => onPick(account.id, account.provider)}
     >
       <span className={styles.rowName}>{account.label}</span>
       <span className={styles.rowSub}>

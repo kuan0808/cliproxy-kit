@@ -40,13 +40,19 @@ export interface LedgerRow {
   next: boolean;
   unavailable: boolean;
   windows: LedgerWindow[];
+  /** Window kinds the provider said the account does not have. */
+  absent: string[];
+  /** The credential of the same provider account, whose quota this one's is; '' for none. */
+  sameAs: string;
+  /** That credential as the ledger names it, though a search may hide its row; null for none. */
+  twin: { fileName: string; email: string } | null;
 }
 
 export interface LedgerGroup {
   provider: string;
   health: QuotaPilotHealth;
   rows: LedgerRow[];
-  /** Weekly remaining summed over the accounts that report one, out of 100% each. */
+  /** Weekly use summed over the accounts read, out of 100% for each account that has the window. */
   pool: LedgerPool | null;
   /** The same for the 5-hour window. */
   fiveHour: LedgerPool | null;
@@ -55,8 +61,14 @@ export interface LedgerGroup {
 }
 
 export interface LedgerPool {
-  remaining: number;
+  /** Percent used, added over the accounts read. */
+  used: number;
+  /** 100% for each account with the window, read or not. */
   capacity: number;
+  /** Accounts read. */
+  known: number;
+  /** Accounts with the window not read yet: their use is not in `used`. */
+  unread: LedgerRow[];
 }
 
 export interface Ledger {
@@ -106,11 +118,30 @@ const compareProviders = (a: string, b: string) =>
 export const weeklyWindowOf = (row: LedgerRow): LedgerWindow | undefined =>
   row.windows.find((window) => window.kind === LEDGER_WEEKLY_KIND);
 
-const poolOf = (rows: LedgerRow[], kind: string): LedgerPool | null => {
+/**
+ * One window kind across a provider's accounts: what those read used, out of every account that has
+ * it. An account the provider said has none is left out; one not read yet is named, not taken as 0.
+ */
+/** The rows that hold an account's quota: a second credential of one, beside its first, holds none. */
+export const accountRows = (rows: LedgerRow[]) => {
+  const shown = new Set(rows.map((row) => row.key));
+  return rows.filter((row) => !row.sameAs || !shown.has(row.sameAs));
+};
+
+const poolOf = (all: LedgerRow[], kind: string): LedgerPool | null => {
+  const rows = accountRows(all);
   const windows = rows.flatMap((row) => row.windows.filter((window) => window.kind === kind));
-  return windows.length
-    ? { remaining: windows.reduce((sum, window) => sum + window.remaining, 0), capacity: windows.length * 100 }
-    : null;
+  const unread = rows.filter(
+    (row) => !row.windows.some((window) => window.kind === kind) && !row.absent.includes(kind)
+  );
+  // A kind none of them reports, as the 5-hour one for weekly-only accounts, has no pool.
+  if (windows.length === 0) return null;
+  return {
+    used: windows.reduce((sum, window) => sum + 100 - window.remaining, 0),
+    capacity: (windows.length + unread.length) * 100,
+    known: windows.length,
+    unread,
+  };
 };
 
 function buildGroup(
@@ -163,6 +194,7 @@ export function buildLedger(
       const view = snapshot.providers[provider];
       // "Next" is a routing fact, so it is decided before the search narrows the rows.
       const nextId = view.credentials.find((cred) => cred.tier === 1 && !cred.unavailable)?.id;
+      const byId = new Map(view.credentials.map((cred) => [cred.id, cred]));
       const rows = view.credentials
         // Same identifiers the card search matches: the auth file name and the email.
         .filter((cred) => matchesSearch([cred.id, cred.email], query))
@@ -185,6 +217,11 @@ export function buildLedger(
             resetAtMs: window.resetAtMs,
             stale: window.stale,
           })),
+          absent: cred.absent,
+          sameAs: cred.sameAs,
+          twin: byId.has(cred.sameAs)
+            ? { fileName: cred.sameAs, email: byId.get(cred.sameAs)?.email ?? '' }
+            : null,
         }));
       return buildGroup(provider, view.health, rows, nowMs);
     })

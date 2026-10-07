@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kuan0808/cliproxy-kit/plugin/core"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestRequestsWithoutASessionShareOneRow(t *testing.T) {
@@ -17,7 +19,7 @@ func TestRequestsWithoutASessionShareOneRow(t *testing.T) {
 		"lcp:v1:aa": {Session: "lcp:v1:aa", Used: 0.01, Requests: 2, Last: 5},
 		"lcp:v1:bb": {Session: "lcp:v1:bb", Used: 0.02, Requests: 1, Last: 9},
 	}
-	got := groupByProject(shares, nil, nil, nil, map[string]projectRef{"": {}})
+	got := groupByProject(shares, nil, nil, nil, map[string]projectRef{"": {}}, nil)
 	if len(got) != 1 || len(got[0].Sessions) != 1 {
 		t.Fatalf("projects = %+v", got)
 	}
@@ -35,7 +37,7 @@ func TestEachProvidersPartFollowsTheListedSession(t *testing.T) {
 		"lcp:v1:aa": {Used: 0.01, Requests: 1, Metered: true},
 		"lcp:v1:bb": {Used: 0.02, Requests: 1, Metered: true},
 	}}, 2)
-	got := groupByProject(shares, nil, usedBy, nil, map[string]projectRef{"": {}})
+	got := groupByProject(shares, nil, usedBy, nil, map[string]projectRef{"": {}}, nil)
 	if len(got) != 1 || !near(got[0].UsedBy["claude"], 0.03) || !near(got[0].Sessions[0].UsedBy["claude"], 0.03) {
 		t.Fatalf("projects = %+v", got)
 	}
@@ -90,7 +92,32 @@ func TestProjectsAreRepositories(t *testing.T) {
 	os.WriteFile(filepath.Join(tree, ".git"), []byte("gitdir: "+filepath.Join(main, ".git", "worktrees", "w1")+"\n"), 0o600)
 	plain := filepath.Join(root, "notes")
 	os.MkdirAll(plain, 0o700)
-	for cwd, want := range map[string]string{sub: main, tree: main, main: main, plain: plain} {
+	// A worktree named by a relative gitdir, whose commondir leads to the repository's .git; one of a
+	// bare repository, kept in the project's .bare or as <name>.git; and a submodule, a repository of
+	// its own.
+	gitFile := func(dir, gitdir, commondir string) {
+		os.MkdirAll(dir, 0o700)
+		os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: "+gitdir+"\n"), 0o600)
+		if commondir != "" {
+			abs := gitdir
+			if !filepath.IsAbs(abs) {
+				abs = filepath.Join(dir, gitdir)
+			}
+			os.MkdirAll(abs, 0o700)
+			os.WriteFile(filepath.Join(abs, "commondir"), []byte(commondir+"\n"), 0o600)
+		}
+	}
+	relative := filepath.Join(root, "w2")
+	gitFile(relative, "../voice-notes/.git/worktrees/w2", "../..")
+	proj := filepath.Join(root, "proj")
+	bare := filepath.Join(proj, "feature")
+	gitFile(bare, filepath.Join(proj, ".bare", "worktrees", "feature"), "../..")
+	named := filepath.Join(root, "kit-fix")
+	gitFile(named, filepath.Join(root, "kit.git", "worktrees", "kit-fix"), "../..")
+	module := filepath.Join(main, "vendor", "lib")
+	gitFile(module, "../../.git/modules/lib", "")
+	for cwd, want := range map[string]string{sub: main, tree: main, main: main, plain: plain, relative: main, bare: proj,
+		named: filepath.Join(root, "kit"), module: module} {
 		if got, repo := gitRoot(cwd); got != want || repo != (cwd != plain) {
 			t.Errorf("gitRoot(%s) = %s %v, want %s", cwd, got, repo, want)
 		}
@@ -235,7 +262,7 @@ func TestAccountsOffTheProxyAreMaskedLikeItsOwn(t *testing.T) {
 		"claude-0a0b0c0d-dana@example.com.json": "d•••",
 		"codex-x":                               "c•••",
 	} {
-		if got := offProxyLabel(id); got != want {
+		if got := core.MaskEmail(offProxyEmail(id)); got != want {
 			t.Errorf("%s = %q, want %q", id, got, want)
 		}
 	}
@@ -306,8 +333,8 @@ func TestARefreshReadsAnAccountAtMostOnceAMinute(t *testing.T) {
 // first, then the rest by weight.
 func TestADayNamesItsLargestSessions(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	core.DayOf = func(ms int64) string { return "2026-10-05" }
-	defer func() { core.DayOf = func(ms int64) string { return time.UnixMilli(ms).Format("2006-01-02") } }()
+	defer func(day func(int64, *time.Location) string) { core.DayOf = day }(core.DayOf)
+	core.DayOf = func(int64, *time.Location) string { return "2026-10-05" }
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
 	a := core.Attribution{Sessions: map[string]*core.Share{
 		"small":   {Days: map[string]float64{"2026-10-05": 0.01}},
@@ -367,7 +394,7 @@ func TestTheWeekComesFromTheLogUntilTheProxyReadsAgain(t *testing.T) {
 	}
 }
 
-// A window that started over just before its reset is listed once, as the running one.
+// A window that started over shortly before its reset is listed once, as the running one.
 func TestFiveHourListsARunningWindowOnce(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
@@ -378,8 +405,8 @@ func TestFiveHourListsARunningWindowOnce(t *testing.T) {
 		return core.LogEntry{T: ms(at), Account: "a", Provider: "claude", Session: session, Output: 100,
 			Poll: session == "", Used5h: used(u5), Reset5: reset}
 	}
-	lines := []core.LogEntry{line(-4*time.Hour, "", 0.30), line(-time.Minute, "", 0.30),
-		line(-30*time.Second, "s1", 0), line(-10*time.Second, "", 0.01)}
+	lines := []core.LogEntry{line(-4*time.Hour, "", 0.30), line(-10*time.Minute, "", 0.30),
+		line(-9*time.Minute, "s1", 0), line(-8*time.Minute, "", 0.01)}
 	u := &reading{week: map[string]core.Attribution{}, ranged: map[string]core.Attribution{}, froms: map[string]int64{}, starts: map[string]int64{},
 		owner: map[string]string{}, windows: map[string][]fiveWindow{}, noWindow: map[string]bool{}, namedFrom: map[string]int64{}}
 	u.fiveHour(core.AccountInfo{ID: "a", Provider: "claude"}, lines, lines[0].T, now, nil)
@@ -388,11 +415,34 @@ func TestFiveHourListsARunningWindowOnce(t *testing.T) {
 	}
 }
 
-// The host names "auto" when a client asks for no tier; the log keeps none then. A provider that
-// reports "auto" is taken at its word.
-func TestATierIsKeptAsAskedOrNone(t *testing.T) {
-	if askedTier(" Priority ") != "priority" || askedTier("auto") != "" || askedTier("") != "" || tierOf("Auto") != "auto" {
-		t.Fatal("tiers")
+// A request's speed is what its body asks: Claude's fast mode, else a service tier, else "auto". A
+// provider that reports "auto" is taken at its word; a ChatGPT-backed Codex account's report is not.
+func TestATierIsReadAsAsked(t *testing.T) {
+	asked := func(format, body string) string { return askedTier(format, []byte(body)) }
+	if tierOf(" Priority ") != "priority" || asked("openai-response", `{"service_tier":"priority"}`) != "priority" ||
+		asked("claude", `{"speed":"fast"}`) != "fast" || asked("claude", `{}`) != "auto" ||
+		asked("openai-response", `{"speed":"fast"}`) != "auto" || tierOf("Auto") != "auto" {
+		t.Fatal("asked tiers")
+	}
+	chatgpt := pluginapi.UsageRecord{Provider: "codex", AuthType: "oauth", ResponseServiceTier: "default"}
+	key := pluginapi.UsageRecord{Provider: "codex", AuthType: "apikey", ResponseServiceTier: "priority"}
+	elsewhere := pluginapi.UsageRecord{Provider: "codex", AuthType: "oauth", BaseURL: "https://relay.example", ResponseServiceTier: "priority"}
+	if servedTier(chatgpt) != "" || servedTier(key) != "priority" || servedTier(elsewhere) != "priority" {
+		t.Fatal("servedTier")
+	}
+}
+
+// A request from another device names it in the X-Forwarded-For entry the proxy in front appended;
+// an entry the client sent ahead of it, or one of this machine's addresses, does not count.
+func TestARequestFromAnotherDeviceIsToldApart(t *testing.T) {
+	via := func(values ...string) http.Header { return http.Header{"X-Forwarded-For": values} }
+	switch {
+	case !fromAnotherDevice(via("203.0.113.5")):
+		t.Fatal("another device")
+	case fromAnotherDevice(via("203.0.113.5, 127.0.0.1")), fromAnotherDevice(via("::1")), fromAnotherDevice(http.Header{}):
+		t.Fatal("this machine")
+	case !fromAnotherDevice(via("127.0.0.1", "203.0.113.5")):
+		t.Fatal("the last header counts")
 	}
 }
 
@@ -489,5 +539,32 @@ func TestFiveHourShowsTheRunningWindowAndTheLastDays(t *testing.T) {
 	}
 	if fresh := u.fiveHour(core.AccountInfo{ID: "n", Provider: "claude"}, nil, 0, now, nil); fresh.NoWindow || fresh.Known {
 		t.Fatalf("not read = %+v", fresh)
+	}
+}
+
+// An image's encoded bytes are not text: they are counted apart, in messages and in tool results.
+// A Claude account is its seat in an organization: one person's personal and Team seats are two
+// accounts, the same seat logged in again is one.
+func TestAnAccountIsItsProvidersOwn(t *testing.T) {
+	personal := accountOf("claude", map[string]any{"account_uuid": "u1", "organization_uuid": "org-personal"})
+	team := accountOf("claude", map[string]any{"account_uuid": "u1", "organization_uuid": "org-team"})
+	again := accountOf("claude", map[string]any{"account_uuid": "u1", "organization_uuid": "org-team", "email": "x"})
+	if personal == team || team != again || team == "" {
+		t.Fatalf("personal %q team %q again %q", personal, team, again)
+	}
+	if got := accountOf("codex", map[string]any{"account_id": "ws-1"}); got != "codex:ws-1" {
+		t.Fatalf("codex = %q", got)
+	}
+	if got := accountOf("claude", map[string]any{}); got != "" {
+		t.Fatalf("no account = %q", got)
+	}
+}
+
+func TestAttachmentsAreCountedApartFromText(t *testing.T) {
+	img := `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + strings.Repeat("A", 3000) + `"}}`
+	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},` + img + `]},` +
+		`{"role":"user","content":[{"type":"tool_result","content":[` + img + `]}]}]}`
+	if n, encoded := attachmentsOf([]byte(body)); n != 2 || encoded < 6000 || encoded > 6010 {
+		t.Fatalf("attachments %d, encoded %d", n, encoded)
 	}
 }

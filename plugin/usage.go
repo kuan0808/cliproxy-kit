@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	_ "time/tzdata" // the page's time zone loads where the system has no zone database, as in a slim container
 	"unicode"
 
 	"github.com/kuan0808/cliproxy-kit/plugin/core"
@@ -165,7 +166,8 @@ type sessionInfo struct {
 	Path    string // the project's folder: the repository root, or the session's folder outside one
 	Repo    bool   // Path is a repository, so subfolders of it are not projects of their own
 	Title   string
-	Origin  string // how it ran: Claude Code's entrypoint when not the CLI, Codex's originator, or originRemote
+	Origin  string // what ran it: Claude Code's entrypoint when not the CLI, or Codex's originator
+	Remote  bool   // it ran on another device, as it said when it was named
 	at      time.Time
 	stamp   fileStamp // the transcript as it was read
 	cwd     string    // the folder it ran in, placed in a project again as repositories come and go
@@ -526,18 +528,38 @@ func gitRoot(cwd string) (string, bool) {
 	return cwd, false
 }
 
-// worktreeMain reads a worktree's .git file ("gitdir: <repo>/.git/worktrees/<name>") for the
-// repository it belongs to.
+// worktreeMain reads a .git file for the repository a worktree belongs to. Its gitdir (relative to
+// the folder, or absolute) holds a commondir naming the repository's own git folder: <repo>/.git,
+// or a bare repository (<repo>/.bare, <repo>.git). A .git file without one, as a submodule's, is a
+// repository of its own; a worktree whose git folder is gone is placed by its path's shape.
 func worktreeMain(gitFile, dir string) string {
 	body, errRead := os.ReadFile(gitFile)
 	if errRead != nil {
 		return dir
 	}
 	gitdir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(body)), "gitdir:"))
-	if main, _, ok := strings.Cut(gitdir, string(filepath.Separator)+".git"+string(filepath.Separator)+"worktrees"+string(filepath.Separator)); ok && main != "" {
-		return main
+	if gitdir == "" {
+		return dir
 	}
-	return dir
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(dir, gitdir)
+	}
+	common, errCommon := os.ReadFile(filepath.Join(gitdir, "commondir"))
+	if errCommon != nil {
+		sep := string(filepath.Separator)
+		if main, _, ok := strings.Cut(gitdir, sep+".git"+sep+"worktrees"+sep); ok && main != "" {
+			return main
+		}
+		return dir
+	}
+	repo := strings.TrimSpace(string(common))
+	if !filepath.IsAbs(repo) {
+		repo = filepath.Join(gitdir, repo)
+	}
+	if strings.HasPrefix(filepath.Base(repo), ".") {
+		return filepath.Dir(repo) // <repo>/.git, <repo>/.bare
+	}
+	return strings.TrimSuffix(repo, ".git")
 }
 
 func projectName(path string) string {
@@ -557,7 +579,8 @@ type usageSession struct {
 	Last     int64         `json:"last"`
 	Tokens   core.TokenSum `json:"tokens"`
 	Accounts []string      `json:"accounts"`         // accounts that served it in the period, most used first
-	Origin   string        `json:"origin,omitempty"` // how it ran, as sessionInfo.Origin; "" for Claude Code's CLI
+	Origin   string        `json:"origin,omitempty"` // what ran it, as sessionInfo.Origin; "" for Claude Code's CLI
+	Remote   bool          `json:"remote,omitempty"` // it ran on another device
 	// Mode all: the session's part of each provider's weekly quota, in that provider's unit.
 	UsedBy map[string]float64 `json:"used_by,omitempty"`
 	// Metered is false for a session known only by its tokens: none of its requests fell where
@@ -654,9 +677,11 @@ type usageDay struct {
 	Projects map[string]float64 `json:"projects,omitempty"`
 	Outside  float64            `json:"outside,omitempty"`
 	Metered  bool               `json:"metered"` // a quota reading fell on the day; without one only tokens are known
-	Requests int                `json:"requests"`
-	Tokens   core.TokenSum      `json:"tokens"`
-	Sessions []daySession       `json:"sessions"` // the day's largest, up to three
+	// Undated: use read across midnight may lie on the day, so its figure may leave some out.
+	Undated  bool          `json:"undated,omitempty"`
+	Requests int           `json:"requests"`
+	Tokens   core.TokenSum `json:"tokens"`
+	Sessions []daySession  `json:"sessions"` // the day's largest, up to three
 }
 
 // daySession is one of a day's largest sessions: by its part of the weekly quota where readings
@@ -689,6 +714,17 @@ type reading struct {
 	windows   map[string][]fiveWindow // 5h: each account's windows of the last day
 	noWindow  map[string]bool         // 5h: accounts without a 5-hour window
 	namedFrom map[string]int64        // 5h: since when each account's readings that show use name their 5-hour reset
+	remote    map[string]bool         // sessions, as the table lists them, a request of which came from another device
+	canonical map[string]string       // a credential to the one its account counts under
+}
+
+// scopeOf is the scope a report answers for one asked: an account counted under another
+// credential is that one's.
+func (u *reading) scopeOf(scope string) string {
+	if to, ok := u.canonical[scope]; ok {
+		return to
+	}
+	return scope
 }
 
 // validRange is the range a report covers: "week" unless "5h", "7d" or "30d" is asked.
@@ -715,6 +751,14 @@ func rangeDays(rng string) int {
 // kept one by one (nil for none).
 func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 	entries, logStart := readLog(now.AddDate(0, 0, -usageDays))
+	// One provider account read under two credentials (logged in again under a new one) is one
+	// account: its lines count under one, read with the snapshot so the two agree.
+	snap, canonical := state.BuildWithCanonical()
+	for i := range entries {
+		if to, ok := canonical[entries[i].Account]; ok {
+			entries[i].Account = to
+		}
+	}
 	// An account is watched from its first line: an account added later counts what it had used
 	// by then as used before logging.
 	firstSeen := map[string]int64{}
@@ -729,9 +773,9 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 		}
 		return logStart
 	}
-	u := &reading{rng: rng, week: map[string]core.Attribution{}, ranged: map[string]core.Attribution{},
+	u := &reading{rng: rng, canonical: canonical, week: map[string]core.Attribution{}, ranged: map[string]core.Attribution{},
 		froms: map[string]int64{}, starts: map[string]int64{}, owner: map[string]string{}, windows: map[string][]fiveWindow{}, noWindow: map[string]bool{},
-		namedFrom: map[string]int64{}}
+		namedFrom: map[string]int64{}, remote: map[string]bool{}}
 	if n := rangeDays(rng); n > 0 {
 		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		u.from = today.AddDate(0, 0, 1-n).UnixMilli()
@@ -739,6 +783,11 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 		entries = append(entries, history(logStart)...)
 	}
 	u.entries = entries
+	for _, e := range entries {
+		if e.Remote {
+			u.remote[core.ViewSession(e.Session)] = true
+		}
+	}
 	// Each account's lines in time order, gathered once.
 	lines := map[string][]core.LogEntry{}
 	for _, e := range entries {
@@ -757,9 +806,22 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 		off             bool
 	}
 	byProvider := map[string][]account{}
-	snap := state.Build()
+	// A credential that logs in to the same account as another the proxy holds counts under that
+	// one: one quota, its sessions with it.
+	alsoBound := map[string]int{}
+	for _, view := range snap.Providers {
+		for _, cv := range view.Credentials {
+			if cv.SameAs != "" {
+				alsoBound[cv.SameAs] += cv.Sessions
+			}
+		}
+	}
 	for name, view := range snap.Providers {
 		for _, cv := range view.Credentials {
+			if cv.SameAs != "" {
+				continue
+			}
+			cv.Sessions += alsoBound[cv.ID]
 			if info, ok := state.Account(cv.ID); ok {
 				info = windowOf(info, lines[cv.ID], now)
 				byProvider[name] = append(byProvider[name], account{info: info, order: cv.Order, sessions: cv.Sessions})
@@ -773,9 +835,10 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 		}
 	}
 	for id, ls := range lines {
-		var latest, weekly *core.LogEntry // its latest reading, and its latest weekly one
+		// Its latest line, request or reading, which names its provider; and its latest weekly reading.
+		var latest, weekly *core.LogEntry
 		for i := range ls {
-			if ls[i].Used7d != nil || ls[i].Used5h != nil {
+			if ls[i].Provider != "" {
 				latest = &ls[i]
 			}
 			if ls[i].Used7d != nil {
@@ -785,11 +848,22 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 		if held[id] || latest == nil || latest.Provider == "" {
 			continue
 		}
-		info := core.AccountInfo{ID: id, Label: offProxyLabel(id), Provider: latest.Provider}
+		info := core.AccountInfo{ID: id, Email: offProxyEmail(id), Provider: latest.Provider}
 		if weekly != nil && weekly.Reset7 > 0 {
 			info.ResetAt = time.UnixMilli(weekly.Reset7)
 		}
 		byProvider[latest.Provider] = append(byProvider[latest.Provider], account{info: info, order: math.MaxInt32, off: true})
+	}
+	// Each provider's accounts, those it holds and those gone, named apart from one another.
+	for _, accounts := range byProvider {
+		emails := map[string]string{}
+		for _, a := range accounts {
+			emails[a.info.ID] = a.info.Email
+		}
+		labels := core.UniqueLabels(emails)
+		for i := range accounts {
+			accounts[i].info.Label = labels[accounts[i].info.ID]
+		}
 	}
 	if u.from > 0 {
 		// Over a range a provider whose lines name no account it holds still shows, with its tokens.
@@ -824,7 +898,7 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 				ws = now.UnixMilli() // its window is over, and the next one is not known
 			}
 			// The window's start is known to about a minute: the walk takes its first requests in.
-			span := core.Span{From: ws - core.WindowJitter, To: now.UnixMilli(), CountFrom: ws - core.WindowJitter, LogStart: startOf(id), WindowStart: ws, Keep: keep}
+			span := core.Span{From: ws - core.WindowJitter, To: now.UnixMilli(), CountFrom: ws - core.WindowJitter, LogStart: startOf(id), WindowStart: ws, Keep: keep, Loc: now.Location()}
 			current := core.Attribute(lines[id], id, span)
 			u.week[id] = current
 			if u.from == 0 {
@@ -833,7 +907,7 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 			} else {
 				// One walk across the windows the range touches, begun a week early so the reading
 				// and the rate are known where the range begins.
-				span = core.Span{From: u.from - 7*day, To: now.UnixMilli(), CountFrom: u.from, LogStart: startOf(id), WindowStart: schedule, Range: true, Keep: keep}
+				span = core.Span{From: u.from - 7*day, To: now.UnixMilli(), CountFrom: u.from, LogStart: startOf(id), WindowStart: schedule, Range: true, Keep: keep, Loc: now.Location()}
 				u.ranged[id], u.froms[id], u.starts[id] = core.Attribute(lines[id], id, span), u.from, u.from
 			}
 			up.Accounts = append(up.Accounts, usageAccount{AccountInfo: a.info, Order: a.order, Sessions: a.sessions,
@@ -908,14 +982,28 @@ func warmReport(ctx context.Context) {
 	}
 }
 
+// reportZone is the time zone a report's days are in: the page's, named as the IANA database
+// names it, so its days and the times it shows agree; the proxy's when it names none it knows.
+func reportZone(name string) *time.Location {
+	if name == "" {
+		return time.Local
+	}
+	loc, errLoad := time.LoadLocation(name)
+	if errLoad != nil {
+		return time.Local
+	}
+	return loc
+}
+
 func usageResponse(query url.Values) ([]byte, error) {
-	now := time.Now()
+	now := time.Now().In(reportZone(query.Get("tz")))
 	scope, rng := query.Get("account"), query.Get("range")
 	if scope == "" {
 		scope = "all"
 	}
 	rng = validRange(rng)
 	u := readUsage(now, rng, nil)
+	scope = u.scopeOf(scope)
 	inScope, accounts, ok := u.covers(scope)
 	if !ok {
 		return httpResponse(http.StatusNotFound, []byte(`{"error":"unknown account or provider"}`))
@@ -990,10 +1078,11 @@ func usageResponse(query url.Values) ([]byte, error) {
 		if used7[e.Provider] == nil {
 			used7[e.Provider] = map[string]*dayUse{}
 		}
-		du := used7[e.Provider][core.DayOf(e.T)]
+		d := core.DayOf(e.T, now.Location())
+		du := used7[e.Provider][d]
 		if du == nil {
 			du = &dayUse{weights: map[string]float64{}}
-			used7[e.Provider][core.DayOf(e.T)] = du
+			used7[e.Provider][d] = du
 		}
 		du.requests += max(e.Count, 1)
 		du.tokens.Add(e)
@@ -1045,7 +1134,7 @@ func usageResponse(query url.Values) ([]byte, error) {
 			a.Projects = projectParts(u.week[a.ID], refs)
 		}
 	}
-	doc.Projects = groupByProject(shares, served, usedBy, usedProviders, refs)
+	doc.Projects = groupByProject(shares, served, usedBy, usedProviders, refs, u.remote)
 	if rng == "5h" {
 		// Each provider's windows of the last day, of the scope's accounts, oldest first.
 		doc.Windows = map[string][]usageWindow{}
@@ -1121,16 +1210,16 @@ func addProvider(shares map[string]*core.Share, usedBy map[string]map[string]flo
 	}
 }
 
-// days lays a provider's days out from the local day of from: each project's part, use elsewhere,
-// whether any reading fell on the day, what its requests ran, and its largest sessions.
+// days lays a provider's days out from the day of from, in now's time zone: each project's part,
+// use elsewhere, whether any reading fell on the day, what its requests ran, and its largest sessions.
 func days(a core.Attribution, use map[string]*dayUse, refs map[string]projectRef, from int64, now time.Time) []usageDay {
 	var out []usageDay
 	index := map[string]int{}
-	f := time.UnixMilli(from)
+	f := time.UnixMilli(from).In(now.Location())
 	for t := time.Date(f.Year(), f.Month(), f.Day(), 0, 0, 0, 0, f.Location()); !t.After(now); t = t.AddDate(0, 0, 1) {
-		d := core.DayOf(t.UnixMilli())
+		d := core.DayOf(t.UnixMilli(), now.Location())
 		index[d] = len(out)
-		out = append(out, usageDay{Day: d, Metered: a.ReadDays[d], Outside: a.OutsideDays[d], Sessions: []daySession{}})
+		out = append(out, usageDay{Day: d, Metered: a.ReadDays[d], Undated: a.UndatedDays[d], Outside: a.OutsideDays[d], Sessions: []daySession{}})
 	}
 	quota := map[string]map[string]float64{} // day to session to its part, where readings tell it
 	for id, sh := range a.Sessions {
@@ -1198,7 +1287,9 @@ func usageSessionResponse(query url.Values) ([]byte, error) {
 	if scope == "" {
 		scope = "all"
 	}
-	u := readUsage(time.Now(), rng, func(s string) bool { return core.ViewSession(s) == id })
+	now := time.Now().In(reportZone(query.Get("tz")))
+	u := readUsage(now, rng, func(s string) bool { return core.ViewSession(s) == id })
+	scope = u.scopeOf(scope)
 	inScope, accounts, ok := u.covers(scope)
 	if !ok {
 		return httpResponse(http.StatusNotFound, []byte(`{"error":"unknown account or provider"}`))
@@ -1223,7 +1314,7 @@ func usageSessionResponse(query url.Values) ([]byte, error) {
 			pieces = append(pieces, p)
 		}
 	}
-	detail := core.Detail(lines, pieces, time.Local)
+	detail := core.Detail(lines, pieces, now.Location())
 	infos := map[string]core.AccountInfo{}
 	for _, up := range u.providers {
 		for _, a := range up.Accounts {
@@ -1246,9 +1337,10 @@ func usageSessionResponse(query url.Values) ([]byte, error) {
 		Project string `json:"project"`
 		Path    string `json:"path"`
 		Origin  string `json:"origin,omitempty"`
+		Remote  bool   `json:"remote,omitempty"`
 		core.SessionDetail
 		Accounts []account `json:"accounts"`
-	}{ID: id, Title: meta.Title, Project: meta.Project, Path: meta.Path, Origin: meta.Origin, SessionDetail: detail, Accounts: served})
+	}{ID: id, Title: meta.Title, Project: meta.Project, Path: meta.Path, Origin: meta.Origin, Remote: meta.Remote || u.remote[id], SessionDetail: detail, Accounts: served})
 	if errMarshal != nil {
 		return nil, errMarshal
 	}
@@ -1268,12 +1360,13 @@ func history(logStart int64) []core.LogEntry {
 	return out
 }
 
-// offProxyLabel names an account the proxy does not hold the way the proxy masks its own.
-func offProxyLabel(id string) string {
+// offProxyEmail is what a credential id tells of the email of an account the proxy no longer
+// holds: the host names a credential file after it.
+func offProxyEmail(id string) string {
 	if local, _, ok := strings.Cut(id, "@"); ok {
-		return core.MaskEmail(local[strings.LastIndex(local, "-")+1:] + "@")
+		return local[strings.LastIndex(local, "-")+1:] + "@"
 	}
-	return core.MaskEmail(id)
+	return id
 }
 
 // weekStart is when an account's current weekly window began.
@@ -1427,9 +1520,10 @@ func projectParts(attr core.Attribution, refs map[string]projectRef) map[string]
 	return out
 }
 
-// groupByProject puts sessions under their project, largest first. Sessions with no transcript
-// here (another device, or requests without a session) share the "" project.
-func groupByProject(shares map[string]*core.Share, served, usedBy map[string]map[string]float64, providers map[string]map[string]bool, refs map[string]projectRef) []usageProject {
+// groupByProject puts sessions under their project, largest first. Sessions with no folder known
+// (Claude Code on another device without a band, or requests without a session) share the ""
+// project. A session ran on another device when it said so, or when a request of it came from there.
+func groupByProject(shares map[string]*core.Share, served, usedBy map[string]map[string]float64, providers map[string]map[string]bool, refs map[string]projectRef, remote map[string]bool) []usageProject {
 	merged := map[string]*core.Share{}
 	for id, sh := range shares {
 		id = core.ViewSession(id)
@@ -1477,7 +1571,7 @@ func groupByProject(shares map[string]*core.Share, served, usedBy map[string]map
 			used = append(used, provider)
 		}
 		sort.Strings(used)
-		p.Sessions = append(p.Sessions, usageSession{ID: id, Title: meta.Title, Used: sh.Used, Requests: sh.Requests, Last: sh.Last, Tokens: sh.Tokens, Accounts: accounts, Origin: meta.Origin, UsedBy: usedBy[id], Metered: sh.Metered, Providers: used})
+		p.Sessions = append(p.Sessions, usageSession{ID: id, Title: meta.Title, Used: sh.Used, Requests: sh.Requests, Last: sh.Last, Tokens: sh.Tokens, Accounts: accounts, Origin: meta.Origin, Remote: meta.Remote || remote[id], UsedBy: usedBy[id], Metered: sh.Metered, Providers: used})
 	}
 	out := make([]usageProject, 0, len(byName))
 	for _, p := range byName {

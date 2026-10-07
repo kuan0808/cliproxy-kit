@@ -1,5 +1,5 @@
 // Pure helpers for the band: no `$`, so the tests call them directly.
-import type { CacheInfo, ModelInfo, Snap, SnapCred, SnapProvider, SnapSession, SnapWindow } from '../types'
+import type { BandError, CacheInfo, ModelInfo, Pending, Snap, SnapCred, SnapProvider, SnapSession, SnapWindow } from '../types'
 
 export const C = {
   fg: '#ebdbb2',
@@ -146,7 +146,8 @@ export function untilIso(iso: string | undefined, now: number): string {
  * so is the whole.
  */
 export function pooled(view: SnapProvider): { left: number | null; parts: (number | null)[]; stale: boolean } {
-  const weekly = view.credentials.filter(c => !c.disabled).map(c => windowOf(c, '7d'))
+  // A second credential of one provider account has no quota of its own.
+  const weekly = view.credentials.filter(c => !c.disabled && !c.same_as).map(c => windowOf(c, '7d'))
   const parts = weekly.map(w => (w ? Math.round(w.remaining * 100) : null))
   const known = parts.filter((p): p is number => p !== null)
   return {
@@ -224,9 +225,32 @@ export function resetText(reset: string): string {
   return reset === 'now' ? 'resetting now' : `resets in ${reset}`
 }
 
-/** Accounts the switch list offers: same provider, not the current one, able to serve. */
-export function switchTargets(view: SnapProvider, current: string): SnapCred[] {
-  return view.credentials.filter(c => c.id !== current && c.tier < 3 && !c.unavailable)
+/** Accounts the switch list offers: same provider, not the current one, able to serve the session's next model. */
+export function switchTargets(view: SnapProvider, current: string, blocked: readonly string[] = []): SnapCred[] {
+  return view.credentials.filter(c => c.id !== current && c.tier < 3 && !c.unavailable && !blocked.includes(c.id))
+}
+
+/**
+ * Why the switch list cannot offer an account: what stops it for every model, else what stops it
+ * for the session's model alone (that model's own weekly quota used up).
+ */
+export function cannotTake(c: SnapCred, model: string, now: number): string {
+  if (c.disabled || c.unavailable || c.tier >= 3) return blockedOthers({ health: '', credentials: [c] }, '', now)
+  const w = weeklyFor(c, model)
+  if (w && w.remaining <= 0) {
+    const back = untilIso(w.reset_at, now)
+    return `${c.label} ${w.label} used up${back ? `, back in ${back}` : ''}`
+  }
+  return `${c.label} cannot serve ${model} now`
+}
+
+/**
+ * What a meter without a reading of its window says: the provider said the account has no such
+ * window, it has not reported one yet, or the account was never read.
+ */
+export function missingText(cred: SnapCred | undefined, kind: string): string {
+  if (cred?.absent?.includes(kind)) return 'no such limit'
+  return cred?.windows.length ? 'not reported yet' : 'after the first reply'
 }
 
 /** `key` names what a dismissal hides, for alerts that can be dismissed. */
@@ -299,6 +323,66 @@ export function parseSnap(text: string): Snap | null {
   }
 }
 
+// The plugin rewrites its snapshot file at least once a minute, so a reader can tell a quiet proxy
+// from a stopped one.
+const LIVE_MS = 2 * MIN
+
+/**
+ * Whether a snapshot file is the running proxy's: one a stopped proxy left behind is not, and
+ * another proxy (in a container, say) may serve its port now.
+ */
+export function snapIsLive(snap: Snap, now: number): boolean {
+  return now - Date.parse(snap.generated_at) <= LIVE_MS
+}
+
+/** The proxy's `/band` answer: a snapshot, or why there is none. */
+export function readBand(status: number, text: string): { snap: Snap; error: null } | { snap: null; error: BandError } {
+  if (status < 200 || status > 299) return { snap: null, error: { kind: 'status', status } }
+  const snap = parseSnap(text)
+  return snap ? { snap, error: null } : { snap: null, error: { kind: 'body' } }
+}
+
+/** Why the band has no quota data from the proxy, in words. */
+export function bandErrorText(error: BandError): string {
+  if (error.kind === 'network') return `cannot reach the proxy for quota data: ${error.message}`
+  if (error.kind === 'body') return "the proxy's quota data is not in a form this band reads; are both the same version?"
+  if (error.status === 401) return "the proxy refused this key for quota data; list it in quota-pilot's band_tokens setting"
+  if (error.status === 404) return 'the proxy has no quota-pilot band route (404); is the plugin installed there?'
+  return `the proxy answered HTTP ${error.status} for quota data`
+}
+
+// The plugin reads commands every second and acknowledges each in its next snapshot, which the
+// band reads within ten seconds: a minute without an answer means nothing is reading them.
+const PENDING_MS = MIN
+
+/**
+ * Pending commands as the snapshot leaves them: its acknowledgement settles one; one written for
+ * an earlier run of the proxy will not be acknowledged, as acknowledgements do not survive a
+ * restart; one unanswered for a minute expires. `notice` tells the last outcome, null for none.
+ */
+export function settlePending(pending: readonly Pending[], snap: Snap | null, now: number): {
+  left: Pending[]
+  notice: { text: string; isError: boolean } | null
+} {
+  const left: Pending[] = []
+  let notice: { text: string; isError: boolean } | null = null
+  for (const p of pending) {
+    const ack = snap?.acks.find(a => a.command_id === p.id)
+    if (ack) {
+      notice = ack.status === 'applied'
+        ? { text: `${p.text}: done`, isError: false }
+        : { text: `${p.text}: ${ack.reason ?? 'rejected'}`, isError: true }
+    } else if (snap && snap.boot_id !== p.boot) {
+      notice = { text: `${p.text}: the proxy restarted before confirming it`, isError: true }
+    } else if (now - p.at > PENDING_MS) {
+      notice = { text: `${p.text}: no answer from the proxy; is it running?`, isError: true }
+    } else {
+      left.push(p)
+    }
+  }
+  return { left, notice }
+}
+
 /** TTL the main conversation's cache uses: the override, else 1 hour on a subscription, 5 minutes on a key. */
 export function cacheTtlMs(override: string | undefined, proxied: boolean): number {
   if (override === '1h') return HOUR
@@ -327,9 +411,14 @@ const MODEL_OWNER: Record<string, string> = { claude: 'anthropic', codex: 'opena
 /** "Codex", "Claude". */
 export const providerTitle = (provider: string) => provider.charAt(0).toUpperCase() + provider.slice(1)
 
-/** The provider a model id belongs to, by its owner. */
+/**
+ * The provider a model belongs to, by its owner. Claude Code names its own models by alias too
+ * (`opus`, `opus[1m]`, `sonnet`, `opusplan`, `default`), with a suffix such as `[1m]`.
+ */
 export function providerOfModel(model: string): string {
-  return /^(gpt-|codex)/i.test(model) ? 'codex' : /^claude-/i.test(model) ? 'claude' : ''
+  const id = model.trim().replace(/\[[^\]]*\]$/, '')
+  if (/^(gpt-|codex)/i.test(id)) return 'codex'
+  return /^(claude-|opus|sonnet|haiku|fable)|^(default|best)$/i.test(id) ? 'claude' : ''
 }
 
 /** A model id as a product line and a version: gpt-6.1-sol is line gpt-sol, version 6.1. */

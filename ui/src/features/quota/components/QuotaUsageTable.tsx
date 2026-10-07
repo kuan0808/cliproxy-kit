@@ -31,6 +31,7 @@ import { useUsageFocus } from '../usageFocus';
 import {
   averageContext,
   cacheHitRate,
+  cacheWritesOf,
   formatDate,
   formatDay,
   formatDayTime,
@@ -50,7 +51,7 @@ import {
   ranLine,
   scopeAccounts,
   sessionLabel,
-  sessionSource,
+  sessionSources,
   sourceTag,
   sourceWhy,
   splitAutomated,
@@ -84,10 +85,13 @@ export function UsageTable({
   usage,
   search,
   now,
+  onClearSearch,
 }: {
   usage: QuotaPilotUsage;
   search: string;
   now: number;
+  /** Clears the page's search, so a session the chart asks for that it hides shows. */
+  onClearSearch?: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage;
@@ -102,19 +106,18 @@ export function UsageTable({
     setOpenFor(query);
     setOpen({});
   }
+  // A project the search finds by name shows whole; one it finds by some sessions shows those, and
+  // its figures are theirs.
   const projects = useMemo(() => {
     if (!query) return usage.projects;
     return usage.projects
-      .map((project) =>
-        projectLabel(t, project.name).toLowerCase().includes(query)
-          ? project
-          : {
-              ...project,
-              sessions: project.sessions.filter(
-                (s) => s.title.toLowerCase().includes(query) || s.id.includes(query)
-              ),
-            }
-      )
+      .map((project) => {
+        if (projectLabel(t, project.name).toLowerCase().includes(query)) return project;
+        const sessions = project.sessions.filter(
+          (s) => s.title.toLowerCase().includes(query) || s.id.includes(query)
+        );
+        return { ...project, ...sumRows(sessions), sessions };
+      })
       .filter((project) => project.sessions.length > 0);
   }, [usage.projects, query, t]);
 
@@ -122,27 +125,40 @@ export function UsageTable({
   const codexView =
     usage.mode !== 'all' && scopeAccounts(usage).every((a) => a.provider === 'codex');
   // A Claude Code session that used Codex did so through the proxy, whichever scope lists it.
-  const sourceOf = useCallback(
+  const sourcesOf = useCallback(
     (session: QuotaPilotUsageSession) =>
       session.id === ''
-        ? null
-        : sessionSource(session.origin, codexView || (all && session.providers.includes('codex'))),
+        ? []
+        : sessionSources(
+            session.origin,
+            codexView || (all && session.providers.includes('codex')),
+            session.remote
+          ),
     [codexView, all]
   );
 
-  // A session asked for from the chart above opens here: its project, its row even past the
-  // first few (in its project's automated row too), and its detail. Each ask is handled once, so the list refreshing does not open it
-  // again; the row is brought into view once it is drawn.
+  // A session asked for from the chart above opens here: its project, its row even past the first
+  // few (in its project's automated row too), and its detail; a search that hides it is cleared
+  // first. Each ask is handled once, so the list refreshing does not open it again; the row is
+  // brought into view once it is drawn.
   const focus = useUsageFocus();
   const handled = useRef(0);
   const reveal = useRef<string | null>(null);
   useEffect(() => {
     if (focus.ask === handled.current) return;
-    handled.current = focus.ask;
     const project = projects.find((p) => p.sessions.some((x) => x.id === focus.id));
-    if (!project) return;
+    if (!project) {
+      const hidden = usage.projects.some((p) => p.sessions.some((x) => x.id === focus.id));
+      if (hidden && query && onClearSearch) {
+        onClearSearch(); // asked again once the list shows it
+        return;
+      }
+      handled.current = focus.ask;
+      return;
+    }
+    handled.current = focus.ask;
     const key = project.name || '-';
-    const { listed, automated } = splitAutomated(project.sessions, sourceOf);
+    const { listed, automated } = splitAutomated(project.sessions, sourcesOf);
     const inGroup = automated.some((x) => x.id === focus.id);
     const at = (inGroup ? automated : listed).findIndex((x) => x.id === focus.id);
     const listKey = inGroup ? autoKey(key) : key;
@@ -150,7 +166,7 @@ export function UsageTable({
     if (at >= SESSION_PREVIEW) setMore((m) => ({ ...m, [listKey]: true }));
     setDetail(focus.id);
     reveal.current = focus.id;
-  }, [focus, projects, sourceOf]);
+  }, [focus, projects, sourcesOf, usage.projects, query, onClearSearch]);
   useEffect(() => {
     if (reveal.current === null) return;
     const row = document.querySelector(`[data-session="${CSS.escape(reveal.current)}"]`);
@@ -170,7 +186,6 @@ export function UsageTable({
   const showAccounts = usage.mode === 'provider';
   const providers = usage.providers.map((p) => p.provider);
   const covered = coveredFrom(scopeAccounts(usage).filter((a) => a.beforeLog > 0));
-  const noCacheWrite = !all && scopeAccounts(usage).every((a) => a.provider === 'codex');
   const peak = Math.max(...usage.projects.map((p) => p.used), 0);
   const layout =
     columns === 'tokens' ? 'tokens' : all ? 'quotaAll' : showAccounts ? 'quotaAccounts' : 'quota';
@@ -239,9 +254,7 @@ export function UsageTable({
         <span role="cell" className={styles.num}>
           {formatTokens(row.tokens.output)}
         </span>
-        <span role="cell" className={`${styles.num} ${styles.optional}`}>
-          {noCacheWrite ? '—' : formatTokens(row.tokens.cacheWrite)}
-        </span>
+        {cacheWriteCell(row, usedProviders)}
         <span role="cell" className={styles.num}>
           {formatTokens(row.tokens.cacheRead)}
         </span>
@@ -253,6 +266,21 @@ export function UsageTable({
         </span>
       </>
     );
+
+  // Codex reports no cache writes: a row only it served has none to show, and one it shared
+  // counts the others'.
+  const cacheWriteCell = (row: Row, usedProviders?: string[]) => {
+    const known = cacheWritesOf(usedProviders ?? []);
+    return (
+      <span
+        role="cell"
+        className={`${styles.num} ${styles.optional}`}
+        title={known === 'some' ? t('quota_usage.kind_cacheWrite_partial') : undefined}
+      >
+        {known === 'none' ? '—' : formatTokens(row.tokens.cacheWrite)}
+      </span>
+    );
+  };
 
   const special = (
     key: 'before' | 'outside',
@@ -398,18 +426,18 @@ export function UsageTable({
             const key = project.name || '-';
             const isOpen = open[key] ?? ((index === 0 && !query) || Boolean(query));
             const colour = colourOf(project.name);
-            const summary = projectSources(project.sessions, sourceOf);
-            // A source every session shares is said once, on the project; otherwise on each row.
-            const tagOf = (x: QuotaPilotUsageSession) => (summary.shared ? null : sourceOf(x));
-            const { listed, automated } = splitAutomated(project.sessions, sourceOf);
+            const summary = projectSources(project.sessions, sourcesOf);
+            // Tags every session shares are said once, on the project; otherwise on each row.
+            const tagsOf = (x: QuotaPilotUsageSession) => (summary.shared ? [] : sourcesOf(x));
+            const { listed, automated } = splitAutomated(project.sessions, sourcesOf);
             const groupKey = autoKey(key);
             const groupOpen = open[groupKey] ?? Boolean(query);
             const sessionRow = (session: QuotaPilotUsageSession, inner: boolean, tag: boolean) => (
               <SessionRows
                 key={session.id || 'none'}
                 session={session}
-                tag={tag ? tagOf(session) : null}
-                source={sourceOf(session)}
+                tags={tag ? tagsOf(session) : []}
+                sources={sourcesOf(session)}
                 inner={inner}
                 project={project}
                 layout={layout}
@@ -488,7 +516,7 @@ export function UsageTable({
                             data-open={groupOpen ? 'true' : undefined}
                             aria-hidden="true"
                           />
-                          <SourceTag source={sourceOf(automated[0])!} />
+                          <SourceTag source={sourcesOf(automated[0]).find((x) => x.kind === 'auto')!} />
                           <span>{t('quota_usage.sessions', { count: automated.length })}</span>
                         </button>
                       </span>
@@ -553,6 +581,11 @@ function SourceTag({ source }: { source: SessionSource }) {
   );
 }
 
+/** A session's tags, side by side. */
+function SourceTags({ sources }: { sources: SessionSource[] }) {
+  return sources.map((source) => <SourceTag key={source.kind} source={source} />);
+}
+
 /** "75 sessions · [Automated] 74", "[Other device] 3 sessions", "Requests not in any session". */
 function ProjectSummary({ summary }: { summary: ProjectSources }) {
   const { t } = useTranslation();
@@ -560,7 +593,7 @@ function ProjectSummary({ summary }: { summary: ProjectSources }) {
   const parts: ReactNode[] = summary.shared
     ? [
         <>
-          <SourceTag source={summary.sources[0].source} />
+          <SourceTags sources={summary.sources[0].source} />
           {sessions}
         </>,
       ]
@@ -569,7 +602,7 @@ function ProjectSummary({ summary }: { summary: ProjectSources }) {
           sessions,
           ...summary.sources.map(({ source, count }) => (
             <>
-              <SourceTag source={source} />
+              <SourceTags sources={source} />
               {t('quota_usage.source_count', { count })}
             </>
           )),
@@ -612,8 +645,8 @@ function sumRows(rows: Row[]): Row {
 
 function SessionRows({
   session,
-  tag,
-  source,
+  tags,
+  sources,
   inner,
   project,
   layout,
@@ -624,10 +657,10 @@ function SessionRows({
   children,
 }: {
   session: QuotaPilotUsageSession;
-  /** Shown beside the title: the session's source where its project's sessions differ. */
-  tag: SessionSource | null;
+  /** Shown beside the title: the session's tags where its project's sessions differ. */
+  tags: SessionSource[];
   /** Said in full in the session's detail. */
-  source: SessionSource | null;
+  sources: SessionSource[];
   /** Listed under its project's automated row. */
   inner: boolean;
   project: QuotaPilotUsageProject;
@@ -658,7 +691,7 @@ function SessionRows({
             title={name}
           >
             <span className={styles.sessionTitle}>{name}</span>
-            {tag && <SourceTag source={tag} />}
+            <SourceTags sources={tags} />
           </button>
         </span>
         {children}
@@ -669,7 +702,7 @@ function SessionRows({
             id={session.id}
             title={name}
             project={project.name}
-            source={source}
+            sources={sources}
             scope={scope}
             range={range}
           />
@@ -687,14 +720,14 @@ function SessionDetail({
   id,
   title,
   project,
-  source,
+  sources,
   scope,
   range,
 }: {
   id: string;
   title: string;
   project: string;
-  source: SessionSource | null;
+  sources: SessionSource[];
   scope: string;
   range: QuotaPilotUsageRange;
 }) {
@@ -717,12 +750,15 @@ function SessionDetail({
       detail={state.detail}
       title={title}
       project={project}
-      source={source}
+      sources={sources}
       range={range}
       locale={locale}
     />
   );
 }
+
+/** What a provider serves a request that names no tier: nothing to say about. */
+const USUAL_TIERS = new Set(['', 'auto', 'default', 'standard']);
 
 /** Service tiers with a name of their own in the locales (quota_usage.tier_*). */
 const TIER_NAMES = new Set([
@@ -740,15 +776,15 @@ export function SessionDetailView({
   detail: d,
   title,
   project,
-  source,
+  sources,
   range,
   locale,
 }: {
   detail: QuotaPilotUsageSessionDetail;
   title: string;
   project: string;
-  /** Where the session came from, said in plain words; null for Claude Code run here. */
-  source: SessionSource | null;
+  /** Where the session ran and what ran it, said in plain words; none for Claude Code run here. */
+  sources: SessionSource[];
   range: QuotaPilotUsageRange;
   locale?: string;
 }) {
@@ -786,12 +822,17 @@ export function SessionDetailView({
     };
   };
   const share = (x: number, of: number) => formatShare(of > 0 ? x / of : 0);
-  // The service tier its requests asked for and the one the provider reported, each by its share
-  // of the requests when they differ; shown once either is said.
+  // The service tier its requests asked for and the one the provider reported, by its share of the
+  // requests when they differ. Shown only once some request asked for a tier, or was served one
+  // other than the usual: requests that named none and got the usual one have nothing to say.
   const tierTotal = d.tiers.reduce((sum, x) => sum + x.requests, 0);
   const tierProviders = new Set(d.tiers.map((x) => x.provider)).size;
-  const tierName = (provider: string, tier: string) => {
+  const tierShown = d.tiers.some(
+    (x) => (x.asked !== '' && x.asked !== 'auto') || !USUAL_TIERS.has(x.served)
+  );
+  const tierName = (provider: string, tier: string, side: 'asked' | 'served') => {
     if (!tier) return t('quota_usage.tier_none');
+    if (tier === 'auto' && side === 'asked') return t('quota_usage.tier_unnamed');
     // Codex calls its priority tier Fast; a tier with no name of ours shows as the provider names it.
     const key = tier === 'priority' && provider === 'codex' ? 'fast' : tier;
     const name = TIER_NAMES.has(key) ? t(`quota_usage.tier_${key}`) : tier;
@@ -800,17 +841,21 @@ export function SessionDetailView({
   const tierRow = (side: 'asked' | 'served') => {
     const counts = new Map<string, number>();
     d.tiers.forEach((x) => {
-      const name = tierName(x.provider, x[side]);
+      const name = tierName(x.provider, x[side], side);
       counts.set(name, (counts.get(name) ?? 0) + x.requests);
     });
     const list = [...counts].sort((a, b) => b[1] - a[1]);
-    return list.length === 1
-      ? list[0][0]
-      : list.map(([name, n]) => `${name} ${share(n, tierTotal)}`).join(' · ');
+    const mixed = list.length > 1;
+    return {
+      text: list.map(([name, n]) => (mixed ? `${name} ${share(n, tierTotal)}` : name)).join(' · '),
+      mixed,
+    };
   };
-  const tiersSaid = d.tiers.some((x) => x.asked || x.served);
-  const tierRows = tiersSaid ? { asked: tierRow('asked'), served: tierRow('served') } : null;
-  const tiersMixed = d.tiers.length > 1;
+  const tierRows = tierShown
+    ? (['asked', 'served'] as const)
+        .filter((side) => d.tiers.some((x) => x[side]))
+        .map((side) => ({ side, ...tierRow(side) }))
+    : [];
   const modelsOf = (b: QuotaPilotUsageBucket) =>
     [
       b.models
@@ -852,15 +897,22 @@ export function SessionDetailView({
       <div className={styles.detailHead}>
         <strong>{d.title || title}</strong>
         <span>{meta.join(' · ')}</span>
-        {source && (
+        {sources.length > 0 && (
           <span className={styles.detailSource}>
-            <SourceTag source={source} />
-            {sourceWhy(t, source)}
+            <SourceTags sources={sources} />
+            {sources
+              .map((source) => sourceWhy(t, source))
+              .filter(Boolean)
+              .join(' ')}
           </span>
         )}
       </div>
       <div className={styles.detailGrid}>
-        <Composition composition={d.composition} note={t(rangeKey(range))} />
+        <Composition
+          composition={d.composition}
+          note={t(rangeKey(range))}
+          cacheWrites={cacheWritesOf(d.buckets.flatMap((b) => b.providers.map((p) => p.name)))}
+        />
         <div>
           <div className={styles.subhead}>
             {t('quota_usage.timeline')}
@@ -930,21 +982,19 @@ export function SessionDetailView({
             </div>
           ))}
 
-          {tierRows && (
+          {tierRows.length > 0 && (
             <>
               <div className={styles.subhead}>
                 {t('quota_usage.tiers')}
-                {tiersMixed && <span>{t('quota_usage.tiers_note')}</span>}
+                {tierRows.some((row) => row.mixed) && <span>{t('quota_usage.tiers_note')}</span>}
               </div>
               <dl className={`${styles.facts} ${styles.tierFacts}`}>
-                <div>
-                  <dt>{t('quota_usage.tier_asked')}</dt>
-                  <dd>{tierRows.asked}</dd>
-                </div>
-                <div>
-                  <dt>{t('quota_usage.tier_served')}</dt>
-                  <dd>{tierRows.served}</dd>
-                </div>
+                {tierRows.map((row) => (
+                  <div key={row.side}>
+                    <dt>{t(`quota_usage.tier_${row.side}`)}</dt>
+                    <dd>{row.text}</dd>
+                  </div>
+                ))}
               </dl>
             </>
           )}

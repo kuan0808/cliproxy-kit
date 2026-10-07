@@ -25,9 +25,10 @@ import (
 type namedSession struct {
 	Title  string `json:"title,omitempty"`
 	Cwd    string `json:"cwd,omitempty"`
-	Root   string `json:"root,omitempty"` // the repository it runs in, when the band knows it
-	Origin string `json:"origin"`         // originRemote for a band's session; else what started it
-	At     int64  `json:"at"`             // when it was last said, unix milliseconds
+	Root   string `json:"root,omitempty"`   // the repository it runs in, when the band knows it
+	Origin string `json:"origin"`           // originRemote for a band's session; else what started it
+	Remote bool   `json:"remote,omitempty"` // its requests came from another device, so its folders are not here
+	At     int64  `json:"at"`               // when it was last said, unix milliseconds
 }
 
 // originRemote marks a Claude Code session the band on another machine named.
@@ -120,7 +121,8 @@ func noteSession(id string, next namedSession, now time.Time) {
 	if next.Cwd == "" {
 		next.Cwd, next.Root = old.Cwd, old.Root
 	}
-	changed := !had || old.Title != next.Title || old.Cwd != next.Cwd || old.Root != next.Root || old.Origin != next.Origin
+	next.Remote = next.Remote || old.Remote
+	changed := !had || old.Title != next.Title || old.Cwd != next.Cwd || old.Root != next.Root || old.Origin != next.Origin || old.Remote != next.Remote
 	if !changed && !namedDirty && now.UnixMilli()-old.At < time.Hour.Milliseconds() {
 		return
 	}
@@ -137,9 +139,10 @@ func namedKnown(id string) namedSession {
 	return named[id]
 }
 
-// namedMeta is a session's title and project as it was named. A band's session runs on another
-// machine, so its folders are placed as given; any other, as a Codex session, is placed like a
-// local one when its folder is here.
+// namedMeta is a session's title and project as it was named. A session that ran here, as a local
+// Codex session, is placed like a local one. One that ran on another device (a band's, or one
+// whose requests came from there) or in a folder this machine cannot look up (a Windows path, a
+// share, which a lookup would reach over the network) is placed as given, by its folder's name.
 func namedMeta(id string) (sessionInfo, bool) {
 	namedMu.Lock()
 	loadNamedLocked()
@@ -153,11 +156,12 @@ func namedMeta(id string) (sessionInfo, bool) {
 	if !ok {
 		return sessionInfo{}, false
 	}
-	info := sessionInfo{Title: s.Title, Origin: s.Origin}
-	if s.Origin != originRemote {
-		if s.Cwd != "" {
-			placeSession(id, s.Cwd, &info)
-		}
+	info := sessionInfo{Title: s.Title, Origin: s.Origin, Remote: s.Remote}
+	if s.Origin == originRemote {
+		info.Origin, info.Remote = "", true // Claude Code's CLI on another machine
+	}
+	if local := strings.HasPrefix(s.Cwd, "/") && !strings.HasPrefix(s.Cwd, "//"); local && !info.Remote {
+		placeSession(id, s.Cwd, &info)
 		return info, true
 	}
 	info.Path, info.Repo = s.Root, s.Root != ""
@@ -229,26 +233,26 @@ func cleanPath(s string) string {
 var envCwd = regexp.MustCompile(`<cwd>([^<]+)</cwd>`)
 
 // noteRequestSession names a session from a Responses API request, as Codex sends: the folder in
-// its environment context, its first request (see noteSession), and what started it from the
-// client's originator.
+// its environment context, its first request (see noteSession), what started it from the client's
+// originator, and whether it came from another device. A session named already is only noted as
+// still seen, so what it said lasts as long as it runs.
 func noteRequestSession(id string, headers http.Header, body []byte, now time.Time) {
 	input := gjson.GetBytes(body, "input")
 	if id == "" || !input.IsArray() {
 		return
 	}
+	remote := fromAnotherDevice(headers)
 	known := namedKnown(id)
 	if known.Title != "" && known.Cwd != "" {
+		known.Remote = known.Remote || remote
+		noteSession(id, known, now)
 		return
 	}
 	var cwd string
 	var texts []string
 	read := func(text string) {
 		if m := envCwd.FindStringSubmatch(text); m != nil && strings.HasPrefix(strings.TrimSpace(text), "<environment_context>") {
-			// The folder is looked up on this machine, so only a local absolute path is taken:
-			// never a share (//server, \\server), which a lookup would reach over the network.
-			if p := strings.TrimSpace(m[1]); strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "//") {
-				cwd = cleanPath(p)
-			}
+			cwd = cleanPath(strings.TrimSpace(m[1])) // kept as said; namedMeta decides whether to look it up
 			return
 		}
 		texts = append(texts, text)
@@ -272,5 +276,5 @@ func noteRequestSession(id string, headers http.Header, body []byte, now time.Ti
 	if origin == "" {
 		origin, _, _ = strings.Cut(cleanText(headers.Get("User-Agent"), 64), "/")
 	}
-	noteSession(id, namedSession{Title: title, Cwd: cwd, Origin: origin}, now)
+	noteSession(id, namedSession{Title: title, Cwd: cwd, Origin: origin, Remote: remote}, now)
 }

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { quotaPilotApi } from '@/services/api';
+import type { QuotaPilotRefreshResult } from '@/types';
 
 /**
  * The page's polls follow one version: a refresh asks the plugin to read every account's quota
@@ -25,10 +26,13 @@ export function bumpUsageVersion() {
   listeners.forEach((listener) => listener());
 }
 
-/** Reads every account's quota now, then has the view ask again; a failed read still re-asks. */
-export async function refreshUsage() {
+/**
+ * Reads every account's quota now, then has the view ask again; a failed read still re-asks. Says
+ * which accounts could not be read.
+ */
+export async function refreshUsage(): Promise<QuotaPilotRefreshResult> {
   try {
-    await quotaPilotApi.refresh();
+    return await quotaPilotApi.refresh();
   } finally {
     bumpUsageVersion();
   }

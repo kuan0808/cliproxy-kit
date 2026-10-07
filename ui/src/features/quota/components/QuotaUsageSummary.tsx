@@ -20,6 +20,7 @@ import type {
 import {
   averageContext,
   cacheHitRate,
+  cacheWritesOf,
   coveredFrom,
   dayStartMs,
   formatDate,
@@ -40,6 +41,7 @@ import {
   scopeAccounts,
   sessionLabel,
   windowKey,
+  type CacheWrites,
 } from '../usageFormat';
 import { BarCard, PickableBars } from './QuotaUsageBars';
 import { focusUsageSession } from '../usageFocus';
@@ -162,7 +164,9 @@ export function UsageSummary({ usage, now }: { usage: QuotaPilotUsage; now: numb
                 ? t(windowKey('composition_week', usage.range))
                 : t(rangeKey(usage.range))
             }
-            noCacheWrite={blocks.every((b) => b.provider === 'codex')}
+            cacheWrites={cacheWritesOf(
+              usage.projects.flatMap((p) => p.sessions.flatMap((x) => x.providers))
+            )}
           />
           <Efficiency composition={usage.composition} />
         </div>
@@ -580,12 +584,19 @@ function DailyChart({
   const peak = Math.max(...totals, 0);
   if (days.length === 0) return null;
 
+  // A day some use read across midnight may lie on shows what it holds at least, or that its use is
+  // not known when it holds nothing else.
+  const unknown = (i: number) => days[i].undated && totals[i] === 0;
   const figureOf = (i: number) =>
     !block.known
       ? t('quota_usage.day_no_reading')
       : unread(days[i].day)
         ? t('quota_usage.day_unread')
-        : t('quota_usage.day_used', { value: formatShare(totals[i]) });
+        : unknown(i)
+          ? t('quota_usage.day_unknown')
+          : days[i].undated
+            ? t('quota_usage.day_used_partial', { value: formatShare(totals[i]) })
+            : t('quota_usage.day_used', { value: formatShare(totals[i]) });
   // The day's projects largest first; the other projects and what no request explains last.
   const projectsOf = (d: QuotaPilotUsageDay) => {
     const segments = segmentsOf(d);
@@ -614,7 +625,7 @@ function DailyChart({
           .filter((x) => x && x !== '—')
           .join(' · '),
         segments: segmentsOf(d),
-        muted: unread(d.day),
+        muted: unread(d.day) || unknown(i),
       }))}
       peak={peak}
       axis={
@@ -634,7 +645,7 @@ function DailyChart({
           <BarCard
             title={dateOf(i)}
             figure={figureOf(i)}
-            quiet={!block.known || unread(d.day)}
+            quiet={!block.known || unread(d.day) || unknown(i)}
             rows={[
               { label: t('quota_usage.readout_projects'), value: projectsOf(d) },
               {
@@ -877,11 +888,12 @@ const KINDS = ['cacheRead', 'cacheWrite', 'output', 'input'] as const;
 export function Composition({
   composition,
   note,
-  noCacheWrite,
+  cacheWrites = 'all',
 }: {
   composition: QuotaPilotComposition;
   note: string;
-  noCacheWrite?: boolean;
+  /** Codex reports no cache writes: none known when only it served, the others' in a mix. */
+  cacheWrites?: CacheWrites;
 }) {
   const { t } = useTranslation();
   const w = composition.weights;
@@ -899,12 +911,15 @@ export function Composition({
       </div>
       {KINDS.map((kind) => {
         const share = total > 0 ? w[kind] / total : 0;
-        const missing = kind === 'cacheWrite' && noCacheWrite;
+        const missing = kind === 'cacheWrite' && cacheWrites === 'none';
+        const partial = kind === 'cacheWrite' && cacheWrites === 'some';
         return (
           <div key={kind} className={styles.kind}>
             <span className={styles.kindName}>
               {t(`quota_usage.kind_${kind}`)}
-              <small>{t(`quota_usage.kind_${kind}_hint`)}</small>
+              <small>
+                {partial ? t('quota_usage.kind_cacheWrite_partial') : t(`quota_usage.kind_${kind}_hint`)}
+              </small>
             </span>
             <span className={styles.kindCount}>
               {missing ? t('quota_usage.not_reported') : formatTokens(composition.tokens[kind])}

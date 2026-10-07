@@ -14,10 +14,11 @@ import {
   formatTokens,
   modelName,
   projectSources,
-  sessionSource,
+  sessionSources,
   splitAutomated,
 } from '@/features/quota/usageFormat';
 import {
+  normalizeQuotaPilotRefresh,
   normalizeQuotaPilotUsage,
   normalizeQuotaPilotUsageSession,
   quotaPilotApi,
@@ -313,7 +314,7 @@ describe('usage view', () => {
     expect(markup).toContain('/ 200%');
     expect(markup).toContain('weekly quota of 2 accounts added up');
     expect(markup).toContain('This week · each account on its own week');
-    expect(markup).toContain('Used before logging');
+    expect(markup).toContain('Used before the first reading');
     expect(markup).toContain('It goes away once d•••');
     expect(markup).not.toContain('It goes away once k•••');
     expect(markup).toContain('Not matched to a request');
@@ -338,7 +339,7 @@ describe('usage view', () => {
       return markup.slice(at, end < 0 ? undefined : end);
     };
     for (const hint of [
-      'Used before logging began; it cannot be split by session',
+      'Already used when the proxy first read the quota; it cannot be split by session',
       'The reading rose more than the requests through the proxy explain',
     ]) {
       const row = rowOf(hint);
@@ -403,8 +404,8 @@ describe('usage view', () => {
     expect(markup).toContain('Pro 200');
     expect(markup).toContain('19%');
     expect(markup).toContain('/ 100%');
-    // All of it came before logging, so that is the one thing to say.
-    expect(markup).toContain('Hatched: the 19% used before logging began');
+    // All of it came before the first reading, so that is the one thing to say.
+    expect(markup).toContain('Hatched: the 19% already used at the first quota reading');
     expect(markup).not.toContain('This Mac has no Codex use recorded');
     expect(markup).toContain('No projects to list yet.');
     expect(markup).not.toContain('Cache hit rate');
@@ -1038,9 +1039,86 @@ describe('usage view', () => {
   });
 });
 
+describe('days, totals and texts that follow what is known', () => {
+  const ready = (u: ReturnType<typeof report>) => ({ status: 'ready' as const, usage: u, latest: u });
+  const covered = [
+    { provider: 'claude', accounts: [account('claude-k.json', 'k•••', { covered_from: NOW_MS - 30 * 24 * H })] },
+  ];
+  const dayOf = (i: number, extra: Record<string, unknown>) => ({
+    day: new Date(NOW_MS - (2 - i) * 24 * H).toISOString().slice(0, 10),
+    metered: true,
+    requests: 0,
+    ...extra,
+  });
+
+  test('a day use read across midnight may lie on says what it holds at least, or that it is not known', () => {
+    const ranged = report({
+      range: '7d',
+      known: true,
+      used: 0.4,
+      undated: 0.2,
+      providers: covered,
+      daily: {
+        claude: [
+          dayOf(0, { projects: { 'cliproxy-kit': 0.15 }, undated: true }),
+          dayOf(1, { metered: false, undated: true }),
+          dayOf(2, { projects: { 'cliproxy-kit': 0.05 } }),
+        ],
+      },
+    });
+    expect(ranged.daily.claude[1].undated).toBe(true);
+    const markup = render({ range: '7d', state: ready(ranged) });
+    expect(markup).toContain('At least 15% of a weekly quota');
+    expect(markup).toContain('Not known: use read across midnight may lie on this day');
+    expect(markup).toContain(': 5.0% of a weekly quota');
+  });
+
+  test('a project the search finds by some sessions shows their figures', () => {
+    const metered = report({
+      projects: projects.map((p) => ({
+        ...p,
+        metered: true,
+        sessions: p.sessions.map((x) => ({ ...x, metered: true })),
+      })),
+    });
+    const markup = render({ search: 'band', state: ready(metered) });
+    const row = markup.slice(markup.indexOf('projectName">cliproxy-kit'));
+    const projectRow = row.slice(0, row.indexOf('role="row"'));
+    expect(projectRow).toContain('1 session');
+    expect(projectRow).toContain('>2.0%<');
+    expect(projectRow).not.toContain('>3.0%<');
+  });
+
+  test('a total says what it adds up to, by range', () => {
+    expect(render()).toContain('Total: each account is worked out on its own week');
+    const ranged = report({ range: '7d', known: true, providers: covered, daily: { claude: [] } });
+    expect(render({ range: '7d', state: ready(ranged) })).not.toContain('Total: each account');
+  });
+
+  test("over 5h a provider's heading counts the accounts with a 5-hour window", () => {
+    const five = report({
+      range: '5h',
+      capacity: 1,
+      providers: [
+        {
+          provider: 'codex',
+          accounts: [
+            account('codex-a.json', 'a•••', { provider: 'codex' }),
+            account('codex-b.json', 'b•••', { provider: 'codex', no_window: true, known: false }),
+          ],
+        },
+      ],
+      windows: { codex: [] },
+    });
+    const markup = render({ range: '5h', scope: 'provider:codex', state: ready(five) });
+    expect(markup).toContain('1 account · 5-hour quota');
+    expect(markup).toContain('own 5-hour window');
+  });
+});
+
 describe('session sources', () => {
-  const run = (id: string, origin = '') => ({ id, origin });
-  const sourceOf = (x: { origin: string }) => sessionSource(x.origin, false);
+  const run = (id: string, origin = '', remote = false) => ({ id, origin, remote });
+  const sourceOf = (x: { origin: string; remote: boolean }) => sessionSources(x.origin, false, x.remote);
 
   test('a project says where its sessions came from, once when they all share it', () => {
     // A tool ran 38 reviews beside one session: 39 sessions, 38 of them automated.
@@ -1048,7 +1126,7 @@ describe('session sources', () => {
     expect(projectSources([run('a'), ...tool], sourceOf)).toMatchObject({
       sessions: 39,
       shared: false,
-      sources: [{ source: { kind: 'auto' }, count: 38 }],
+      sources: [{ source: [{ kind: 'auto' }], count: 38 }],
     });
     // Every program's run reads the same tag.
     expect(projectSources([run('p', 'sdk-py'), run('q', 'sdk-cli')], sourceOf)).toMatchObject({
@@ -1059,16 +1137,30 @@ describe('session sources', () => {
     expect(projectSources([run('a'), run('b')], sourceOf)).toMatchObject({ sessions: 2, sources: [] });
     // Requests that came without a session are named so, never counted as one.
     expect(projectSources([run('')], sourceOf)).toMatchObject({ sessions: 0, none: true });
-    expect(projectSources([run('r', 'remote')], sourceOf)).toMatchObject({
+    expect(projectSources([run('r', '', true)], sourceOf)).toMatchObject({
       shared: true,
-      sources: [{ source: { kind: 'device' } }],
+      sources: [{ source: [{ kind: 'device' }] }],
+    });
+    // Where a session ran and what ran it are two tags: a review run on another device reads both,
+    // and is counted apart from one run here.
+    expect(projectSources([run('a', 'sdk-py', true), run('b', 'sdk-py')], sourceOf)).toMatchObject({
+      shared: false,
+      sources: [
+        { source: [{ kind: 'device' }, { kind: 'auto' }], count: 1 },
+        { source: [{ kind: 'auto' }], count: 1 },
+      ],
     });
     // In a Codex view Claude Code run by a person came through the proxy; a program's run stays
     // automated and an app keeps its name. An unknown origin shows as given.
-    expect(sessionSource('', true)).toEqual({ kind: 'app', key: 'origin_proxy' });
-    expect(sessionSource('sdk-py', true)).toMatchObject({ kind: 'auto' });
-    expect(sessionSource('claude-desktop', true)).toMatchObject({ kind: 'app', key: 'origin_claude_desktop' });
-    expect(sessionSource('something-new', false)).toEqual({ kind: 'app', key: '', raw: 'something-new' });
+    expect(sessionSources('', true)).toEqual([{ kind: 'app', key: 'origin_proxy' }]);
+    expect(sessionSources('', true, true)).toEqual([
+      { kind: 'device', key: 'why_remote' },
+      { kind: 'app', key: 'origin_proxy' },
+    ]);
+    expect(sessionSources('sdk-py', true)).toMatchObject([{ kind: 'auto' }]);
+    expect(sessionSources('claude-desktop', true)).toMatchObject([{ kind: 'app', key: 'origin_claude_desktop' }]);
+    expect(sessionSources('something-new', false)).toEqual([{ kind: 'app', key: '', raw: 'something-new' }]);
+    expect(sessionSources('', false)).toEqual([]);
   });
 
   test("programs' runs gather only beside sessions a person ran, and only two or more", () => {
@@ -1077,6 +1169,8 @@ describe('session sources', () => {
     expect(splitAutomated(tool, sourceOf).automated).toEqual([]);
     expect(splitAutomated([run('a'), tool[0]], sourceOf).automated).toEqual([]);
     expect(splitAutomated([run(''), ...tool], sourceOf).automated).toEqual([]);
+    // One run on another device is a program's run all the same.
+    expect(splitAutomated([run('a'), run('x', 'sdk-py', true), tool[0]], sourceOf).automated).toHaveLength(2);
   });
 });
 
@@ -1121,13 +1215,21 @@ describe('session detail', () => {
         detail,
         title: 'Band redesign',
         project: 'cliproxy-kit',
-        source: { kind: 'auto', key: 'why_claude_code' },
+        sources: [
+          { kind: 'device', key: 'why_remote' },
+          { kind: 'auto', key: 'why_claude_code' },
+        ],
         range: 'week',
         locale: 'en',
       })
     );
-    // The detail says in plain words where the session came from.
-    expect(markup).toContain('Automated</span>Codex started by Claude Code, such as by its Codex plugin.');
+    // The detail says in plain words where the session ran and what ran it.
+    expect(markup).toContain(
+      'Automated</span>It ran on another device: its requests reached the proxy from there. Codex started by Claude Code, such as by its Codex plugin.'
+    );
+    expect(markup).toContain('Other device</span>');
+    // Codex reports no cache writes: in a session both providers served, the count is Claude's.
+    expect(markup).toContain('Claude only: Codex does not report cache writes');
     expect(markup).toContain('120 requests');
     expect(markup).toContain('d••• 60%');
     expect(markup).toContain('k••• (Codex) 40%');
@@ -1167,7 +1269,7 @@ describe('session detail', () => {
           detail: d,
           title: 'Review',
           project: '',
-          source: null,
+          sources: [],
           range: 'week',
           locale: 'en',
         })
@@ -1177,6 +1279,10 @@ describe('session detail', () => {
     expect(one).toContain('Service tier</div>');
     expect(one).toContain('<dt>Asked for</dt><dd>Fast</dd>');
     expect(one).toContain('<dt>Provider reported</dt><dd>Standard</dd>');
+    // A side no request said is not shown: a ChatGPT account's Codex reports no tier.
+    const asked = render({ ...detail, tiers: [{ ...detail.tiers[0], served: '' }] });
+    expect(asked).toContain('<dt>Asked for</dt><dd>Fast</dd>');
+    expect(asked).not.toContain('Provider reported');
     // Requests from before tiers were logged: each side by its share of the requests.
     const mixed = render({
       ...detail,
@@ -1198,10 +1304,40 @@ describe('session detail', () => {
     });
     expect(odd).toContain('<dd>none 75% · Not recorded 25%</dd>');
     expect(odd).toContain('<dd>Auto 75% · Not recorded 25%</dd>');
+    // Requests that named no tier and got the usual one say nothing: no section.
+    const usual = render({
+      ...detail,
+      tiers: [
+        { provider: 'claude', asked: 'auto', served: 'standard', requests: 3 },
+        { provider: 'codex', asked: 'auto', served: '', requests: 1 },
+      ],
+    });
+    expect(usual).not.toContain('Service tier');
+    // One served a tier it did not ask for shows, its request as naming none.
+    const served = render({ ...detail, tiers: [{ provider: 'claude', asked: 'auto', served: 'priority', requests: 2 }] });
+    expect(served).toContain('<dt>Asked for</dt><dd>Not specified</dd>');
+    expect(served).toContain('<dt>Provider reported</dt><dd>Priority</dd>');
   });
 });
 
 describe('refreshing usage', () => {
+  test('a refresh says which accounts it could not read, and why', () => {
+    expect(
+      normalizeQuotaPilotRefresh({
+        read: 2,
+        failed: [{ account: 'codex-k.json', label: 'k•••', failure: 'refused', status: 401 }, { failure: 'late' }],
+        complete: true,
+      })
+    ).toEqual({
+      read: 2,
+      failed: [{ account: 'codex-k.json', label: 'k•••', failure: 'refused', status: 401 }],
+      complete: true,
+    });
+    // An older plugin answers with the count alone.
+    expect(normalizeQuotaPilotRefresh({ read: 1 })).toEqual({ read: 1, failed: [], complete: true });
+    expect(normalizeQuotaPilotRefresh({ read: 0, failed: [], complete: false }).complete).toBe(false);
+  });
+
   test('a refresh has the view read again, even when the plugin could not read', async () => {
     const Version = () => createElement('i', null, useUsageVersion());
     const read = () => renderToStaticMarkup(createElement(Version));

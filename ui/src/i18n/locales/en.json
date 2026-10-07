@@ -14,7 +14,18 @@
     "key_desc": "Tick \"Remember password\" when you log in to the panel and this page uses that login. You can also enter the key here; it lasts for this browser tab.",
     "key_label": "Management key",
     "key_refused": "Wrong key. After five wrong keys in a row, the management API blocks this address for 30 minutes.",
-    "key_submit": "Connect"
+    "key_submit": "Connect",
+    "refresh_incomplete": "The proxy has not listed its accounts yet; try again in a moment.",
+    "refresh_partial_one": "{{count}} account could not be read; its figures are the last ones read: {{list}}",
+    "refresh_partial_other": "{{count}} accounts could not be read; their figures are the last ones read: {{list}}",
+    "refresh_account": "{{account}} ({{why}})",
+    "refresh_why_login": "login unreadable",
+    "refresh_why_refused": "login refused, HTTP {{status}}",
+    "refresh_why_limited": "the provider asked to slow down",
+    "refresh_why_http": "HTTP {{status}}",
+    "refresh_why_network": "network error",
+    "refresh_why_unreadable": "unreadable answer",
+    "refresh_why_late": "timed out"
   },
   "quota_ledger": {
     "view_label": "Quota view",
@@ -30,7 +41,7 @@
     "no_data": "No data",
     "serving_title": "Sessions bound now: {{sessions}}",
     "next": "First for new sessions",
-    "next_title": "A new session gets this account",
+    "next_title": "New sessions get this account first, unless their model's own quota on it is used up",
     "unavailable": "Unavailable",
     "stale": "stale",
     "stale_title": "Stale reading: not refreshed recently",
@@ -71,7 +82,10 @@
     "unavailable_desc": "The plugin did not answer. Check that the proxy is running, then press Refresh.",
     "pool_used": "Weekly used",
     "five_used": "5-hour used",
-    "used_value": "{{value}}% used"
+    "used_value": "{{value}}% used",
+    "pool_unread": "Not read yet: {{list}}",
+    "no_window": "No such quota",
+    "same_as": "Same account as {{account}}"
   },
   "quota_usage": {
     "title": "Usage",
@@ -102,16 +116,16 @@
     "capacity_accounts_one": "weekly quota of {{count}} account added up",
     "capacity_accounts_other": "weekly quota of {{count}} accounts added up",
     "capacity_single": "weekly quota",
-    "before_log": "Used before logging",
-    "before_log_hint": "Used before logging began; it cannot be split by session",
+    "before_log": "Used before the first reading",
+    "before_log_hint": "Already used when the proxy first read the quota; it cannot be split by session",
     "before_when": "before {{when}}",
-    "before_note": "Hatched: the {{value}} used before logging began on {{when}}; it cannot be split by session. It goes away once {{accounts}}.",
+    "before_note": "Hatched: the {{value}} already used at the first quota reading after logging began on {{when}}; it cannot be split by session. It goes away once {{accounts}}.",
     "before_note_account": "{{account}} resets on {{when}}",
     "list_separator": ", ",
     "not_read_note": "No quota reading this week yet: no request ran and no poll has come in.",
     "unused_note": "Nothing used this week yet.",
     "range_unread_note": "Logging began on {{when}}: the percentage counts use from then on, and hatched days before it show tokens only.",
-    "range_unread_before_note": "Logging began on {{when}}: the percentage counts use from then on, plus the {{value}} that week had already used (used before logging). Hatched days before it show tokens only.",
+    "range_unread_before_note": "Logging began on {{when}}: the percentage counts use from then on, plus the {{value}} that week had already used at its first reading. Hatched days before it show tokens only.",
     "range_unknown_note": "No quota reading fell in this range, so what it used is not known; its tokens still count below.",
     "range_unread_accounts_note": "{{accounts}} had no quota reading in this range, so its use is not in the figure.",
     "range_unplaced_note": "{{value}} more may lie on either side of the range start, so it is left out: use before logging in a week that began earlier, or a rise read across the range start that no request explains.",
@@ -236,7 +250,7 @@
     "why_print": "A one-off claude -p run, usually from a script.",
     "why_codex_exec": "A one-off codex exec run, usually from a script or another tool.",
     "why_claude_code": "Codex started by Claude Code, such as by its Codex plugin.",
-    "why_remote": "Claude Code on another computer, named by the quota band there.",
+    "why_remote": "It ran on another device: its requests reached the proxy from there.",
     "range_5h": "5-hour window",
     "provider_accounts_5h_one": "{{count}} account · 5-hour quota",
     "provider_accounts_5h_other": "{{count}} accounts · 5-hour quota",
@@ -265,12 +279,19 @@
     "window_running": "running",
     "windows_from_note": "Some earlier 5-hour windows are not listed: readings before {{when}} did not record when their window reset.",
     "method_5h": "5-hour window: each account's running 5-hour window, split the same way as the week, in units of one account's 5-hour window. A window starts with the first request after the last one ended and resets five hours on; the bars show the windows of the last day.",
-    "method_tier": "Service tier: the tier each request asked for (Codex sends Fast as priority) and the one the provider reported in its answer. Requests from before 0.1.5 have no record."
+    "method_tier": "Service tier: the tier each request asked for (Codex sends Fast as priority) and the one the provider reported in its answer. A Codex account signed in with ChatGPT is answered \"default\" whatever tier served it, so only the tier asked for shows; Fast does run faster. Requests from before 0.1.5 have no record.",
+    "method_total_5h": "Total: each account is worked out on its own 5-hour window and the results are added up, in units of one account's 5-hour quota, so the total runs to the number of accounts with a 5-hour window × 100%.",
+    "kind_cacheWrite_partial": "Claude only: Codex does not report cache writes",
+    "day_unknown": "Not known: use read across midnight may lie on this day",
+    "day_used_partial": "At least {{value}} of a weekly quota",
+    "tier_unnamed": "Not specified"
   },
   "quota_management": {
     "search_clear": "Clear search",
-    "search_label": "Search accounts",
-    "search_placeholder": "Search by filename or email"
+    "search_label_ledger": "Search accounts",
+    "search_placeholder_ledger": "Search by filename or email",
+    "search_placeholder_usage": "Search projects or sessions",
+    "search_label_usage": "Search usage"
   },
   "auth_files": {
     "filter_all": "All",

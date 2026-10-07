@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { EngineInterface, On, RenderElement, RenderInput } from 'claude-code'
-import type { MockClock } from 'claude-code/testing'
+import type { FoundElement, MockClock } from 'claude-code/testing'
 
 import type { CacheInfo, SessionInfo, Snap } from '../types'
 
@@ -66,10 +66,18 @@ const LOCAL_ENV = { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'http://127.0.0.1:83
 const TITLED = '"aiTitle":"Login page"\n"customTitle":"Fix the \\"login\\" page"\n"aiTitle":"Later title"\n'
 /** What the band's read of its transcript finds; a test sets it after `stubSession`. */
 let transcript = TITLED
+/** What the plugin's snapshot file holds; a test sets it after `stubSession`. */
+let snapshot: Snap
 /** Whether the plugin's snapshot file is on this machine; a test sets it after `stubSession`. */
 let snapshotHere = true
 /** Whether that file reads as a snapshot; a test sets it after `stubSession`. */
 let snapshotReadable = true
+
+/** How many of a one-line meter's cells are filled: the first run of its bar. */
+const filledCells = (meter: FoundElement | undefined): number => {
+  const bar = meter?.children[1] as { children: { children: string[] }[] } | undefined
+  return bar?.children[0]?.children[0]?.length ?? -1
+}
 
 /** A user record of a transcript, as the band's read of it lists one. */
 const userRecord = (content: unknown) => JSON.stringify({ type: 'user', message: { role: 'user', content } })
@@ -88,6 +96,7 @@ function stubSession(
   mock.env(on, env)
   const clock = mock.clock(on, { now: NOW })
   transcript = TITLED
+  snapshot = snap
   snapshotHere = true
   snapshotReadable = true
   on('session.id', () => ({ value: SESSION.id }))
@@ -107,7 +116,7 @@ function stubSession(
   }))
   on('fs.read', () => {
     if (!snapshotHere) throw new Error('ENOENT: no snapshot file')
-    return { value: snapshotReadable ? JSON.stringify(snap) : '{"cut short' }
+    return { value: snapshotReadable ? JSON.stringify(snapshot) : '{"cut short' }
   })
   on('command.register', () => ({ value: { command: 'quota' } }))
   on('session.start', () => ({ cwd: SESSION.cwd }))
@@ -213,11 +222,188 @@ test('band keeps what hooks beneath it draw, under it, and folds to one line to 
   await idle.unmount()
 })
 
-test('band shows the stale-data warning when the proxy stopped writing', async ($, on) => {
-  stubSession(on, { ...SNAP, generated_at: iso(-10 * 60_000) })
+test('band leaves a snapshot file its proxy stopped writing and asks whoever serves the port now', async ($, on) => {
+  // The proxy that ran here stops; one in a container takes its port, with its own accounts.
+  const clock = stubSession(on, SNAP)
+  const docker: Snap = { ...SNAP, boot_id: 'docker', sessions: { s1: { ...SNAP.sessions.s1!, auth_id: 'claude-k', auth_label: 'k•••' } } }
+  let asked = ''
+  on('http.fetch', (_$, e) => {
+    if (e.url.endsWith('/band')) asked = e.url
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(docker) } }
+  })
+  on('session.root', () => ({ value: '/Users/me/notes' }))
+  on('session.repo', () => ({ value: null }))
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  expect(asked).toBe('') // a file the proxy keeps fresh is read here
+  await clock.advance(3 * 60_000)
+  expect(asked).toBe('http://127.0.0.1:8317/v0/resource/plugins/quota-pilot/band')
+  const cards = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+  expect(await cards.find({ text: /next up: d••• 42% used/ })).toBeDefined()
+  // The commands directory here is not the serving proxy's: no switching, in either view.
+  expect(await cards.find({ key: 'switch' })).toBeUndefined()
+  await cards.unmount()
+  const line = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(60, true) })
+  expect(await line.find({ key: 'switch' })).toBeUndefined()
+  await line.unmount()
+})
+
+test('band whose proxy stopped shows its last snapshot, and why nothing newer came', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  on('http.fetch', () => ({ deny: 'connect ECONNREFUSED 127.0.0.1:8317' }))
+  on('session.root', () => ({ value: '/Users/me/notes' }))
+  on('session.repo', () => ({ value: null }))
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await clock.advance(3 * 60_000)
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+  expect(await ui.find({ text: /cannot reach the proxy for quota data/ })).toBeDefined()
+  // The accounts it last said still show, not an empty band.
+  expect(await ui.find({ text: /next up: k•••/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('band that gets no quota data from the proxy says why', async ($, on) => {
+  const clock = stubSession(on, SNAP, { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'https://mac.tailnet.ts.net:8317', ANTHROPIC_AUTH_TOKEN: 'sk-device', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })
+  let refused = true
+  on('http.fetch', () => (refused
+    ? { value: { status: 401, ok: false, headers: {}, text: '{"error":"band token required"}' } }
+    : { deny: 'connect ECONNREFUSED 100.64.0.1:8317' }))
+  on('session.root', () => ({ value: '/Users/me/notes' }))
+  on('session.repo', () => ({ value: null }))
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  // A key the plugin does not list in band_tokens.
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+  expect(await ui.find({ text: /the proxy refused this key for quota data; list it in quota-pilot's band_tokens setting/ })).toBeDefined()
+  await ui.unmount()
+  const pane = await $.ui.mount({
+    plugin: 'quota-band', surface: 'terminal', component: 'Pane', requestId: 'quota',
+    props: { title: 'Accounts and quota', isFocused: true, bodyColumns: 56, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  } as never)
+  expect(await pane.find({ text: /band_tokens/ })).toBeDefined()
+  expect(await pane.find({ text: /Is the proxy plugin running/ })).toBeUndefined()
+  await pane.unmount()
+  // Then the proxy cannot be reached at all.
+  refused = false
+  await clock.advance(10_000)
+  const line = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, true) })
+  expect(await line.find({ text: /cannot reach the proxy for quota data: .*connect ECONNREFUSED/ })).toBeDefined()
+  await line.unmount()
+})
+
+test('a switch the proxy restarts under, or never answers, does not stay pending', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  on('fs.write', () => ({ value: undefined }))
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const notice = async () => {
+    const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+    const row = await ui.find({ key: 'notice' })
+    await ui.unmount()
+    return row?.text ?? ''
+  }
+  const switchToK = async () => {
+    const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+    await ui.press({ key: 'switch' })
+    await ui.press({ key: 'to-claude-k' })
+    await ui.unmount()
+  }
+  await switchToK()
+  expect(await notice()).toMatch(/Switch to k•••…/)
+  // The proxy restarts before acknowledging it: the new run never will.
+  snapshot = { ...SNAP, boot_id: 'b2', sequence: 1 }
+  await clock.advance(10_000)
+  expect(await notice()).toMatch(/Switch to k•••: the proxy restarted before confirming it/)
+  // Again, and nothing reads it: a minute on it expires.
+  await switchToK()
+  await clock.advance(50_000)
+  expect(await notice()).toMatch(/Switch to k•••…/)
+  await clock.advance(20_000)
+  expect(await notice()).toMatch(/Switch to k•••: no answer from the proxy; is it running\?/)
+})
+
+test('a routed session keeps back beside switch, for another account or model of the route', async ($, on) => {
+  const codexCred = (id: string, label: string) =>
+    ({ id, auth_index: id, label, order: 1, tier: 1, reason: 'weekly quota resets soonest', sessions: 0, windows: [] })
+  const routed: Snap = {
+    ...SNAP,
+    providers: { ...SNAP.providers, codex: { health: 'healthy', credentials: [codexCred('codex-a', 'a•••'), codexCred('codex-b', 'b•••')] } },
+    sessions: {
+      s1: {
+        ...SNAP.sessions.s1!, provider: 'codex', model: 'gpt-6.1-sol', requested_model: 'claude-opus-5-5', auth_id: 'codex-a', auth_label: 'a•••',
+        route: { provider: 'codex', model: 'gpt-6.1-sol', auto: false, at: iso(-60_000) },
+      },
+    },
+  }
+  stubSession(on, routed)
+  on('http.fetch', () => ({
+    value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ data: [
+      { id: 'gpt-6.1-sol', owned_by: 'openai', created: 3 }, { id: 'gpt-6-astra', owned_by: 'openai', created: 1 },
+      { id: 'claude-opus-5-5', owned_by: 'anthropic', created: 2 },
+    ] }) },
+  }))
+  let written = ''
+  on('fs.write', (_$, e) => {
+    written = e.text
+    return { value: undefined }
+  })
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
   const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
-  expect(await ui.find({ text: /quota data is 10m old/ })).toBeDefined()
+  expect(await ui.find({ text: /^→ gpt-6.1-sol$/ })).toBeDefined()
+  expect(await ui.find({ key: 'unroute' })).toBeDefined()
+  await ui.press({ key: 'switch' })
+  expect(await ui.find({ key: 'to-codex-b' })).toBeDefined()
+  expect(await ui.find({ key: 'prov-claude' })).toBeUndefined() // `back to Claude` is that way
+  await ui.press({ key: 'prov-codex' })
+  expect(await ui.find({ text: /^gpt-6.1-sol \(now\)$/ })).toBeDefined()
+  await ui.press({ key: 'model-gpt-6-astra' })
+  expect(JSON.parse(written)).toMatchObject({ action: 'route', provider: 'codex', model: 'gpt-6-astra', session: 's1' })
+  await ui.unmount()
+})
+
+test('a narrow band keeps a way into the switch menu', async ($, on) => {
+  stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  for (const [cols, rows] of [[60, 20], [44, 1]] as const) {
+    const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(cols, true, rows) })
+    expect(await ui.find({ key: 'view-cards' })).toBeUndefined() // too narrow for cards
+    await ui.press({ key: 'switch' })
+    expect(await ui.find({ key: 'to-claude-k' })).toBeDefined()
+    await ui.press({ key: 'no' })
+    await ui.unmount()
+  }
+})
+
+test('the one-line cache meter shows what is left of the cache, as its card does', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  on('turn.step', async function* () {
+    return {
+      turnId: 't1', index: 0, answer: 'Done.', toolUses: [], stopReason: 'end_turn',
+      usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 400_000, cache_creation_input_tokens: 12_000 },
+    } as never
+  })
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const cells = async () => {
+    const line = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, true) })
+    const meter = await line.find({ key: 'meter-cache' })
+    await line.unmount()
+    return filledCells(meter)
+  }
+  expect(await cells()).toBe(0) // nothing cached before a reply
+  for await (const chunk of $.turn.step({ turnId: 't1', index: 0, model: SESSION.model } as never)) void chunk
+  expect(await cells()).toBe(5) // the whole hour left
+  // Eight minutes on, the proxy rewriting its snapshot as it does at least once a minute.
+  for (let minute = 0; minute < 8; minute++) {
+    snapshot = { ...SNAP, generated_at: new Date(clock.now()).toISOString() }
+    await clock.advance(60_000)
+  }
+  expect(await cells()).toBe(4) // 52 of 60 minutes
+})
+
+test('band names the account a session on a Claude Code alias will get, before the proxy has seen it', async ($, on) => {
+  // Claude Code reports the model as /model shows it: `opus[1m]`.
+  stubSession(on, { ...SNAP, sessions: {} })
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+  expect(await ui.find({ text: /^Max 20x · expected$/ })).toBeDefined()
+  expect(await ui.find({ text: /^no quota data$/ })).toBeUndefined()
   await ui.unmount()
 })
 

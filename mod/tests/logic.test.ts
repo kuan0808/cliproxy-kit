@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  bandErrorText,
   barFill,
   cacheState,
   fmtDuration,
@@ -16,13 +17,20 @@ import {
   pickAlert,
   pooled,
   blockedOthers,
+  cannotTake,
+  missingText,
+  providerOfModel,
+  switchTargets,
+  readBand,
   resetText,
   sessionAccount,
+  settlePending,
+  snapIsLive,
   nextTurnMoves,
   weeklyFor,
   currentModel,
 } from '../hooks/logic'
-import type { CacheInfo, SessionInfo, Snap } from '../types'
+import type { CacheInfo, Pending, SessionInfo, Snap } from '../types'
 
 const NOW = Date.parse('2026-10-04T12:00:00Z')
 const iso = (ms: number) => new Date(NOW + ms).toISOString()
@@ -135,6 +143,12 @@ describe('accounts', () => {
     expect(resetText('')).toBe('no reset pending')
   })
 
+  test('a second credential of one account adds no quota to the pool', async () => {
+    const [d] = SNAP.providers.claude!.credentials
+    const view = { health: 'healthy', credentials: [d!, { ...d!, id: 'claude-d2', same_as: 'claude-d' }] }
+    expect(pooled(view)).toMatchObject({ parts: [Math.round(d!.windows[1]!.remaining * 100)] })
+  })
+
   test('missing readings are unknown, not empty', async () => {
     const view = SNAP.providers.claude!
     const fresh = { ...view, credentials: view.credentials.map(c => c.id === 'claude-k' ? { ...c, windows: [] } : c) }
@@ -220,12 +234,72 @@ describe('accounts', () => {
     expect(pickAlert(later, sessionAccount(later, 's1'), true, NOW + 20 * 60_000)).toBe(null)
   })
 
+  test("the switch list leaves out accounts that cannot serve the session's model, and says why", async () => {
+    const view = SNAP.providers.claude!
+    expect(switchTargets(view, 'claude-d').map(c => c.id)).toEqual(['claude-k'])
+    // k's own Opus quota is used up: it cannot take an Opus session, whatever its weekly reading.
+    expect(switchTargets(view, 'claude-d', ['claude-k'])).toEqual([])
+    const k = {
+      ...view.credentials[1]!,
+      windows: [...view.credentials[1]!.windows, { kind: '7d_opus', label: 'Weekly Opus', remaining: 0, reset_at: iso(30 * H), observed_at: iso(-60_000), stale: false }],
+    }
+    expect(cannotTake(k, 'claude-opus-5-5', NOW)).toBe('k••• Weekly Opus used up, back in 1d 6h')
+    expect(cannotTake(view.credentials[1]!, 'claude-opus-5-5', NOW)).toBe('k••• cannot serve claude-opus-5-5 now')
+    expect(cannotTake({ ...k, disabled: true }, 'claude-opus-5-5', NOW)).toBe('k••• disabled')
+  })
+
+  test('a meter without a reading says whether the account has no such window', async () => {
+    const d = SNAP.providers.claude!.credentials[0]!
+    expect(missingText({ ...d, windows: [d.windows[1]!], absent: ['5h'] }, '5h')).toBe('no such limit')
+    expect(missingText({ ...d, windows: [d.windows[1]!] }, '5h')).toBe('not reported yet')
+    expect(missingText({ ...d, windows: [] }, '5h')).toBe('after the first reply')
+    expect(missingText(undefined, '7d')).toBe('after the first reply')
+  })
+
   test('snapshot parsing rejects other schemas and junk', async () => {
     expect(parseSnap(JSON.stringify(SNAP))?.sequence).toBe(7)
     expect(parseSnap('{"schema_version":2,"sequence":1}')).toBe(null)
     expect(parseSnap('{"schema_version":1,"sequence":1}')).toBe(null)
     expect(parseSnap(JSON.stringify({ ...SNAP, providers: { claude: { health: 'healthy' } } }))).toBe(null)
     expect(parseSnap('{not json')).toBe(null)
+  })
+
+  test('a snapshot file is the running proxy only while it keeps it fresh', async () => {
+    // Rewritten at least once a minute: two minutes old is a proxy that stopped.
+    expect(snapIsLive(SNAP, NOW)).toBe(true)
+    expect(snapIsLive({ ...SNAP, generated_at: iso(-110_000) }, NOW)).toBe(true)
+    expect(snapIsLive({ ...SNAP, generated_at: iso(-3 * 60_000) }, NOW)).toBe(false)
+    expect(snapIsLive({ ...SNAP, generated_at: 'not a time' }, NOW)).toBe(false)
+  })
+
+  test("the proxy's /band answer, or why there is none", async () => {
+    expect(readBand(200, JSON.stringify(SNAP)).snap?.sequence).toBe(7)
+    expect(readBand(401, '{"error":"band token required"}').error).toEqual({ kind: 'status', status: 401 })
+    expect(readBand(200, '<html>').error).toEqual({ kind: 'body' })
+    expect(bandErrorText({ kind: 'status', status: 401 })).toBe("the proxy refused this key for quota data; list it in quota-pilot's band_tokens setting")
+    expect(bandErrorText({ kind: 'status', status: 404 })).toMatch(/no quota-pilot band route \(404\)/)
+    expect(bandErrorText({ kind: 'status', status: 502 })).toBe('the proxy answered HTTP 502 for quota data')
+    expect(bandErrorText({ kind: 'body' })).toMatch(/not in a form this band reads/)
+    expect(bandErrorText({ kind: 'network', message: 'connect ECONNREFUSED' })).toBe('cannot reach the proxy for quota data: connect ECONNREFUSED')
+  })
+
+  test('pending commands settle by acknowledgement, restart or time', async () => {
+    const sent = (id: string, at = NOW): Pending => ({ id, text: `Switch to ${id}`, boot: 'b1', at })
+    const ack = (command_id: string, status: string, reason?: string) => ({ command_id, status, reason, at: iso(0) })
+    // Waiting, and nothing has answered yet.
+    expect(settlePending([sent('a')], SNAP, NOW + 30_000)).toEqual({ left: [sent('a')], notice: null })
+    expect(settlePending([sent('a')], { ...SNAP, acks: [ack('a', 'applied')] }, NOW)).toEqual({ left: [], notice: { text: 'Switch to a: done', isError: false } })
+    expect(settlePending([sent('a'), sent('b')], { ...SNAP, acks: [ack('a', 'rejected', 'unknown account')] }, NOW))
+      .toEqual({ left: [sent('b')], notice: { text: 'Switch to a: unknown account', isError: true } })
+    // A new run of the proxy cannot acknowledge what the last one was sent; its own rejection still wins.
+    const restarted = { ...SNAP, boot_id: 'b2' }
+    expect(settlePending([sent('a')], restarted, NOW)).toEqual({ left: [], notice: { text: 'Switch to a: the proxy restarted before confirming it', isError: true } })
+    expect(settlePending([sent('a')], { ...restarted, acks: [ack('a', 'rejected', 'proxy restarted since the command was written')] }, NOW).notice?.text)
+      .toBe('Switch to a: proxy restarted since the command was written')
+    // Unanswered for a minute, with or without a snapshot.
+    for (const snap of [SNAP, null]) {
+      expect(settlePending([sent('a')], snap, NOW + 61_000)).toEqual({ left: [], notice: { text: 'Switch to a: no answer from the proxy; is it running?', isError: true } })
+    }
   })
 })
 
@@ -236,6 +310,16 @@ describe('models', () => {
     expect(latestModels(MODELS, 'kimi')).toEqual([])
     expect(parseModels(JSON.stringify({ data: [{ id: 'gpt-6-sol', owned_by: 'openai', created: 1 }, { nope: 1 }] }))).toEqual([{ id: 'gpt-6-sol', owned_by: 'openai', created: 1 }])
     expect(parseModels('not json')).toBe(null)
+  })
+
+  test("the provider of a model, Claude Code's aliases included", async () => {
+    for (const model of ['claude-opus-5-5', 'claude-opus-5-5[1m]', 'opus', 'opus[1m]', 'sonnet', 'sonnet[1m]', 'haiku', 'fable', 'opusplan', 'default', 'best']) {
+      expect(providerOfModel(model)).toBe('claude')
+    }
+    expect(providerOfModel('gpt-6.1-sol')).toBe('codex')
+    expect(providerOfModel('codex-auto-review')).toBe('codex')
+    expect(providerOfModel('kimi-k2')).toBe('')
+    expect(providerOfModel('defaults')).toBe('')
   })
 })
 

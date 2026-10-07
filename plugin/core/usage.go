@@ -29,8 +29,10 @@ type LogEntry struct {
 	Reset5     int64    `json:"r5,omitempty"`   // when that 5-hour window resets (unix milliseconds), when the reading says
 	Used7d     *float64 `json:"u7,omitempty"`   // part of the weekly window used
 	Reset7     int64    `json:"r7,omitempty"`   // when that weekly window resets (unix milliseconds), when the reading says
-	TierAsked  string   `json:"ta,omitempty"`   // the service tier the request asked for (Codex's Fast is "priority")
+	TierAsked  string   `json:"ta,omitempty"`   // the speed asked for: a service tier (Codex's Fast is "priority"), "fast" for Claude's fast mode, "auto" for none
 	TierServed string   `json:"ts,omitempty"`   // the service tier the provider reported serving it at
+	Remote     bool     `json:"rm,omitempty"`   // it reached the proxy from another device
+	Plan       string   `json:"pl,omitempty"`   // a line of its own: the account's plan changed to this
 	Count      int      `json:"n,omitempty"`    // requests the line sums: recovered history sums an hour; 0 is one
 	First      int64    `json:"f,omitempty"`    // a line summing several requests: when the first ran (T is the last)
 	History    bool     `json:"-"`              // recovered from Claude Code's transcripts rather than logged
@@ -41,8 +43,8 @@ func (e LogEntry) requests() int {
 	return max(e.Count, 1)
 }
 
-// DayOf names the local calendar day of a unix-millisecond time.
-var DayOf = func(ms int64) string { return time.UnixMilli(ms).Format("2006-01-02") }
+// DayOf names the calendar day, in loc, of a unix-millisecond time.
+var DayOf = func(ms int64, loc *time.Location) string { return time.UnixMilli(ms).In(loc).Format("2006-01-02") }
 
 // readingOf is a log line holding what observed windows read: the used part of the 5-hour and
 // weekly windows, and when each resets.
@@ -104,11 +106,24 @@ func modelTier(model string) float64 {
 
 // Weight is a request's usage relative to other requests: output costs five times input, cache
 // writes twice (Claude Code writes the one-hour cache), cache reads a tenth, scaled by the model's
-// price tier. Only the ratios between requests matter; the provider's own quota readings set the
-// totals.
+// price tier and the speed it ran at. Only the ratios between requests matter; the provider's own
+// quota readings set the totals.
 func (e LogEntry) Weight() float64 {
 	w := e.weights()
 	return w.Input + w.Output + w.CacheRead + w.CacheWrite
+}
+
+// speedFactor is how much faster than standard speed a request draws on its account's plan quota.
+// Codex's Fast uses included limits at 2.5 times the standard rate; Claude's fast mode is paid from
+// usage credits, outside the plan's limits, so it draws none. Both are published by the providers.
+func (e LogEntry) speedFactor() float64 {
+	switch {
+	case e.Provider == "codex" && (e.TierAsked == "priority" || e.TierAsked == "fast"):
+		return 2.5
+	case e.Provider == "claude" && e.TierAsked == "fast":
+		return 0
+	}
+	return 1
 }
 
 // Weights is weight split by kind of token.
@@ -119,8 +134,11 @@ type Weights struct {
 	CacheWrite float64 `json:"cache_write"`
 }
 
+// free tells a request that draws nothing on its account's plan quota (Claude's fast mode).
+func (e LogEntry) free() bool { return e.speedFactor() == 0 }
+
 func (e LogEntry) weights() Weights {
-	tier := modelTier(e.Model)
+	tier := modelTier(e.Model) * e.speedFactor()
 	return Weights{
 		Input: float64(e.Input) * tier, Output: 5 * float64(e.Output) * tier,
 		CacheRead: 0.1 * float64(e.CacheRead) * tier, CacheWrite: 2 * float64(e.CacheWrite) * tier,
@@ -238,6 +256,7 @@ type Attribution struct {
 	Pieces      []Piece            // each settled request's part, for the sessions the span keeps
 	OutsideDays map[string]float64 // Outside read within one local day, by that day
 	ReadDays    map[string]bool    // local days with a quota reading
+	UndatedDays map[string]bool    // local days some of Undated may lie on
 	// Periods are the windows the walk went through, oldest first, each with what it used: a range
 	// walk can go through several.
 	Periods []Period
@@ -272,6 +291,16 @@ type Span struct {
 	WindowStart int64
 	// Keep names sessions whose settled requests are kept one by one in Pieces; nil keeps none.
 	Keep func(session string) bool
+	// Loc is the time zone whose days the attribution's days are; nil is the proxy's.
+	Loc *time.Location
+}
+
+// day names the day, in the span's time zone, of a unix-millisecond time.
+func (s Span) day(ms int64) string {
+	if s.Loc == nil {
+		return DayOf(ms, time.Local)
+	}
+	return DayOf(ms, s.Loc)
 }
 
 // Piece is one settled request's part of the weekly quota, at the time it ran.
@@ -317,12 +346,12 @@ func Attribute(entries []LogEntry, account string, s Span) Attribution {
 			}
 		}
 		if limit >= 0 && rise > limit {
-			out.outside(rise-limit, from, at, s.CountFrom)
+			out.outside(rise-limit, from, at, s)
 			rise = limit
 		} else if learn && at-lastAt <= unwatched {
 			seen.learn(rise, pending)
 		}
-		out.spread(rise, pending, from, at, s.CountFrom, edge, s.Keep)
+		out.spread(rise, pending, from, at, edge, s)
 		out.ran(pending, s.CountFrom)
 		pending = nil
 	}
@@ -333,6 +362,10 @@ func Attribute(entries []LogEntry, account string, s Span) Attribution {
 		if e.Account != account || e.T < s.From || e.T > s.To {
 			continue
 		}
+		if e.Plan != "" {
+			seen = rate{} // another plan: what a request uses is learned anew
+			continue
+		}
 		// A request's reading comes with its response headers, before the request itself counts:
 		// the reading settles the requests before it, then the request joins the pending ones.
 		if used, reset := s.reading(e); used != nil {
@@ -340,7 +373,7 @@ func Attribute(entries []LogEntry, account string, s Span) Attribution {
 			earlier := last != nil && w < window-WindowJitter || s.before(w) || stale[i]
 			if !earlier && e.T >= s.CountFrom {
 				out.Seen = true
-				out.ReadDays[DayOf(e.T)] = true
+				out.ReadDays[s.day(e.T)] = true
 			}
 			switch {
 			case earlier:
@@ -433,65 +466,38 @@ func Attribute(entries []LogEntry, account string, s Span) Attribution {
 	return out
 }
 
-// lateReading is how far readings trail each other: the usage endpoint and the response headers by
-// seconds, a reading in flight across a reset by a request's length.
-const lateReading = 5 * 60 * 1000
-
-// startsOver finds the readings at which a window starts over without a later reset time, and the
-// readings of the window before that came after it did. A reading more than resetDrop below the
-// window's highest starts it over when the readings settle there: the last of the window's readings
-// within lateReading after it, before a later window's, is nearer the fall than the highest, or none
-// comes. A fall that settles back up was a late reading of the same window (50, 40, 50); within
-// lateReading after a start-over a reading nearer the old highest (26, 0, 26, 0) is a late reading of
-// the window before, passed over, so the window starts over at the first fall, while one nearer the
-// fall is use of the new window (26, 0, 10). The walk passes over the same readings the attribution
-// does.
+// startsOver runs the window rules (window.go) over the account's readings in the span: the readings
+// at which a window starts over in place, and the late ones the walk passes over. A plan change
+// comes as a line of its own. A fall read within lateReading of the span's end still waits, as it
+// does in the live state.
 func startsOver(ordered []LogEntry, account string, s Span) (over, stale map[int]bool) {
-	type read struct {
-		i    int
-		t, w int64
-		u    float64
-	}
-	var reads []read
+	over, stale = map[int]bool{}, map[int]bool{}
+	k := track[int]{emit: func(i int, v verdict) {
+		switch v {
+		case restart:
+			over[i] = true
+		case late:
+			stale[i] = true
+		}
+	}}
 	for i, e := range ordered {
 		if e.Account != account || e.T < s.From || e.T > s.To {
 			continue
 		}
-		if used, _ := s.reading(e); used != nil {
-			reads = append(reads, read{i, e.T, windowStart(e, s), *used})
+		if e.Plan != "" {
+			k.planChanged(e.T)
+		}
+		used, _ := s.reading(e)
+		if used == nil {
+			continue
+		}
+		if w := windowStart(e, s); s.before(w) {
+			stale[i] = true // a reading of a window before the one the span walks
+		} else {
+			k.add(sample{e.T, w, *used}, i)
 		}
 	}
-	over, stale = map[int]bool{}, map[int]bool{}
-	started, window, peak := false, int64(0), 0.0
-	// After a start-over: until when the window before may still be read, and above what a reading
-	// is nearer its highest than the fall.
-	until, mid := int64(0), 0.0
-	settles := func(k int) bool {
-		low, half := true, (peak+reads[k].u)/2
-		for _, r := range reads[k+1:] {
-			if r.t-reads[k].t > lateReading || r.w > window+WindowJitter {
-				break
-			}
-			if r.w >= window-WindowJitter {
-				low = r.u <= half
-			}
-		}
-		return low
-	}
-	for k, r := range reads {
-		switch {
-		case started && r.w < window-WindowJitter || s.before(r.w):
-			continue // a reading of an earlier window, read late
-		case !started || r.w > window+WindowJitter:
-			started, window, peak, until = true, r.w, r.u, 0
-		case r.t <= until && r.u > mid:
-			stale[r.i] = true
-		case r.u < peak-resetDrop && settles(k):
-			over[r.i], until, mid, peak = true, r.t+lateReading, (peak+r.u)/2, r.u
-		default:
-			peak = max(peak, r.u)
-		}
-	}
+	k.settle(s.To)
 	return over, stale
 }
 
@@ -586,7 +592,7 @@ func (a *Attribution) period() *Period {
 }
 
 func newAttribution() Attribution {
-	return Attribution{Sessions: map[string]*Share{}, OutsideDays: map[string]float64{}, ReadDays: map[string]bool{}}
+	return Attribution{Sessions: map[string]*Share{}, OutsideDays: map[string]float64{}, ReadDays: map[string]bool{}, UndatedDays: map[string]bool{}}
 }
 
 // unwatched is how long readings can stop before a rise may include use the proxy never saw.
@@ -651,12 +657,12 @@ func (a *Attribution) share(session string) *Share {
 }
 
 // outside counts part of a rise, accrued since from and read at at, as used elsewhere. A rise read
-// across the counting start, with no request to tell when it happened, is not placed; one read
-// across midnight counts on no day.
-func (a *Attribution) outside(x float64, from, at, countFrom int64) {
+// across the span's counting start, with no request to tell when it happened, is not placed; one
+// read across midnight counts on no day.
+func (a *Attribution) outside(x float64, from, at int64, s Span) {
 	switch {
-	case at < countFrom:
-	case from < countFrom:
+	case at < s.CountFrom:
+	case from < s.CountFrom:
 		a.Unplaced += x
 	default:
 		a.Outside += x
@@ -664,38 +670,55 @@ func (a *Attribution) outside(x float64, from, at, countFrom int64) {
 		if p := a.period(); p != nil {
 			p.Outside += x
 		}
-		if day := DayOf(at); day == DayOf(from) {
-			a.OutsideDays[day] += x
+		if d := s.day(at); d == s.day(from) {
+			a.OutsideDays[d] += x
 		} else {
 			a.Undated += x
+			// Every day it may lie on: a step of half a day finds each, a short one too.
+			for t := from; t < at; t += 12 * 3600 * 1000 {
+				a.UndatedDays[s.day(t)] = true
+			}
+			a.UndatedDays[d] = true
 		}
 	}
 }
 
 // spread shares a rise, accrued since from and read at at, among the requests that caused it, by
-// weight (equally when none weighs), counting the parts of requests from countFrom on; a request
-// from edge on that ran before countFrom may lie on either side of it. A request a reading settles
-// is metered, whatever its part.
-func (a *Attribution) spread(rise float64, requests []LogEntry, from, at, countFrom, edge int64, keep func(string) bool) {
-	if len(requests) == 0 {
-		a.outside(rise, from, at, countFrom)
-		return
-	}
-	total := weightOf(requests)
+// weight (equally when none weighs), counting the parts of requests from the span's counting start
+// on; a request from edge on that ran before it may lie on either side of it. A request a reading
+// settles is metered, whatever its part.
+//
+// A request that draws nothing on the plan (Claude's fast mode) takes no part, though it is settled:
+// a rise only such requests ran beside is use elsewhere.
+func (a *Attribution) spread(rise float64, requests []LogEntry, from, at, edge int64, s Span) {
+	total, paid := 0.0, 0
 	for _, e := range requests {
-		part := 1 / float64(len(requests))
-		if total > 0 {
+		if !e.free() {
+			total += e.Weight()
+			paid++
+		}
+	}
+	if paid == 0 {
+		a.outside(rise, from, at, s)
+	}
+	for _, e := range requests {
+		part := 0.0
+		switch {
+		case e.free():
+		case total > 0:
 			part = e.Weight() / total
+		default:
+			part = 1 / float64(paid)
 		}
 		switch {
-		case e.T >= countFrom:
-			if keep != nil && keep(e.Session) {
+		case e.T >= s.CountFrom:
+			if s.Keep != nil && s.Keep(e.Session) {
 				a.Pieces = append(a.Pieces, Piece{T: e.T, Used: rise * part})
 			}
 			sh := a.share(e.Session)
 			sh.Metered = true
 			sh.Used += rise * part
-			sh.Days[DayOf(e.T)] += rise * part
+			sh.Days[s.day(e.T)] += rise * part
 			a.Counted += rise * part
 			if p := a.period(); p != nil {
 				p.Parts[e.Session] += rise * part
@@ -726,6 +749,9 @@ func Combine(parts []Attribution) Attribution {
 		}
 		for day := range a.ReadDays {
 			out.ReadDays[day] = true
+		}
+		for day := range a.UndatedDays {
+			out.UndatedDays[day] = true
 		}
 	}
 	return out

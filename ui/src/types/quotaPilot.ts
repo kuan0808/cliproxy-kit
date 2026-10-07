@@ -34,6 +34,10 @@ export interface QuotaPilotCredential {
   sessions: number;
   unavailable: boolean;
   windows: QuotaPilotWindow[];
+  /** Window kinds the provider said the account does not have, as a Codex account without a 5-hour one. */
+  absent: string[];
+  /** The credential held that logs in to the same provider account: one quota, counted under that one; '' for none. */
+  sameAs: string;
 }
 
 export interface QuotaPilotProvider {
@@ -88,6 +92,8 @@ export interface QuotaPilotUsageSession {
   accounts: string[];
   /** What started a Codex session ("Claude Code", "codex-tui"…), or how a Claude Code session was run ("sdk-py"…); '' for the interactive CLI. */
   origin: string;
+  /** It ran on another device. */
+  remote: boolean;
   /** Mode `all`: its part of each provider's weekly quota, in that provider's unit. */
   usedBy: Record<string, number>;
   /** False when none of its requests fell where quota readings exist: only its tokens are known. */
@@ -152,6 +158,8 @@ export interface QuotaPilotUsageDay {
   outside: number;
   /** A quota reading fell on the day; without one only tokens are known. */
   metered: boolean;
+  /** Use read across midnight may lie on the day, so its figure may leave some out. */
+  undated: boolean;
   /** What the scope's requests ran that day, whether or not readings tell their quota. */
   requests: number;
   tokens: QuotaPilotTokens;
@@ -272,8 +280,10 @@ export interface QuotaPilotUsage {
   windowsFromMs: number | null;
 }
 
-/** One session within a scope and range. */
-/** Requests to a provider by the service tier they asked for and the one reported; '' for none. */
+/**
+ * Requests to a provider by the service tier they asked for ("auto" when they named none) and the
+ * one reported; '' for none recorded.
+ */
 export interface QuotaPilotUsageTier {
   provider: string;
   asked: string;
@@ -281,6 +291,7 @@ export interface QuotaPilotUsageTier {
   requests: number;
 }
 
+/** One session within a scope and range. */
 export interface QuotaPilotUsageSessionDetail {
   id: string;
   title: string;
@@ -299,6 +310,27 @@ export interface QuotaPilotUsageSessionDetail {
   /** Includes lines recovered from transcripts, which sum a whole day. */
   history: boolean;
   origin: string;
+  /** It ran on another device. */
+  remote: boolean;
   /** Most requests first. */
   tiers: QuotaPilotUsageTier[];
+}
+
+/**
+ * Why an account's quota could not be read: its login ("login"), refused ("refused", 401 or 403),
+ * asked to slow down ("limited", 429), another status ("http"), the network, an answer that was no
+ * reading ("unreadable"), or not reached in time ("late").
+ */
+export interface QuotaPilotRefreshFailure {
+  account: string;
+  label: string;
+  failure: string;
+  status: number;
+}
+
+/** What a refresh read: how many accounts, which could not be read, and whether the proxy listed its accounts. */
+export interface QuotaPilotRefreshResult {
+  read: number;
+  failed: QuotaPilotRefreshFailure[];
+  complete: boolean;
 }

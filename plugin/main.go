@@ -64,6 +64,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -259,7 +260,7 @@ func registration() map[string]any {
 			// ampersands or angle brackets, which the panel would show escaped.
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "cross_provider", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"off", "auto"},
-					Description: "Moving sessions to another provider. off: only by hand, with switch on the band. auto: when every account of a provider is used up, its sessions go to the model fallback_map names. / 自動切換供應商。off：只在 band 上手動切換。auto：某個供應商的帳號全部用完時，自動把 session 改送到 fallback_map 指定的模型。"},
+					Description: "Moving sessions to another provider. off: only by hand, with switch on the band. auto: when every account of a provider is used up, its Claude Code sessions go to the model fallback_map names. / 自動切換供應商。off：只在 band 上手動切換。auto：某個供應商的帳號全部用完時，自動把 Claude Code 的 session 改送到 fallback_map 指定的模型。"},
 				{Name: "fallback_map", Type: pluginapi.ConfigFieldTypeObject,
 					Description: "The model each provider moves to, as provider: provider:model, for example claude: codex:gpt-6.1-sol. Used by switch and by auto. / 各供應商改用的模型，寫成 供應商: 供應商:模型，例如 claude: codex:gpt-6.1-sol。手動和自動切換都用這個設定。"},
 				{Name: "min_five_hour_left_percent", Type: pluginapi.ConfigFieldTypeNumber,
@@ -326,7 +327,7 @@ func usage(raw []byte) ([]byte, error) {
 		TraceID: r.TraceID, AuthID: r.AuthID, AuthIndex: r.AuthIndex, Failed: r.Failed, StatusCode: r.Failure.StatusCode,
 		RequestedAt: r.RequestedAt, Input: r.Detail.InputTokens, Output: r.Detail.OutputTokens,
 		CacheRead: r.Detail.CacheReadTokens, CacheCreation: r.Detail.CacheCreationTokens,
-		ResponseHeader: r.ResponseHeaders, TierAsked: askedTier(r.ServiceTier), TierServed: tierOf(r.ResponseServiceTier),
+		ResponseHeader: r.ResponseHeaders, TierAsked: tierOf(r.ServiceTier), TierServed: servedTier(r),
 	})
 	return okEnvelope(map[string]any{})
 }
@@ -336,13 +337,71 @@ func tierOf(tier string) string {
 	return strings.ToLower(strings.TrimSpace(tier))
 }
 
-// askedTier is the tier a request asked for: "auto", which the host names when a client asks for
-// none, is none.
-func askedTier(tier string) string {
-	if tier = tierOf(tier); tier == "auto" {
+// servedTier is the tier the provider reported serving a request at, "" when it does not say. The
+// ChatGPT backend that answers a Codex account signed in with ChatGPT, at its default address, names
+// "default" whatever tier served it (Fast runs half again as fast and still reads "default"), so it
+// says none.
+func servedTier(r pluginapi.UsageRecord) string {
+	chatgpt := r.BaseURL == "" || strings.Contains(r.BaseURL, "chatgpt.com")
+	if strings.EqualFold(r.Provider, "codex") && r.AuthType == "oauth" && chatgpt {
 		return ""
 	}
-	return tier
+	return tierOf(r.ResponseServiceTier)
+}
+
+// askedTier is the speed a request asks for: Claude's fast mode as "fast", else its service tier
+// (Codex sends Fast as "priority"), "auto" when it names none, as the host does.
+func askedTier(format string, body []byte) string {
+	if format == "claude" && tierOf(gjson.GetBytes(body, "speed").String()) == "fast" {
+		return "fast"
+	}
+	if tier := tierOf(gjson.GetBytes(body, "service_tier").String()); tier != "" {
+		return tier
+	}
+	return "auto"
+}
+
+// fromAnotherDevice tells whether a request reached the proxy from another device. A reverse proxy
+// in front of it (Tailscale Serve) appends the client's address to X-Forwarded-For, so the last
+// entry is the one a client cannot forge; a client on this machine has one of its own addresses.
+// A container on this machine reaching the port directly is not told apart.
+func fromAnotherDevice(headers http.Header) bool {
+	forwarded := headers.Values("X-Forwarded-For")
+	if len(forwarded) == 0 {
+		return false
+	}
+	list := strings.Split(forwarded[len(forwarded)-1], ",")
+	ip := net.ParseIP(strings.TrimSpace(list[len(list)-1]))
+	return ip != nil && !ip.IsLoopback() && !ownAddress(ip)
+}
+
+// ownAddresses are this machine's addresses, read again at most once a minute: a VPN can change
+// them.
+var ownAddresses struct {
+	sync.Mutex
+	at   time.Time
+	list []net.IP
+}
+
+func ownAddress(ip net.IP) bool {
+	ownAddresses.Lock()
+	defer ownAddresses.Unlock()
+	if time.Since(ownAddresses.at) > time.Minute {
+		ownAddresses.at, ownAddresses.list = time.Now(), nil
+		if addrs, err := net.InterfaceAddrs(); err == nil {
+			for _, a := range addrs {
+				if n, ok := a.(*net.IPNet); ok {
+					ownAddresses.list = append(ownAddresses.list, n.IP)
+				}
+			}
+		}
+	}
+	for _, own := range ownAddresses.list {
+		if own.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func route(raw []byte) ([]byte, error) {
@@ -350,13 +409,24 @@ func route(raw []byte) ([]byte, error) {
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
 		return nil, errUnmarshal
 	}
-	d := state.Route(core.RouteInput{
+	attachments, encoded := attachmentsOf(req.Body)
+	in := core.RouteInput{
 		Session:        strings.TrimSpace(req.Headers.Get("X-Claude-Code-Session-Id")),
 		RequestedModel: req.RequestedModel,
-		BodyBytes:      len(req.Body),
+		BodyBytes:      len(req.Body) - encoded,
+		Attachments:    attachments,
+		MaxOutput:      int(gjson.GetBytes(req.Body, "max_tokens").Int()),
 		Available:      req.AvailableProviders,
 		Turn:           conversationTurn(req.Body),
-	})
+	}
+	d := state.Route(in)
+	if d.Recheck {
+		// A takeover acts on every account being used up: on the host's list as it is now.
+		if infos, ok := readInventory(); ok && len(infos) > 0 {
+			state.UpdateInventory(infos)
+			d = state.Route(in)
+		}
+	}
 	if !d.Handled {
 		return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
 	}
@@ -364,6 +434,29 @@ func route(raw []byte) ([]byte, error) {
 		Handled: true, TargetKind: pluginapi.ModelRouteTargetProvider,
 		Target: d.Provider, TargetModel: d.Model, Reason: d.Reason,
 	})
+}
+
+// attachmentsOf counts the images and documents a Claude request carries, in its messages and in
+// the tool results within them, and the bytes their encoded data takes, which is not text.
+func attachmentsOf(body []byte) (count, encoded int) {
+	var walk func(parts gjson.Result)
+	walk = func(parts gjson.Result) {
+		parts.ForEach(func(_, part gjson.Result) bool {
+			if data := part.Get("source.data"); part.Get("source.type").String() == "base64" && data.Exists() {
+				count++
+				encoded += len(data.Raw)
+			}
+			if inner := part.Get("content"); inner.IsArray() {
+				walk(inner)
+			}
+			return true
+		})
+	}
+	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
+		walk(m.Get("content"))
+		return true
+	})
+	return count, encoded
 }
 
 // conversationTurn reports whether a request is a turn of the main conversation: Claude Code
@@ -402,10 +495,13 @@ func intercept(raw []byte) ([]byte, error) {
 	d := state.Intercept(core.InterceptInput{
 		Session:        sessionOf(req.Headers, req.Metadata),
 		TraceID:        req.TraceID,
+		Format:         req.SourceFormat,
 		Model:          req.Model,
 		RequestedModel: req.RequestedModel,
 		Thread:         gjson.GetBytes(req.Body, "thread.type").String(),
 		Tools:          len(gjson.GetBytes(req.Body, "tools").Array()),
+		Tier:           askedTier(req.SourceFormat, req.Body),
+		Remote:         fromAnotherDevice(req.Headers),
 	})
 	if !d.Terminate {
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
@@ -560,14 +656,19 @@ func pollLoop(ctx context.Context) {
 	}
 }
 
-// One poll at a time, the loop's or one asked for, and when each account was last read, when its
-// Claude plan was, and since when the host has listed no account.
+// One poll at a time, the loop's or one asked for (a refresh waits for a running one only as long as
+// its deadline lets it), when each account's quota and Claude plan were last read, and since when
+// the host has listed no account.
 var (
-	pollMu       sync.Mutex
+	pollTurn     = make(chan struct{}, 1)
 	polledAt     = map[string]time.Time{}
 	planReadAt   = map[string]time.Time{}
 	emptiedSince time.Time
 )
+
+// pollWorkers is how many accounts are read at once: a refresh of many accounts fits its deadline,
+// and no provider is asked for many at a time.
+const pollWorkers = 4
 
 // planTTL is how long a Claude plan read is trusted when nothing says it changed.
 const planTTL = time.Hour
@@ -588,44 +689,57 @@ func due(at, now time.Time, fresh time.Duration) bool {
 	return at.IsZero() || now.Sub(at) >= fresh
 }
 
+// pollOutcome is what reading an account's quota came to: Failure is "" when it was read, else
+// "login" (its login could not be read), "refused" (401 or 403), "limited" (429), "http" (another
+// status), "network", "unreadable" (an answer that was no usage reading), or "late" (not reached
+// before the deadline).
+type pollOutcome struct {
+	ID      string `json:"account"`
+	Label   string `json:"label,omitempty"`
+	Failure string `json:"failure,omitempty"`
+	Status  int    `json:"status,omitempty"`
+}
+
 // refreshResponse reads every account's quota now and writes what it read to the log before it
-// answers, so the report asked for next has it.
+// answers, so the report asked for next has it. It says how many were read, and which could not be,
+// and why.
 func refreshResponse() ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	_, read := pollOnce(ctx, minRepoll, true)
+	complete, outcomes := pollOnce(ctx, minRepoll, true)
 	appendLog(state.TakeLog())
-	body, errMarshal := json.Marshal(map[string]int{"read": read})
+	read, failed := 0, []pollOutcome{}
+	for _, o := range outcomes {
+		if o.Failure == "" {
+			read++
+			continue
+		}
+		if info, ok := state.Account(o.ID); ok {
+			o.Label = info.Label
+		}
+		failed = append(failed, o)
+	}
+	body, errMarshal := json.Marshal(map[string]any{"read": read, "failed": failed, "complete": complete})
 	if errMarshal != nil {
 		return nil, errMarshal
 	}
 	return httpResponse(http.StatusOK, body)
 }
 
-// pollOnce reads each account's quota, skipping those read within `fresh`, and reports whether
-// the inventory was complete (an incomplete one is retried soon) and how many it read. A refresh
-// asks for each Claude plan too, read within `fresh` of the last plan read only once.
-func pollOnce(ctx context.Context, fresh time.Duration, asked bool) (complete bool, read int) {
-	pollMu.Lock()
-	defer pollMu.Unlock()
-	defer func() {
-		if r := recover(); r != nil {
-			state.NoteError(fmt.Sprintf("poll panic: %v", r))
-			complete = false
-		}
-	}()
-	now := time.Now()
+// readInventory reads the host's credential list; false when it could not, or listed one
+// incompletely.
+func readInventory() ([]core.CredInfo, bool) {
 	raw, errList := callHost(pluginabi.MethodHostAuthList, map[string]any{})
 	if errList != nil {
 		state.NoteError("auth list: " + errList.Error())
-		return false, 0
+		return nil, false
 	}
 	var list struct {
 		Files []pluginapi.HostAuthFileEntry `json:"files"`
 	}
 	if errDecode := json.Unmarshal(raw, &list); errDecode != nil {
 		state.NoteError("auth list decode: " + errDecode.Error())
-		return false, 0
+		return nil, false
 	}
 	infos := make([]core.CredInfo, 0, len(list.Files))
 	for _, f := range list.Files {
@@ -634,7 +748,7 @@ func pollOnce(ctx context.Context, fresh time.Duration, asked bool) (complete bo
 			provider = strings.ToLower(f.Type)
 		}
 		if f.ID == "" || f.AuthIndex == "" {
-			return false, 0
+			return nil, false
 		}
 		email := f.Email
 		if email == "" && strings.Contains(f.Label, "@") {
@@ -642,6 +756,30 @@ func pollOnce(ctx context.Context, fresh time.Duration, asked bool) (complete bo
 		}
 		infos = append(infos, core.CredInfo{ID: f.ID, Index: f.AuthIndex, Provider: provider, Email: email,
 			Disabled: f.Disabled, Unavailable: f.Unavailable, NextRetryAfter: f.NextRetryAfter})
+	}
+	return infos, true
+}
+
+// pollOnce reads each account's quota, skipping those read within `fresh`, and reports whether the
+// inventory was complete (an incomplete one is retried soon) and what reading each account came to.
+// A refresh asks for each Claude plan too, read within `fresh` of the last plan read only once.
+func pollOnce(ctx context.Context, fresh time.Duration, asked bool) (complete bool, outcomes []pollOutcome) {
+	select {
+	case pollTurn <- struct{}{}:
+		defer func() { <-pollTurn }()
+	case <-ctx.Done():
+		return false, nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			state.NoteError(fmt.Sprintf("poll panic: %v", r))
+			complete = false
+		}
+	}()
+	now := time.Now()
+	infos, ok := readInventory()
+	if !ok {
+		return false, nil
 	}
 	if len(infos) == 0 {
 		// The host lists none before it has loaded its credentials. A list empty for a minute is
@@ -651,49 +789,136 @@ func pollOnce(ctx context.Context, fresh time.Duration, asked bool) (complete bo
 		} else if now.Sub(emptiedSince) >= time.Minute {
 			state.UpdateInventory(nil)
 		}
-		return false, 0
+		return false, nil
 	}
 	emptiedSince = time.Time{}
 	state.UpdateInventory(infos)
+	// What was read of an account the host no longer holds goes with it: one added again under the
+	// same id is read afresh.
+	held := map[string]bool{}
 	for _, info := range infos {
-		if ctx.Err() != nil {
-			return true, read
+		held[info.ID] = true
+	}
+	for id := range polledAt {
+		if !held[id] {
+			delete(polledAt, id)
+			delete(planReadAt, id)
 		}
+	}
+	var jobs []pollJob
+	for _, info := range infos {
 		if info.Disabled || !core.Supported(info.Provider) {
 			continue
 		}
-		usage := due(polledAt[info.ID], now, fresh)
-		plan := asked && info.Provider != "codex" && due(planReadAt[info.ID], now, fresh)
-		if !usage && !plan {
+		j := pollJob{info: info, usage: due(polledAt[info.ID], now, fresh), planReadAt: planReadAt[info.ID],
+			plan: asked && due(planReadAt[info.ID], now, fresh)}
+		if j.usage || info.Provider != "codex" && planDue(j.planReadAt, state.StartedOver(info.ID), now, j.plan) {
+			jobs = append(jobs, j)
+		}
+	}
+	// The accounts are read a few at a time; the maps above are written once all are back.
+	results := make(chan pollResult, len(jobs))
+	turns := make(chan struct{}, pollWorkers)
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case turns <- struct{}{}:
+				defer func() { <-turns }()
+			case <-ctx.Done():
+				results <- pollResult{usage: j.usage, outcome: pollOutcome{ID: j.info.ID, Failure: "late"}}
+				return
+			}
+			results <- pollCredential(ctx, j)
+		}()
+	}
+	wg.Wait()
+	close(results)
+	for r := range results {
+		if !r.planAt.IsZero() {
+			planReadAt[r.outcome.ID] = r.planAt
+		}
+		if !r.usage {
 			continue
 		}
-		pollCredential(ctx, info, usage, plan)
-		if usage {
-			polledAt[info.ID], read = time.Now(), read+1
+		// A failed read is tried again at the next poll, but a provider that asks to slow down is not.
+		if f := r.outcome.Failure; f == "" || f == "limited" {
+			polledAt[r.outcome.ID] = r.at
 		}
+		outcomes = append(outcomes, r.outcome)
 	}
-	return true, read
+	return true, outcomes
 }
 
-// pollCredential reads an account's quota when usage is set, and its Claude plan when that is
-// due or asked for.
-func pollCredential(ctx context.Context, info core.CredInfo, usage, asked bool) {
+// pollJob is one account to read: its quota when usage is set, its Claude plan when that is due or
+// asked for (plan), given when it was last read.
+type pollJob struct {
+	info        core.CredInfo
+	usage, plan bool
+	planReadAt  time.Time
+}
+
+// pollResult is what reading one account came to: its quota's outcome when it was read (usage),
+// when that was, and when its plan was read, zero when it was not.
+type pollResult struct {
+	outcome pollOutcome
+	usage   bool
+	at      time.Time
+	planAt  time.Time
+}
+
+// accountOf is the provider account a credential logs in to, "" when its login does not say: the
+// same account logged in again under a new credential is one account in the report. A Claude
+// account's quota is its seat in an organization (a personal one, a Team), so the organization is
+// part of it, as the host's own file names keep organizations apart; a Codex account_id is already
+// one workspace's.
+func accountOf(provider string, file map[string]any) string {
+	text := func(key string) string { v, _ := file[key].(string); return strings.TrimSpace(v) }
+	switch provider {
+	case "claude":
+		if account := text("account_uuid"); account != "" {
+			return "claude:" + account + "/" + text("organization_uuid")
+		}
+	case "codex":
+		if account := text("account_id"); account != "" {
+			return "codex:" + account
+		}
+	}
+	return ""
+}
+
+func pollCredential(ctx context.Context, j pollJob) (r pollResult) {
+	info := j.info
+	r.usage, r.outcome.ID = j.usage, info.ID
+	defer func() {
+		// A panic here would take the proxy down with it: it is this account's failure instead.
+		if p := recover(); p != nil {
+			state.NoteError(fmt.Sprintf("poll %s panic: %v", info.Index, p))
+			r.outcome.Failure = "unreadable"
+		}
+	}()
+	fail := func(failure string, status int, note string) {
+		r.outcome.Failure, r.outcome.Status = failure, status
+		state.NoteError(fmt.Sprintf("usage %s %s: %s", info.Provider, info.Index, note))
+	}
 	raw, errGet := callHost(pluginabi.MethodHostAuthGet, pluginapi.HostAuthGetRequest{AuthIndex: info.Index})
 	if errGet != nil {
-		state.NoteError("auth get " + info.Index + ": " + errGet.Error())
-		return
+		fail("login", 0, "auth get: "+errGet.Error())
+		return r
 	}
 	var got pluginapi.HostAuthGetResponse
-	if errDecode := json.Unmarshal(raw, &got); errDecode != nil {
-		return
-	}
 	var file map[string]any
-	if json.Unmarshal(got.JSON, &file) != nil {
-		return
+	if json.Unmarshal(raw, &got) != nil || json.Unmarshal(got.JSON, &file) != nil {
+		fail("login", 0, "unreadable login")
+		return r
 	}
+	state.SetIdentity(info.ID, accountOf(info.Provider, file))
 	token, _ := file["access_token"].(string)
 	if token == "" {
-		return
+		fail("login", 0, "no access token")
+		return r
 	}
 	headers := map[string][]string{"Authorization": {"Bearer " + token}}
 	url := "https://api.anthropic.com/api/oauth/usage"
@@ -707,33 +932,39 @@ func pollCredential(ctx context.Context, info core.CredInfo, usage, asked bool) 
 		headers["Content-Type"] = []string{"application/json"}
 		headers["User-Agent"] = []string{"claude-cli/2.1.288 (external, cli)"}
 	}
-	if usage {
+	if j.usage {
 		body, status, errDo := httpGet(ctx, url, headers)
-		if errDo != nil {
-			state.NoteError("usage " + info.Provider + " " + info.Index + ": " + errDo.Error())
-			return
-		}
-		if status != http.StatusOK {
-			state.NoteError(fmt.Sprintf("usage %s %s: HTTP %d", info.Provider, info.Index, status))
-			return
-		}
-		state.MergeWindows(info.ID, info.Provider, core.WindowsFromUsageBody(info.Provider, body, time.Now()))
-		if info.Provider == "codex" {
-			state.SetPlan(info.ID, info.Provider, core.CodexPlan(body))
+		r.at = time.Now()
+		switch {
+		case errDo != nil:
+			fail("network", 0, errDo.Error())
+		case status == http.StatusUnauthorized || status == http.StatusForbidden:
+			fail("refused", status, fmt.Sprintf("HTTP %d", status))
+		case status == http.StatusTooManyRequests:
+			fail("limited", status, "HTTP 429")
+		case status != http.StatusOK:
+			fail("http", status, fmt.Sprintf("HTTP %d", status))
+		default:
+			if windows, full := core.WindowsFromUsageBody(info.Provider, body, r.at); full {
+				state.MergePoll(info.ID, info.Provider, windows)
+				if info.Provider == "codex" {
+					state.SetPlan(info.ID, info.Provider, core.CodexPlan(body))
+				}
+			} else {
+				fail("unreadable", 0, "unreadable answer")
+			}
 		}
 	}
-	if info.Provider == "codex" {
-		return
-	}
-	// The Claude plan comes from the profile, read when planDue says; the plan kept from before
-	// a start shows until then.
-	if now := time.Now(); planDue(planReadAt[info.ID], state.StartedOver(info.ID), now, asked) {
+	// The Claude plan comes from the profile, read when planDue says, whether or not the usage read
+	// worked; the plan kept from before a start shows until then.
+	if now := time.Now(); info.Provider != "codex" && planDue(j.planReadAt, state.StartedOver(info.ID), now, j.plan) {
 		profile, code, errProfile := httpGet(ctx, "https://api.anthropic.com/api/oauth/profile", headers)
 		if errProfile == nil && code == http.StatusOK {
 			state.SetPlan(info.ID, info.Provider, core.ClaudePlan(profile))
-			planReadAt[info.ID] = now
+			r.planAt = now
 		}
 	}
+	return r
 }
 
 // httpGet runs a host HTTP call that is cancelled after 20 seconds or when ctx ends.

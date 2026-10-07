@@ -27,6 +27,10 @@ export type SnapCred = {
   /** When the window that limits it resets; absent when nothing limits it or the time is unknown. */
   back_at?: string
   windows: SnapWindow[]
+  /** Window kinds the provider said the account does not have, as a Codex account's 5-hour one. */
+  absent?: string[]
+  /** The credential of the same provider account the proxy also holds: one quota, counted under that one. */
+  same_as?: string
 }
 
 export type SnapProvider = { health: string; credentials: SnapCred[] }
@@ -58,6 +62,8 @@ export type SnapSession = {
   switch_imminent: boolean
   switch_reason?: string
   next_auth_id?: string
+  /** Accounts of its provider that cannot serve its next model, as one whose Opus quota is used up. */
+  blocked?: string[]
   totals: SnapTokens
   last: SnapTokens
   last_seen: string
@@ -130,7 +136,17 @@ export type CacheInfo = {
   lastAnswer: string
 }
 
-export type Pending = { id: string; text: string }
+/** A command sent and not yet acknowledged: the proxy run (boot id) it was written for, and when. */
+export type Pending = { id: string; text: string; boot: string; at: number }
+
+/**
+ * Why the band read no snapshot from the proxy's `/band`: an error status (401 when the key is
+ * not in `band_tokens`), an answer that is not a snapshot, or no answer at all.
+ */
+export type BandError =
+  | { kind: 'status'; status: number }
+  | { kind: 'body' }
+  | { kind: 'network'; message: string }
 
 export type ModelInfo = { id: string; owned_by: string; created: number }
 
@@ -159,6 +175,7 @@ declare module 'claude-code' {
   interface PluginState {
     'quota-band': {
       snap: Snap | null
+      bandError: BandError | null
       now: number
       session: SessionInfo
       about: SessionAbout

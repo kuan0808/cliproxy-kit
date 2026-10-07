@@ -48,7 +48,7 @@ func served(s *State, c *clock, canonical, authID string, thread bool) {
 	trace := ""
 	if thread {
 		trace = canonical + "@" + c.t.String()
-		s.Intercept(InterceptInput{Session: RawSession(rootOnly(canonical)), TraceID: trace, Model: "claude-opus-5-5", RequestedModel: "claude-opus-5-5", Thread: "continue", Tools: 20})
+		s.Intercept(InterceptInput{Session: RawSession(rootOnly(canonical)), TraceID: trace, Format: "claude", Model: "claude-opus-5-5", RequestedModel: "claude-opus-5-5", Thread: "continue", Tools: 20})
 	}
 	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: canonical, ParentID: parentOf(canonical), TraceID: trace, AuthID: authID, RequestedAt: c.t})
 }
@@ -81,13 +81,21 @@ func TestFiveHourHeadroomDecidesWhetherAnAccountIsReady(t *testing.T) {
 	if got := pick(s, "claude:s1", "claude-opus-5-5", both); got.AuthID != "claude-b" {
 		t.Fatalf("pick = %+v, want claude-b: claude-a has under a quarter of its 5-hour window", got)
 	}
-	s.MergeWindows("claude-a", "claude", []Window{{Kind: KindFiveHour, Remaining: 0.20, ResetAt: c.t.Add(20 * time.Minute), ObservedAt: c.t}})
-	if got := pick(s, "claude:s2", "claude-opus-5-5", both); got.AuthID != "claude-a" {
+	lowFive := func(reset time.Duration) *State {
+		s, c := newTestState()
+		w := Window{Kind: KindFiveHour, Remaining: 0.20, ObservedAt: c.t}
+		if reset > 0 {
+			w.ResetAt = c.t.Add(reset)
+		}
+		s.MergeWindows("claude-a", "claude", []Window{w, {Kind: KindWeekly, Remaining: 0.5, ResetAt: c.t.Add(24 * time.Hour), ObservedAt: c.t}})
+		setQuota(s, c, "claude-b", 0.90, 0.5, 4*24*time.Hour)
+		return s
+	}
+	if got := pick(lowFive(20*time.Minute), "claude:s2", "claude-opus-5-5", both); got.AuthID != "claude-a" {
 		t.Fatalf("pick = %+v, want claude-a: its 5-hour window resets in 20 minutes", got)
 	}
 	// A window that does not say when it resets is not about to.
-	s.MergeWindows("claude-a", "claude", []Window{{Kind: KindFiveHour, Remaining: 0.20, ObservedAt: c.t.Add(time.Second)}})
-	if got := pick(s, "claude:s3", "claude-opus-5-5", both); got.AuthID != "claude-b" {
+	if got := pick(lowFive(0), "claude:s3", "claude-opus-5-5", both); got.AuthID != "claude-b" {
 		t.Fatalf("pick = %+v, want claude-b: claude-a's low window has no reset", got)
 	}
 }
@@ -160,19 +168,25 @@ func TestARefusalMovesEverySessionOffAUsedUpAccount(t *testing.T) {
 		t.Fatalf("a used-up reading moved a session the account still serves: %+v", got)
 	}
 
-	refuse := func(id string) {
+	refuse := func(id string, status int) {
 		h := http.Header{}
 		h.Set("anthropic-ratelimit-unified-7d-utilization", "1.0")
 		h.Set("anthropic-ratelimit-unified-7d-reset", fmt.Sprint(c.t.Add(24*time.Hour).Unix()))
-		s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", AuthID: id, RequestedAt: c.t, Failed: true, ResponseHeader: h})
+		s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", AuthID: id, RequestedAt: c.t, Failed: true, StatusCode: status, ResponseHeader: h})
+	}
+	// A failure of the request itself (a lost thread) is not a refusal, even on a used-up account.
+	refuse("claude-a", http.StatusNotFound)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+	if got := pick(s, "claude:s1", "m", both); got.AuthID != "claude-a" {
+		t.Fatalf("a 404 moved the session: %+v", got)
 	}
 	setQuota(s, c, "claude-b", 0.9, 0, 4*24*time.Hour)
-	refuse("claude-a")
+	refuse("claude-a", http.StatusTooManyRequests)
 	if got := pick(s, "claude:s1", "m", both); got.AuthID != "claude-a" {
 		t.Fatalf("with no ready account, a refused session moved: %+v", got)
 	}
 
-	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 5*24*time.Hour) // its next week
 	for _, id := range []string{"claude:s1", "claude:s2"} {
 		got := pick(s, id, "m", both)
 		if got.AuthID != "claude-b" || !strings.HasPrefix(got.Reason, "previous account unavailable") {
@@ -196,8 +210,9 @@ func TestSessionStaysOnItsAccount(t *testing.T) {
 	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
 	got := pick(s, "claude:s1", "m", both)
 	served(s, c, "claude:s1", got.AuthID, true)
-	// claude-b now resets sooner: the session stays, a new session follows the ranking.
-	setQuota(s, c, "claude-b", 0.9, 0.5, time.Hour)
+	// claude-a's next week now resets after claude-b's: the session stays, a new session follows
+	// the ranking.
+	setQuota(s, c, "claude-a", 0.9, 0.5, 5*24*time.Hour)
 	if got := pick(s, "claude:s1", "m", both); got.AuthID != "claude-a" {
 		t.Fatalf("bound pick moved to %s", got.AuthID)
 	}
@@ -229,10 +244,10 @@ func TestDisplacedSessionMovesOnSuccess(t *testing.T) {
 	s, c := newTestState()
 	setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
 	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
-	served(s, c, "claude:s1", pick(s, "claude:s1", "m", both).AuthID, true)
-	pick(s, "claude:s1", "m", []Candidate{credB}) // claude-a cooling down
+	served(s, c, "claude:s1", pick(s, "claude:s1", "claude-opus-5-5", both).AuthID, true)
+	pick(s, "claude:s1", "claude-opus-5-5[1m]", []Candidate{credB}) // claude-a cooling down
 	served(s, c, "claude:s1", "claude-b", false)
-	if got := pick(s, "claude:s1", "m", both); got.AuthID != "claude-b" {
+	if got := pick(s, "claude:s1", "claude-opus-5-5", both); got.AuthID != "claude-b" {
 		t.Fatalf("after the move pick = %s, want claude-b, no flip back", got.AuthID)
 	}
 	if v := s.Build().Sessions["s1"]; v.LastSwitch == nil || v.LastSwitch.From != "claude-a" || v.AuthID != "claude-b" {
@@ -411,6 +426,23 @@ func TestSwitchCommand(t *testing.T) {
 	}
 }
 
+// A thread answered late on another account, sent before a later request the bound account served,
+// does not move the binding: the later one says where the thread lives now.
+func TestAnOlderThreadedSuccessDoesNotMoveAFresherBinding(t *testing.T) {
+	s, c := newTestState()
+	setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+	served(s, c, "claude:s1", "claude-a", true)
+	sentToB := c.t.Add(time.Second)
+	c.add(2 * time.Second)
+	served(s, c, "claude:s1", "claude-a", true) // sent after the request to b, answered first
+	s.Intercept(InterceptInput{Session: "s1", TraceID: "late", Format: "claude", Model: "claude-opus-5-5", Thread: "continue", Tools: 20})
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", TraceID: "late", AuthID: "claude-b", RequestedAt: sentToB})
+	if got := pick(s, "claude:s1", "claude-opus-5-5", both); got.AuthID != "claude-a" {
+		t.Fatalf("binding moved to %s by an older answer", got.AuthID)
+	}
+}
+
 // A thread still answering on the old account after the user switched leaves their choice.
 func TestALateSuccessDoesNotUndoASwitch(t *testing.T) {
 	s, c := newTestState()
@@ -511,6 +543,11 @@ func TestObserveIgnoresLateRecordsAndLateQuota(t *testing.T) {
 	if w := s.creds["claude-a"].Windows[KindWeekly]; w.Remaining != 0 {
 		t.Fatalf("late record overwrote newer quota: %+v", w)
 	}
+	// Nor is it a fall that settles once five minutes have passed: it was read before the 100%.
+	c.add(6 * time.Minute)
+	if rem, _, _, _ := s.effective(s.creds["claude-a"], KindWeekly, c.t); rem != 0 {
+		t.Fatalf("late record started the window over: remaining %v", rem)
+	}
 	v := s.Build().Sessions["s1"]
 	if v.Totals.CacheRead != 100 || v.Totals.CacheCreation != 500 || v.Last.CacheCreation != 500 {
 		t.Fatalf("session tokens = %+v / %+v", v.Totals, v.Last)
@@ -553,13 +590,33 @@ func TestCodexHeadersAndBodies(t *testing.T) {
 		t.Fatalf("codex header windows = %+v", ws)
 	}
 	body := []byte(`{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":1791010000},"secondary_window":null}}`)
-	ws = WindowsFromUsageBody("codex", body, now)
-	if len(ws) != 1 || ws[0].Kind != "5h" || ws[0].Remaining != 0.8 {
+	ws, full := WindowsFromUsageBody("codex", body, now)
+	if !full || len(ws) != 1 || ws[0].Kind != "5h" || ws[0].Remaining != 0.8 {
 		t.Fatalf("codex body windows = %+v", ws)
 	}
 	claude := []byte(`{"five_hour":{"utilization":14,"resets_at":"2026-10-04T01:10:00.49+00:00"},"seven_day":{"utilization":33,"resets_at":"2026-10-10T00:00:00+00:00"},"iguana_necktie":{"utilization":null},"extra_usage":{"utilization":null}}`)
-	if ws = WindowsFromUsageBody("claude", claude, now); len(ws) != 2 {
+	if ws, full = WindowsFromUsageBody("claude", claude, now); !full || len(ws) != 2 {
 		t.Fatalf("claude body windows = %+v", ws)
+	}
+	if _, full = WindowsFromUsageBody("codex", []byte(`{"error":"x"}`), now); full {
+		t.Fatal("an answer without rate limits read as a full reading")
+	}
+	// A Claude answer that names no window says nothing of them; one naming a window as null does.
+	for _, body := range []string{`null`, `{}`, `{"error":"temporarily unavailable"}`} {
+		if _, full = WindowsFromUsageBody("claude", []byte(body), now); full {
+			t.Fatalf("%s read as a full reading", body)
+		}
+	}
+	if ws, full = WindowsFromUsageBody("claude", []byte(`{"five_hour":null,"seven_day":{"utilization":10}}`), now); !full || len(ws) != 1 {
+		t.Fatalf("a reading without a 5-hour window = %+v %v", ws, full)
+	}
+	// A WebSocket quota event says only how long is left.
+	h = http.Header{}
+	h.Set("x-codex-primary-window-minutes", "10080")
+	h.Set("x-codex-primary-used-percent", "42")
+	h.Set("x-codex-primary-reset-after-seconds", "3600")
+	if ws = WindowsFromHeaders("codex", h, now); len(ws) != 1 || !ws[0].ResetAt.Equal(now.Add(time.Hour)) {
+		t.Fatalf("relative reset = %+v", ws)
 	}
 }
 
@@ -576,7 +633,7 @@ func TestHealth(t *testing.T) {
 	if got := s.Health("claude", "m"); got != "exhausted" {
 		t.Fatalf("all blocked health = %s", got)
 	}
-	setQuota(s, c, "claude-b", 0.05, 0.5, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.05, 0.5, 25*time.Hour) // its next week
 	if got := s.Health("claude", "m"); got != "healthy" {
 		t.Fatalf("low but serving health = %s", got)
 	}
@@ -643,7 +700,7 @@ func TestRouteOverrideAndAuto(t *testing.T) {
 		t.Fatalf("auto route = %+v", d)
 	}
 	// The route sticks after Claude recovers, until the user ends it.
-	setQuota(s, c, "claude-b", 0.9, 0.5, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 25*time.Hour)
 	if d := s.Route(in); !d.Handled {
 		t.Fatalf("route dropped mid-session: %+v", d)
 	}
@@ -855,7 +912,7 @@ func TestPlans(t *testing.T) {
 func TestASideRequestLeavesTheSessionModel(t *testing.T) {
 	s, c := newTestState()
 	turn := func(trace, model string, tools int) {
-		s.Intercept(InterceptInput{Session: "s1", TraceID: trace, Model: model, RequestedModel: model, Tools: tools})
+		s.Intercept(InterceptInput{Session: "s1", TraceID: trace, Format: "claude", Model: model, RequestedModel: model, Tools: tools})
 		s.Observe(Usage{Provider: "claude", Model: model, SessionID: "claude:s1", TraceID: trace, AuthID: "claude-a", RequestedAt: c.t, Output: 9})
 		c.t = c.t.Add(time.Second)
 	}
@@ -882,8 +939,13 @@ func TestAWindowThatStartsOverIsMarked(t *testing.T) {
 	}
 	c.t = c.t.Add(time.Minute)
 	setQuota(s, c, "claude-a", 0.9, 1, 24*time.Hour)
+	fell := c.t
+	if info, _ := s.Account("claude-a"); !s.StartedOver("claude-a").IsZero() {
+		t.Fatalf("a fall taken before it settled: %+v", info)
+	}
+	c.t = c.t.Add(6 * time.Minute)
 	info, _ := s.Account("claude-a")
-	if s.StartedOver("claude-a") != c.t || info.ResetAt != c.t.Add(24*time.Hour) {
+	if s.StartedOver("claude-a") != fell || info.ResetAt != fell.Add(24*time.Hour) {
 		t.Fatalf("started over %v reset %v", s.StartedOver("claude-a"), info.ResetAt)
 	}
 	if v := s.Build().Providers["claude"].Credentials[0]; v.Windows[1].Remaining != 1 {
@@ -965,7 +1027,7 @@ func TestASideRequestDoesNotMoveTheConversation(t *testing.T) {
 	if got := pick(s, "claude:s1", "claude-sonnet-5", []Candidate{credB}); got.AuthID != "claude-b" {
 		t.Fatalf("pick = %+v", got)
 	}
-	s.Intercept(InterceptInput{Session: "s1", TraceID: "side", Model: "claude-sonnet-5", RequestedModel: "claude-sonnet-5"})
+	s.Intercept(InterceptInput{Session: "s1", TraceID: "side", Format: "claude", Model: "claude-sonnet-5", RequestedModel: "claude-sonnet-5"})
 	s.Observe(Usage{Provider: "claude", Model: "claude-sonnet-5", SessionID: "claude:s1", TraceID: "side", AuthID: "claude-b", RequestedAt: c.t})
 	if v := s.Build().Sessions["s1"]; v.AuthID != "claude-a" {
 		t.Fatalf("a side request moved the conversation to %s", v.AuthID)
@@ -995,7 +1057,8 @@ func TestRouteNotesClearOnceTheReasonIsGone(t *testing.T) {
 	if s.Build().Sessions["s1"].RouteNote == "" {
 		t.Fatalf("a side request cleared the note")
 	}
-	setQuota(s, c, "claude-b", 0.9, 0.5, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 25*time.Hour)
+	c.add(6 * time.Minute) // its 5-hour window's fall settles
 	s.Route(long)
 	if note := s.Build().Sessions["s1"].RouteNote; note != "" {
 		t.Fatalf("note kept after Claude recovered: %q", note)
@@ -1037,5 +1100,345 @@ func TestNextWeeklyResetRollsOnByWholeWeeks(t *testing.T) {
 		if got := NextWeeklyReset(reset, c.now); !got.Equal(c.want) {
 			t.Errorf("at %v: %v, want %v", c.now, got, c.want)
 		}
+	}
+}
+
+// A Codex conversation lives on the account that answers it, so a child thread that ran elsewhere
+// while its parent's account was not offered keeps its own account, and the parent keeps its own.
+func TestACodexChildThreadKeepsItsOwnAccount(t *testing.T) {
+	s, c := newTestState()
+	a, b := Candidate{ID: "codex-a", Provider: "codex"}, Candidate{ID: "codex-b", Provider: "codex"}
+	for id, reset := range map[string]time.Duration{"codex-a": 24 * time.Hour, "codex-b": 4 * 24 * time.Hour} {
+		s.MergeWindows(id, "codex", []Window{{Kind: KindWeekly, Remaining: 0.5, ResetAt: c.t.Add(reset), ObservedAt: c.t}})
+	}
+	pickCodex := func(canonical, parent string, cands ...Candidate) string {
+		return s.Pick(PickInput{Provider: "codex", Model: "gpt-6.1-sol", Canonical: canonical, Parent: parent, Candidates: cands}).AuthID
+	}
+	run := func(canonical, parent, authID, trace string) {
+		s.Intercept(InterceptInput{TraceID: trace, Format: "openai-response", Model: "gpt-6.1-sol", RequestedModel: "gpt-6.1-sol", Tier: "priority"})
+		s.Observe(Usage{Provider: "codex", Model: "gpt-6.1-sol", SessionID: canonical, ParentID: parent, TraceID: trace, AuthID: authID, RequestedAt: c.t, Output: 10})
+	}
+	if got := pickCodex("codex:P", "", a, b); got != "codex-a" {
+		t.Fatalf("parent pick = %s", got)
+	}
+	run("codex:P", "", "codex-a", "t1")
+	if got := pickCodex("codex:C", "codex:P", b); got != "codex-b" {
+		t.Fatalf("child pick while A is not offered = %s", got)
+	}
+	run("codex:C", "codex:P", "codex-b", "t2")
+	if child, parent := pickCodex("codex:C", "codex:P", a, b), pickCodex("codex:P", "", a, b); child != "codex-b" || parent != "codex-a" {
+		t.Fatalf("child %s, parent %s: want codex-b and codex-a", child, parent)
+	}
+}
+
+// A request's log line says what the client asked for, as Intercept read it (Claude's fast mode is
+// not a service tier the host reads), and whether it came from another device.
+func TestAUsageLineCarriesWhatTheRequestAsked(t *testing.T) {
+	s, c := newTestState()
+	s.Intercept(InterceptInput{Session: "s1", TraceID: "fast", Format: "claude", Model: "claude-opus-5-5", RequestedModel: "claude-opus-5-5", Tools: 3, Tier: "fast", Remote: true})
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", TraceID: "fast", AuthID: "claude-a", RequestedAt: c.t, Output: 10, TierAsked: "auto"})
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", TraceID: "unseen", AuthID: "claude-a", RequestedAt: c.t, Output: 10, TierAsked: "auto"})
+	log := s.TakeLog()
+	if len(log) != 2 || log[0].TierAsked != "fast" || !log[0].Remote || log[1].TierAsked != "auto" || log[1].Remote {
+		t.Fatalf("log = %+v", log)
+	}
+}
+
+// Only Claude Code sends requests beside its conversation, and they offer no tools; a turn that
+// continues a message thread inherits its tools and is a turn all the same. Codex has no side
+// requests.
+func TestOnlyAClaudeRequestWithoutToolsOrThreadIsASideRequest(t *testing.T) {
+	s, c := newTestState()
+	turn := func(trace, format string, tools int, thread string) bool {
+		c.t = c.t.Add(time.Second)
+		s.Intercept(InterceptInput{Session: "s1", TraceID: trace, Format: format, Model: "m-" + trace, RequestedModel: "claude-opus-5-5", Tools: tools, Thread: thread})
+		provider := "claude"
+		if format != "claude" {
+			provider = "codex"
+		}
+		s.Observe(Usage{Provider: provider, Model: "m-" + trace, SessionID: "claude:s1", TraceID: trace, AuthID: "claude-a", RequestedAt: c.t, Output: 10})
+		return s.sessions["claude:s1"].Model == "m-"+trace
+	}
+	switch {
+	case !turn("tools", "claude", 3, ""):
+		t.Fatal("a turn with tools")
+	case turn("side", "claude", 0, ""):
+		t.Fatal("a side request moved the session")
+	case !turn("continue", "claude", 0, "continue"):
+		t.Fatal("a thread continuation without tools")
+	case !turn("codex", "openai-response", 0, ""):
+		t.Fatal("a Codex request without tools")
+	}
+}
+
+// A request beside the conversation on another model, which the bound account can still serve,
+// does not undo the move of the conversation's own model; and a request sent before a binding was
+// set cannot take it back when it answers late.
+func TestABindingMovesByModelAndByWhenTheRequestWasSent(t *testing.T) {
+	s, c := newTestState()
+	setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+	served(s, c, "claude:s1", pick(s, "claude:s1", "claude-opus-5-5", both).AuthID, true)
+	if got := pick(s, "claude:s1", "claude-opus-5-5", []Candidate{credB}); got.AuthID != "claude-b" {
+		t.Fatalf("pick while claude-a cannot serve Opus = %+v", got)
+	}
+	if got := pick(s, "claude:s1", "claude-haiku-4-5", both); got.AuthID != "claude-a" {
+		t.Fatalf("Haiku pick = %+v", got)
+	}
+	sent := c.t
+	c.t = c.t.Add(time.Minute)
+	served(s, c, "claude:s1", "claude-b", false)
+	if got := pick(s, "claude:s1", "claude-opus-5-5", both); got.AuthID != "claude-b" {
+		t.Fatalf("the Opus success elsewhere did not move the session: %+v", got)
+	}
+	// claude-a answers a threaded request sent before the move.
+	s.Intercept(InterceptInput{Session: "s1", TraceID: "late", Format: "claude", Model: "claude-opus-5-5", RequestedModel: "claude-opus-5-5", Thread: "continue", Tools: 20})
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", TraceID: "late", AuthID: "claude-a", RequestedAt: sent})
+	if got := pick(s, "claude:s1", "claude-opus-5-5", both); got.AuthID != "claude-b" {
+		t.Fatalf("a late answer took the session back: %+v", got)
+	}
+}
+
+// The live state follows the window rules (window.go): a high reading of the old window read just
+// after a start-over is passed over, a lower one read late is too, a reading naming an earlier reset
+// is, and a full reading drops a window the account no longer has.
+func TestTheLiveStateFollowsTheWindowRules(t *testing.T) {
+	s, c := newTestState()
+	reset := c.t.Add(24 * time.Hour)
+	read := func(used float64, at time.Duration, resetAt time.Time) {
+		s.MergeWindows("claude-a", "claude", []Window{{Kind: KindWeekly, Remaining: 1 - used, ResetAt: resetAt, ObservedAt: c.t.Add(at), Source: "header"}})
+	}
+	weekly := func(at time.Duration) float64 {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		rem, _, _, _ := s.effective(s.creds["claude-a"], KindWeekly, c.t.Add(at))
+		return 1 - rem
+	}
+	read(0.26, 0, reset)
+	read(0, time.Second, reset)
+	read(0.26, 2*time.Second, reset)
+	read(0, 3*time.Second, reset)
+	if got := weekly(time.Minute); !near(got, 0.26) {
+		t.Fatalf("while the fall waits: %v", got)
+	}
+	if got := weekly(10 * time.Minute); !near(got, 0) || s.StartedOver("claude-a").IsZero() {
+		t.Fatalf("after it settles: %v", got)
+	}
+	read(0.50, 20*time.Minute, reset)
+	read(0.40, 21*time.Minute, reset)
+	read(0.50, 22*time.Minute, reset)
+	read(0.30, 23*time.Minute, reset.Add(-7*24*time.Hour)) // the window before, read late
+	if got := weekly(40 * time.Minute); !near(got, 0.50) {
+		t.Fatalf("late readings moved the window: %v", got)
+	}
+	// A full reading without a 5-hour window: the account has none, rather than one not read.
+	s.MergePoll("claude-a", "claude", []Window{{Kind: KindWeekly, Remaining: 0.5, ResetAt: reset, ObservedAt: c.t.Add(41 * time.Minute)}})
+	if _, present, absent := s.FiveHour("claude-a"); present || !absent {
+		t.Fatal("5-hour window not absent")
+	}
+}
+
+// After the plan changes, a fall smaller than resetDrop that settles starts the window over: a plan
+// change can begin a window that had used little.
+func TestAfterAPlanChangeASmallFallStartsTheWindowOver(t *testing.T) {
+	s, c := newTestState()
+	reset := c.t.Add(24 * time.Hour)
+	s.SetPlan("claude-a", "claude", "Max 5x")
+	s.MergeWindows("claude-a", "claude", []Window{{Kind: KindWeekly, Remaining: 0.96, ResetAt: reset, ObservedAt: c.t}})
+	s.SetPlan("claude-a", "claude", "Max 20x")
+	s.MergeWindows("claude-a", "claude", []Window{{Kind: KindWeekly, Remaining: 1, ResetAt: reset, ObservedAt: c.t.Add(time.Minute)}})
+	s.mu.Lock()
+	rem, _, _, _ := s.effective(s.creds["claude-a"], KindWeekly, c.t.Add(10*time.Minute))
+	s.mu.Unlock()
+	if !near(rem, 1) {
+		t.Fatalf("remaining %v, want the window started over", rem)
+	}
+	if log := s.TakeLog(); len(log) < 2 || log[len(log)-2].Plan != "Max 20x" {
+		t.Fatalf("no plan line in %+v", log)
+	}
+}
+
+// A restart keeps which windows the account does not have, and a reading dated ahead of the clock
+// (it was set back since) does not count as fresh.
+func TestARestartKeepsAbsenceAndDistrustsTheFuture(t *testing.T) {
+	s, c := newTestState()
+	s.MergePoll("codex-a", "codex", []Window{{Kind: KindWeekly, Remaining: 0.5, ResetAt: c.t.Add(24 * time.Hour), ObservedAt: c.t.Add(time.Hour)}})
+	saved := s.Export()
+	r, _ := newTestState()
+	r.Import(saved)
+	if _, _, absent := r.FiveHour("codex-a"); !absent {
+		t.Fatal("absence lost")
+	}
+	r.mu.Lock()
+	_, _, present, fresh := r.effective(r.creds["codex-a"], KindWeekly, c.t)
+	r.mu.Unlock()
+	if !present || fresh {
+		t.Fatalf("a reading from the future: present %v fresh %v", present, fresh)
+	}
+	// A Claude reading that names no model window of its own says the account has none: one
+	// another account has shows as no such quota here, not as not reported.
+	s.MergePoll("claude-a", "claude", []Window{{Kind: KindFiveHour, Remaining: 0.9, ObservedAt: c.t}, {Kind: KindWeekly, Remaining: 0.5, ObservedAt: c.t}})
+	var absent []string
+	for _, cv := range s.Build().Providers["claude"].Credentials {
+		if cv.ID == "claude-a" {
+			absent = cv.Absent
+		}
+	}
+	if fmt.Sprint(absent) != "[7d_fable 7d_opus 7d_sonnet]" {
+		t.Fatalf("absent = %v", absent)
+	}
+}
+
+// Once the host's list is read, a late record of an account it no longer holds is history: it does
+// not bring the account back, though its line is logged.
+func TestALateRecordDoesNotBringARemovedAccountBack(t *testing.T) {
+	s, c := newTestState()
+	s.UpdateInventory(inventory)
+	s.UpdateInventory(inventory[1:]) // claude-a removed
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t, Output: 10})
+	if s.creds["claude-a"] != nil || len(s.TakeLog()) != 1 {
+		t.Fatal("a removed account came back, or its usage was lost")
+	}
+}
+
+// An automatic takeover acts on the host's list as it is now: an old list asks to be read again.
+func TestATakeoverWaitsForAFreshAccountList(t *testing.T) {
+	s, c := newTestState()
+	s.UpdateInventory(inventory)
+	s.SetConfig(Config{CrossProvider: "auto", FallbackMap: map[string]string{"claude": "codex:gpt-6-sol"}})
+	setQuota(s, c, "claude-a", 0.9, 0, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0, 24*time.Hour)
+	c.add(time.Minute)
+	in := RouteInput{Session: "s1", RequestedModel: "claude-opus-5-5", BodyBytes: 30000, Available: []string{"claude", "codex"}, Turn: true}
+	if d := s.Route(in); d.Handled || !d.Recheck {
+		t.Fatalf("with a minute-old list: %+v", d)
+	}
+	s.UpdateInventory(inventory)
+	if d := s.Route(in); !d.Handled || d.Provider != "codex" {
+		t.Fatalf("with a fresh list: %+v", d)
+	}
+}
+
+// Two credentials of one provider account count as the one the host holds, else the one read last;
+// a credential alone for its account is left as it is.
+func TestCredentialsOfOneAccountCountAsOne(t *testing.T) {
+	s, c := newTestState()
+	s.UpdateInventory([]CredInfo{{ID: "codex-new", Provider: "codex"}})
+	s.SetIdentity("codex-old", "codex:acct-1")
+	c.add(time.Hour)
+	s.SetIdentity("codex-new", "codex:acct-1")
+	s.SetIdentity("codex-other", "codex:acct-2")
+	if got := s.Canonical(); len(got) != 1 || got["codex-old"] != "codex-new" {
+		t.Fatalf("canonical = %v", got)
+	}
+	s.UpdateInventory([]CredInfo{{ID: "claude-x", Provider: "claude"}})
+	c.add(time.Minute)
+	s.SetIdentity("codex-old", "codex:acct-1") // read again, later
+	if got := s.Canonical(); got["codex-new"] != "codex-old" {
+		t.Fatalf("neither held: canonical = %v", got)
+	}
+	r, _ := newTestState()
+	r.Import(s.Export())
+	if got := r.Canonical(); got["codex-new"] != "codex-old" {
+		t.Fatalf("after a restart: canonical = %v", got)
+	}
+	// Both held: the snapshot says which counts under which, so a pool counts the quota once.
+	s.UpdateInventory([]CredInfo{{ID: "codex-new", Provider: "codex"}, {ID: "codex-old", Provider: "codex"}})
+	same := map[string]string{}
+	for _, cv := range s.Build().Providers["codex"].Credentials {
+		same[cv.ID] = cv.SameAs
+	}
+	if same["codex-new"] != "codex-old" || same["codex-old"] != "" {
+		t.Fatalf("same account: %v", same)
+	}
+	// An enabled credential counts the account over a disabled one, so the pool keeps it.
+	s.UpdateInventory([]CredInfo{{ID: "codex-new", Provider: "codex"}, {ID: "codex-old", Provider: "codex", Disabled: true}})
+	if _, got := s.BuildWithCanonical(); got["codex-old"] != "codex-new" {
+		t.Fatalf("with the read-last credential disabled: canonical = %v", got)
+	}
+	if band := s.BuildForBand(""); band.Providers["codex"].Credentials[1].SameAs != band.Providers["codex"].Credentials[0].ID &&
+		band.Providers["codex"].Credentials[0].SameAs != band.Providers["codex"].Credentials[1].ID {
+		t.Fatal("the band's ids for the same account do not match")
+	}
+}
+
+// Accounts are named apart: as many leading characters as it takes, up to four, then a number.
+func TestAccountsAreNamedApart(t *testing.T) {
+	got := UniqueLabels(map[string]string{"a": "kelly@x.com", "b": "kyle@x.com", "c": "dana@x.com", "d": "sam@x.com", "e": "sam@y.com"})
+	want := map[string]string{"a": "ke•••", "b": "ky•••", "c": "d•••", "d": "sam•••", "e": "sam•••2"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("labels = %v", got)
+	}
+}
+
+// Low headroom is a preference, being used up is not being able to serve: an account that can serve
+// comes before one that cannot, whatever their ids, and a refused session may leave for it.
+func TestAnAccountThatCanServeComesBeforeOneThatCannot(t *testing.T) {
+	s, c := newTestState()
+	setQuota(s, c, "claude-a", 0.9, 0, 24*time.Hour)     // used up
+	setQuota(s, c, "claude-b", 0.2, 0.5, 4*24*time.Hour) // 5-hour quota low, serving
+	if got := pick(s, "claude:s1", "m", both); got.AuthID != "claude-b" {
+		t.Fatalf("pick = %+v, want the account that can serve", got)
+	}
+	s.bindings["claude|claude:s2"] = &Binding{AuthID: "claude-a", LastUsed: c.t}
+	s.creds["claude-a"].refusedAt = c.t
+	if got := pick(s, "claude:s2", "m", both); got.AuthID != "claude-b" {
+		t.Fatalf("a refused session stayed: %+v", got)
+	}
+}
+
+// The host offers an account for the model asked: a cooldown it reports on some other model does
+// not hold it back; at exactly the threshold an account has enough of its 5-hour window.
+func TestAnOfferedAccountIsRankedOnItsQuota(t *testing.T) {
+	s, c := newTestState()
+	s.SetConfig(Config{MinFiveHourLeftPercent: 10})
+	setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+	s.UpdateInventory([]CredInfo{{ID: "claude-a", Provider: "claude", Unavailable: true, NextRetryAfter: c.t.Add(time.Hour)}, {ID: "claude-b", Provider: "claude"}})
+	if got := pick(s, "claude:s1", "claude-opus-5-5", both); got.AuthID != "claude-a" {
+		t.Fatalf("pick = %+v: a cooldown elsewhere held claude-a back", got)
+	}
+	s.MergeWindows("claude-a", "claude", []Window{{Kind: KindFiveHour, Remaining: 1 - 0.9, ResetAt: c.t.Add(3 * time.Hour), ObservedAt: c.t.Add(time.Second)}})
+	if got := pick(s, "claude:s2", "claude-opus-5-5", both); got.AuthID != "claude-a" {
+		t.Fatalf("pick = %+v: 10%% left is the threshold, not under it", got)
+	}
+}
+
+// A turn's need on another model is the conversation as its last turn read it, or the request when
+// larger, with attachments counted as attachments and room for the answer it allows; a model's
+// family and suffixes find its context window.
+func TestARouteMeasuresTheConversation(t *testing.T) {
+	s, _ := newTestState()
+	sess := &session{Last: Tokens{Input: 10, CacheRead: 250000, CacheCreation: 5000, Output: 1000}}
+	if got := needOf(sess, RouteInput{BodyBytes: 3000}); got != 256010+outputReserveTokens {
+		t.Fatalf("need of a short continuation = %d", got)
+	}
+	if got := needOf(&session{}, RouteInput{BodyBytes: 3000, Attachments: 2, MaxOutput: 8000}); got != 1000+2*attachmentTokens+8000 {
+		t.Fatalf("need of a request = %d", got)
+	}
+	for model, want := range map[string]int{"claude-fable-5-1": 1000000, "claude-opus-5-5[1m]": 1000000, "gpt-6.1-sol": 272000, "llama": 0} {
+		if got := s.contextLengthLocked(model); got != want {
+			t.Errorf("%s: %d, want %d", model, got, want)
+		}
+	}
+	if s.fitsLocked("gpt-6-sol", needOf(sess, RouteInput{BodyBytes: 3000})) == "" {
+		t.Fatal("a 256k conversation passed for gpt-6-sol's 272k, with no room left for the answer")
+	}
+}
+
+// A session's view names the accounts that cannot serve its next model, so the band does not offer
+// them: one with its Fable window used up, for a session on Fable.
+func TestASessionViewNamesTheAccountsThatCannotServeIt(t *testing.T) {
+	s, c := newTestState()
+	setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+	setQuota(s, c, "claude-b", 0.9, 0.5, 24*time.Hour)
+	s.MergeWindows("claude-b", "claude", []Window{{Kind: "7d_fable", Remaining: 0, ResetAt: c.t.Add(24 * time.Hour), ObservedAt: c.t}})
+	served(s, c, "claude:s1", "claude-a", false)
+	s.Route(RouteInput{Session: "s1", RequestedModel: "claude-fable-5-1", Turn: true})
+	if v := s.Build().Sessions["s1"]; fmt.Sprint(v.Blocked) != "[claude-b]" {
+		t.Fatalf("blocked = %v", v.Blocked)
+	}
+	if v := s.BuildForBand("s1").Sessions["s1"]; len(v.Blocked) != 1 || v.Blocked[0] == "claude-b" {
+		t.Fatalf("remote blocked = %v", v.Blocked)
 	}
 }

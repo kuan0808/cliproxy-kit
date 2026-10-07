@@ -3,19 +3,22 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { CacheInfo, ModelInfo, Pending, SessionAbout, SessionInfo, Snap, UiState } from '../types'
+import type { BandError, CacheInfo, ModelInfo, SessionAbout, SessionInfo, Snap, UiState } from '../types'
 import {
   C,
   HANDOFF_PROMPT,
+  bandErrorText,
   barFill,
   blockedOthers,
   cacheState,
+  cannotTake,
   cacheTtlMs,
   fmtDuration,
   fmtTokens,
   hitRate,
   currentModel,
   latestModels,
+  missingText,
   usedText,
   nextTurnMoves,
   providerOfModel,
@@ -30,13 +33,17 @@ import {
   parseSnap,
   pickAlert,
   pooled,
+  readBand,
   resetText,
   sessionAccount,
+  settlePending,
   sev,
+  snapIsLive,
   switchTargets,
   untilIso,
   weeklyFor,
   windowOf,
+  type Alert,
   type SessionAccount,
 } from './logic'
 
@@ -54,6 +61,7 @@ const EMPTY_UI: UiState = {
 }
 
 const snapA = atom({ plugin: 'quota-band', key: 'snap' } as const, null)
+const bandErrorA = atom({ plugin: 'quota-band', key: 'bandError' } as const, null)
 const nowA = atom({ plugin: 'quota-band', key: 'now' } as const, 0)
 const sessA = atom({ plugin: 'quota-band', key: 'session' } as const, EMPTY_SESSION)
 const aboutA = atom({ plugin: 'quota-band', key: 'about' } as const, EMPTY_ABOUT)
@@ -101,15 +109,17 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
   ])
   const [id, model, usage, cwd] = await Promise.all([$.session.id(), $.session.model(), $.session.usage(), $.session.cwd()])
   const proxied = Boolean(base)
+  const now = await $.clock.now()
   // Beside a proxy that runs as this user the snapshot is a file; when none reads here (another
-  // machine, a proxy in a container or run as another user) it comes over the network.
+  // machine, a proxy in a container or run as another user) it comes over the network. The file
+  // is the proxy's only while it keeps it fresh: a stopped proxy leaves its last one behind.
   const localBase = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/.test(base ?? '')
-  const localSnap = home && (!proxied || localBase)
+  const file = home && (!proxied || localBase)
     ? parseSnap(await $.fs.read(kitPath(home, 'snapshot.json')).catch(() => ''))
     : null
+  const localSnap = file && (!proxied || snapIsLive(file, now)) ? file : null
   const remote = proxied && !localSnap
   const prev = await read($, sessA)
-  const now = await $.clock.now()
   const next: SessionInfo = {
     ...prev,
     id, model, cwd, proxied, remote, home: home ?? '',
@@ -134,6 +144,7 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
 
   if (home || remote) {
     let snap = localSnap
+    let error: BandError | null = null
     if (remote && base && token) {
       try {
         // What the band knows of its session goes in headers, kept out of the proxy's request log.
@@ -146,16 +157,22 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
         ]
         for (const [name, value] of said) if (value) headers[name] = encodeURIComponent(value)
         const r = await $.http.fetch(`${base.replace(/\/+$/, '')}/v0/resource/plugins/quota-pilot/band`, { headers })
-        snap = r.ok ? parseSnap(r.text) : null
-      } catch {
+        ;({ snap, error } = readBand(r.status, r.text))
+      } catch (err) {
         snap = null
+        error = { kind: 'network', message: err instanceof Error ? err.message : String(err) }
       }
     }
+    // Nothing fresher came: a stopped proxy's last snapshot shows, which the band marks as old,
+    // beside why the proxy gave none.
+    snap ??= file
     const old = await read($, snapA)
     if (snap?.sequence !== old?.sequence || snap?.boot_id !== old?.boot_id || snap?.generated_at !== old?.generated_at) {
       await update($, snapA, () => snap)
-      await settleAcks($, snap)
     }
+    if (JSON.stringify(error) !== JSON.stringify(await read($, bandErrorA))) await update($, bandErrorA, () => error)
+    // Every read, changed or not: a command can also expire, or its proxy be gone.
+    await settle($, snap, now)
   }
   await update($, nowA, () => now)
 }
@@ -281,29 +298,13 @@ function titleLine(text: string): string {
   return chars.length > 90 ? `${chars.slice(0, 89).join('')}…` : line
 }
 
-/** Resolve pending commands from the snapshot's acknowledgements. */
-async function settleAcks($: $T, snap: Snap | null): Promise<void> {
-  const ui = await read($, uiA)
-  if (!ui.pending.length) return
-  const acks = snap?.acks ?? []
-  const left: Pending[] = []
-  let notice = ui.notice
-  let isError = ui.noticeIsError
-  for (const p of ui.pending) {
-    const ack = acks.find(a => a.command_id === p.id)
-    if (!ack) {
-      left.push(p)
-      continue
-    }
-    if (ack.status === 'applied') {
-      notice = `${p.text}: done`
-      isError = false
-    } else {
-      notice = `${p.text}: ${ack.reason ?? 'rejected'}`
-      isError = true
-    }
-  }
-  await setUi($, { pending: left, notice, noticeIsError: isError })
+/** Settle pending commands by the snapshot just read (see `settlePending`). */
+async function settle($: $T, snap: Snap | null, now: number): Promise<void> {
+  if (!(await read($, uiA)).pending.length) return
+  await update($, uiA, (u: UiState): UiState => {
+    const { left, notice } = settlePending(u.pending, snap, now)
+    return notice ? { ...u, pending: left, notice: notice.text, noticeIsError: notice.isError } : u
+  })
 }
 
 /** Write a command for quota-pilot and track it until the snapshot acknowledges it. */
@@ -318,9 +319,11 @@ async function sendCommand($: $T, action: string, fields: Record<string, string>
     return
   }
   const id = crypto.randomUUID()
-  const doc = { command_id: id, session: sess.id, boot_id: snap.boot_id, created_at: new Date(await $.clock.now()).toISOString(), action, ...fields }
+  const at = await $.clock.now()
+  const doc = { command_id: id, session: sess.id, boot_id: snap.boot_id, created_at: new Date(at).toISOString(), action, ...fields }
   await $.fs.write(kitPath(sess.home, `commands/${id}.json`), JSON.stringify(doc))
-  await update($, uiA, (u: UiState): UiState => ({ ...u, confirm: '', switchStep: '', notice: `${text}…`, noticeIsError: false, pending: [...u.pending, { id, text }] }))
+  const pending = { id, text, boot: snap.boot_id, at }
+  await update($, uiA, (u: UiState): UiState => ({ ...u, confirm: '', switchStep: '', notice: `${text}…`, noticeIsError: false, pending: [...u.pending, pending] }))
 }
 
 async function setNotice($: $T, notice: string, isError: boolean): Promise<void> {
@@ -456,8 +459,8 @@ export const register: Register = on => {
     const below = await next(e)
     const beneath = below.type !== 'engine'
     const { Box, Text, Button } = $.ui.resolve(e)
-    const [snap, now0, sess, cache, ui, models] = await Promise.all([
-      read($, snapA), read($, nowA), read($, sessA), read($, cacheA), read($, uiA), read($, modelsA),
+    const [snap, bandError, now0, sess, cache, ui, models] = await Promise.all([
+      read($, snapA), read($, bandErrorA), read($, nowA), read($, sessA), read($, cacheA), read($, uiA), read($, modelsA),
     ])
     const now = now0 || Date.now()
     const acct = sess.proxied ? sessionAccount(snap, sess.id) : null
@@ -489,7 +492,8 @@ export const register: Register = on => {
     const pctText = (remaining: number, stale = false) => (
       <Text bold color={stale ? C.dim : sev(remaining)}>{`${Math.round(100 - remaining)}%${stale ? '~' : ''}`}</Text>
     )
-    const usedBar = (remaining: number, cells: number, color: string) => bar((100 - remaining) / 100, cells, color)
+    const usedFrac = (remaining: number) => (100 - remaining) / 100
+    const usedBar = (remaining: number, cells: number, color: string) => bar(usedFrac(remaining), cells, color)
     // Controls read as words, not boxes: dim at rest, bright under the pointer or the focus.
     // No hotkey letters: they only work once the band has the keyboard (ctrl+x tab), so a letter
     // beside a control reads as a shortcut that does nothing. Main actions are bright.
@@ -544,12 +548,16 @@ export const register: Register = on => {
     const poolView = acct?.view ?? (likely ? snap?.providers[likely.provider] : undefined)
     const poolCurrent = acct?.session.auth_id ?? likely?.cred.id ?? ''
     const all = poolView && poolView.credentials.length ? pooled(poolView) : null
-    // An account with quota data but no window of a kind has no such limit (Codex has no 5-hour window).
-    const known = Boolean((acct?.cred ?? likely?.cred)?.windows.length)
-    const missing = known ? 'no such limit' : 'after the first reply'
-    // Other providers this proxy has accounts and models for: the switch row offers them.
-    const switchProviders = acct && snap ? Object.keys(snap.providers).filter(p => p !== acct.provider && latestModels(models, p).length) : []
+    const shownCred = acct?.cred ?? likely?.cred
+    // The provider the session asks for, which `back` returns a routed session to.
+    const original = acct?.session.requested_model ? providerOfModel(acct.session.requested_model) : acct?.provider ?? ''
+    // Providers this proxy has accounts and models for: the switch row offers the others, and while
+    // routed the route's own too, for another of its models.
+    const switchProviders = acct && snap
+      ? Object.keys(snap.providers).filter(p => (route ? p !== original : p !== acct.provider) && latestModels(models, p).length)
+      : []
     const canSwitch = Boolean(acct && !sess.remote && (acct.view.credentials.length > 1 || switchProviders.length || acct.session.route))
+    const toggleSwitch = () => setUi($, { confirm: ui.confirm === 'switch' ? '' : 'switch', switchStep: '' })
 
     // -- rows above the band: a confirmation, a notice or an alert --
     const width = mode === 'compact' ? rowWidth : tilesSpan(mode, rowWidth)
@@ -577,9 +585,8 @@ export const register: Register = on => {
         </Box>,
       ]))
     } else if (ui.confirm === 'switch' && acct) {
-      // Two steps: accounts of this provider and the other providers, then that provider's models.
+      // Two steps: accounts of this provider and the providers to route to, then that provider's models.
       const close = () => setUi($, { confirm: '', switchStep: '' })
-      const original = acct.session.requested_model ? providerOfModel(acct.session.requested_model) : acct.provider
       if (ui.switchStep) {
         const provider = ui.switchStep
         const list = latestModels(models, provider)
@@ -595,14 +602,14 @@ export const register: Register = on => {
         ]))
       } else {
         const others = acct.view.credentials.filter(c => c.id !== acct.session.auth_id)
-        const ready = new Set(switchTargets(acct.view, acct.session.auth_id).map(c => c.id))
+        const ready = new Set(switchTargets(acct.view, acct.session.auth_id, acct.session.blocked).map(c => c.id))
         top.push(rowBox('ask', C.askBg, [
           say('? ', C.accent, 'Switch this session to:'),
           <Box gap={2}>
             {others.map(c => ready.has(c.id)
               ? link(`to-${c.id}`, `${c.label} ${usedText(windowOf(c, '7d'))}`,
                   () => sendCommand($, 'switch', { auth_id: c.id }, `Switch to ${c.label}`), true)
-              : dim(blockedOthers({ ...acct.view, credentials: [c] }, '', now)))}
+              : dim(cannotTake(c, acct.session.model, now)))}
             {route
               ? link('unroute', `back to ${providerTitle(original)}`, () => sendCommand($, 'unroute', {}, `Back to ${providerTitle(original)}`), true)
               : null}
@@ -617,7 +624,10 @@ export const register: Register = on => {
         ui.busy ? dim('working…') : link('dismiss', 'ok', () => setUi($, { notice: '' })),
       ]))
     } else {
-      const alert = pickAlert(snap, acct, sess.proxied, now, ui.dismissedSwitch)
+      // Without quota data from the proxy, the reason it gave goes first.
+      const alert: Alert | null = bandError
+        ? { level: 'warn', text: bandErrorText(bandError) }
+        : pickAlert(snap, acct, sess.proxied, now, ui.dismissedSwitch)
       if (alert) {
         const fallback = acct ? snap?.config.fallback_map[acct.provider] : undefined
         const [fbProvider, fbModel] = (fallback ?? ':').split(':')
@@ -653,11 +663,12 @@ export const register: Register = on => {
       const effort = sess.effort ? ` · ${sess.effort}` : ''
       // `drop` orders what goes first when even the plainest row is too wide: higher goes first.
       type Slot = { width: number; node: RenderChildren; drop: number; model?: true }
-      // label, a five-cell bar (unless plain), the value, and an optional dim tail.
-      const mini = (drop: number, label: string, remaining: number, color: string, value: RenderChildren, valueWidth: number, bars: boolean, tail = ''): Slot => ({
+      // label, a five-cell bar filled to `fill` (unless plain), the value, and an optional dim tail.
+      // A quota meter fills with what is used; the cache's with what its tile's bar shows.
+      const mini = (drop: number, label: string, fill: number, color: string, value: RenderChildren, valueWidth: number, bars: boolean, tail = ''): Slot => ({
         drop,
         width: label.length + 1 + (bars ? 6 : 0) + valueWidth + (tail ? tail.length + 1 : 0),
-        node: <Box gap={1}>{dim(label)}{bars ? usedBar(remaining, 5, color) : null}{value}{tail ? dim(tail) : null}</Box>,
+        node: <Box key={`meter-${label}`} gap={1}>{dim(label)}{bars ? bar(fill, 5, color) : null}{value}{tail ? dim(tail) : null}</Box>,
       })
       // Who and what: the account, then the model with its effort (or the route).
       const identity = (withEffort: boolean, divider: boolean): Slot[] => {
@@ -679,10 +690,10 @@ export const register: Register = on => {
       const meters = (level: number): Slot[] => {
         const bars = level < 4
         const row: Slot[] = []
-        if (ctxLeft != null) row.push(mini(1, 'ctx', ctxLeft, sev(ctxLeft), pctText(ctxLeft), pctWidth(ctxLeft), bars))
+        if (ctxLeft != null) row.push(mini(1, 'ctx', usedFrac(ctxLeft), sev(ctxLeft), pctText(ctxLeft), pctWidth(ctxLeft), bars))
         for (const [drop, label, m] of [[2, '5h', five], [3, '7d', week]] as const) {
           if (!m) continue
-          row.push(mini(drop, label, m.remaining, m.stale ? C.dim : sev(m.remaining), pctText(m.remaining, m.stale),
+          row.push(mini(drop, label, usedFrac(m.remaining), m.stale ? C.dim : sev(m.remaining), pctText(m.remaining, m.stale),
             pctWidth(m.remaining) + (m.stale ? 1 : 0), bars, level < 2 ? m.reset : ''))
         }
         row.push(mini(5, 'cache', cacheFrac, cacheTone, <Text bold color={cacheTone}>{cacheValue}</Text>, cacheValue.length, bars,
@@ -693,8 +704,11 @@ export const register: Register = on => {
         }
         return row
       }
-      // Cards on request, where the terminal has room for them; kept to the last when space runs out.
-      const expand: Slot | null = roomy !== 'compact' ? { drop: -1, width: 4, node: link('view-cards', 'more', () => setView('cards')) } : null
+      // The way into the switch menu, and the cards where the terminal has room for them: kept to
+      // the last when space runs out.
+      const controls: Slot[] = []
+      if (canSwitch) controls.push({ drop: -1, width: 6, node: link('switch', 'switch', toggleSwitch) })
+      if (roomy !== 'compact') controls.push({ drop: -1, width: 4, node: link('view-cards', 'more', () => setView('cards')) })
       const budget = rowWidth - 4
       const span = (row: Slot[]) => row.reduce((sum, s) => sum + s.width, 0) + 3 * (row.length - 1)
       // The richest level that fits (level 3 also drops the effort), then items by `drop`.
@@ -708,16 +722,16 @@ export const register: Register = on => {
         }
         return row
       }
-      const withExpand = (row: Slot[]) => (expand ? [...row, expand] : row)
-      const full = withExpand([...identity(true, true), ...meters(0)])
+      const withControls = (row: Slot[]) => [...row, ...controls]
+      const full = withControls([...identity(true, true), ...meters(0)])
       // Everything on one row when it fits; else, given the height and nothing drawn beneath, who
       // and what on one row and the meters with full detail on a second; else one row that sheds
       // detail, leaving the rest of the band to what lies beneath.
       const lines: Slot[][] = span(full) <= budget
         ? [full]
         : !beneath && e.props.maxRows >= top.length + 2
-          ? [fit(level => withExpand(identity(level < 1, false))), fit(meters)]
-          : [fit(level => withExpand([...identity(level < 3, true), ...meters(level)]))]
+          ? [fit(level => withControls(identity(level < 1, false))), fit(meters)]
+          : [fit(level => withControls([...identity(level < 3, true), ...meters(level)]))]
       return (
         <Box flexDirection="column">
           {top}
@@ -748,6 +762,8 @@ export const register: Register = on => {
     const meterBar = (m: Meter | undefined) => (cells: number) => m ? usedBar(m.remaining, cells, m.stale ? C.dim : sev(m.remaining)) : bar(0, cells, C.track)
     const caption = (t: string) => <Text color={C.dim} wrap="truncate-end">{t}</Text>
     const tiles: RenderChildren[] = []
+    // A routed session's route goes with `back` beside it: the controls row has no room for both
+    // `back` and `switch`, and `switch` stays, for another account or model.
     tiles.push(
       <Box key="account" width={tws[0]} paddingX={2} flexDirection="column" backgroundColor={C.tile}>
         <Box justifyContent="space-between">
@@ -755,19 +771,22 @@ export const register: Register = on => {
           <Text bold color={C.fg}>{acctLabel}</Text>
         </Box>
         {route
-          ? <Text color={C.aqua} wrap="truncate-end">{`routed to ${route.model}`}</Text>
+          ? (
+            <Box justifyContent="space-between" gap={1}>
+              <Text color={C.aqua} wrap="truncate-end">{`→ ${route.model}`}</Text>
+              {sess.remote ? null : link('unroute', 'back', () => sendCommand($, 'unroute', {}, `Back to ${providerTitle(original)}`))}
+            </Box>
+          )
           : <Text color={C.dim} wrap="truncate-end">{acctNote}</Text>}
         <Box gap={2}>
-          {route && !sess.remote
-            ? link('unroute', 'back', () => sendCommand($, 'unroute', {}, 'Back to the original provider'))
-            : canSwitch ? link('switch', 'switch', () => setUi($, { confirm: ui.confirm === 'switch' ? '' : 'switch', switchStep: '' })) : null}
+          {canSwitch ? link('switch', 'switch', toggleSwitch) : null}
           {link('quota', 'quota', () => $.ui.open({ id: PANE, title: 'Accounts and quota' }))}
           {link('view-line', 'less', () => setView('line'))}
         </Box>
       </Box>,
     )
-    tiles.push(tile('five', '5-hour', used(five), meterBar(five), caption(five ? resetText(five.reset) : missing)))
-    tiles.push(tile('week', week?.label ?? 'Weekly', used(week), meterBar(week), caption(week ? resetText(week.reset) : missing)))
+    tiles.push(tile('five', '5-hour', used(five), meterBar(five), caption(five ? resetText(five.reset) : missingText(shownCred, '5h'))))
+    tiles.push(tile('week', week?.label ?? 'Weekly', used(week), meterBar(week), caption(week ? resetText(week.reset) : missingText(shownCred, '7d'))))
     tiles.push(tile('ctx', 'Context', ctxLeft != null ? <Box>{pctText(ctxLeft)}{dim(' used')}</Box> : dim('—'),
       cells => ctxLeft != null ? usedBar(ctxLeft, cells, sev(ctxLeft)) : bar(0, cells, C.track),
       <Text wrap="truncate-end"><Text color={C.dim}>{modelName}</Text><Text color={C.dim}>{sess.effort ? ` · ${sess.effort}` : ''}</Text></Text>))
@@ -807,10 +826,12 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const [snap, now0, sess] = await Promise.all([read($, snapA), read($, nowA), read($, sessA)])
+    const [snap, bandError, now0, sess] = await Promise.all([read($, snapA), read($, bandErrorA), read($, nowA), read($, sessA)])
     const now = now0 || Date.now()
     if (!snap) {
-      return <Text color={C.dim}>No quota-pilot snapshot found. Is the proxy plugin running?</Text>
+      return bandError
+        ? <Text color={C.orange}>{`No quota data: ${bandErrorText(bandError)}`}</Text>
+        : <Text color={C.dim}>No quota-pilot snapshot found. Is the proxy plugin running?</Text>
     }
     const acct: SessionAccount | null = sessionAccount(snap, sess.id)
     const cols = Math.max(36, e.props.bodyColumns - 1)

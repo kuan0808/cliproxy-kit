@@ -62,7 +62,7 @@ func TestTheBandOnAnotherDeviceNamesItsSession(t *testing.T) {
 		t.Fatalf("band = %d", code)
 	}
 	info := sessionMeta(id)
-	if info.Title != "Fix the login page" || info.Project != "app" || info.Path != "/Users/me/dev/app" || !info.Repo || info.Origin != "remote" {
+	if info.Title != "Fix the login page" || info.Project != "app" || info.Path != "/Users/me/dev/app" || !info.Repo || info.Origin != "" || !info.Remote {
 		t.Fatalf("remote session = %+v", info)
 	}
 	// A read that says less, as one before the band has read the title, keeps what is known.
@@ -154,15 +154,60 @@ func TestACodexSessionIsNamedByItsFirstRequest(t *testing.T) {
 	// A Claude Code request names nothing: its transcript does.
 	intercept(map[string]any{"messages": []any{map[string]string{"role": "user", "content": "hi"}}})
 
-	// A folder on a share is never looked up: the lookup would reach over the network.
-	for i, share := range []string{`\\server\share\app`, "//server/share/app", `C:\work\app`} {
+	// A folder on a share or on Windows is kept as said and never looked up (a share's lookup would
+	// reach over the network): its project is its folder.
+	for i, c := range []struct{ cwd, path string }{
+		{`\\server\share\app`, "//server/share/app"}, {"//server/share/app", "//server/share/app"}, {`C:\work\app`, "C:/work/app"},
+	} {
 		other := fmt.Sprintf("codex:019f4a1d-0000-7000-8000-00000000000%d", i)
 		noteRequestSession(other, http.Header{}, mustJSON(t, map[string]any{"input": []any{
-			text("user", "<environment_context><cwd>"+share+"</cwd></environment_context>"), text("user", "Tidy up"),
+			text("user", "<environment_context><cwd>"+c.cwd+"</cwd></environment_context>"), text("user", "Tidy up"),
 		}}), time.Now())
-		if info := sessionMeta(other); info.Path != "" || info.Title != "Tidy up" {
-			t.Fatalf("a session in %s = %+v", share, info)
+		if info := sessionMeta(other); info.Path != c.path || info.Project != "app" || info.Repo || info.Title != "Tidy up" {
+			t.Fatalf("a session in %s = %+v", c.cwd, info)
 		}
+	}
+}
+
+// A Codex session on another device runs in its folders, not this machine's: one with the same path
+// here is not looked up, and the session shows as elsewhere.
+func TestACodexSessionFromAnotherDeviceIsNotLookedUpHere(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetNamed()
+	repo := filepath.Join(t.TempDir(), "web-app")
+	os.MkdirAll(filepath.Join(repo, ".git"), 0o700)
+	os.MkdirAll(filepath.Join(repo, "src"), 0o700)
+	id := "codex:019f4a1d-0000-7000-8000-0000000000c1"
+	body := mustJSON(t, map[string]any{"input": []any{
+		map[string]any{"role": "user", "content": "<environment_context><cwd>" + filepath.Join(repo, "src") + "</cwd></environment_context>"},
+		map[string]any{"role": "user", "content": "Fix the tests"},
+	}})
+	noteRequestSession(id, http.Header{"X-Forwarded-For": {"100.64.0.9"}}, body, time.Now())
+	if info := sessionMeta(id); !info.Remote || info.Repo || info.Project != "src" {
+		t.Fatalf("a session on another device = %+v", info)
+	}
+}
+
+// What a session said lasts as long as it runs: each request notes it is still seen, written at
+// most hourly, though the session is named already.
+func TestARunningCodexSessionKeepsItsName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetNamed()
+	id := "codex:019f4a1d-0000-7000-8000-0000000000d1"
+	body := mustJSON(t, map[string]any{"input": []any{
+		map[string]any{"role": "user", "content": "<environment_context><cwd>/srv/app</cwd></environment_context>"},
+		map[string]any{"role": "user", "content": "Fix the tests"},
+	}})
+	start := time.Now()
+	noteRequestSession(id, http.Header{}, body, start)
+	noteRequestSession(id, http.Header{}, body, start.Add(time.Minute))
+	if at := namedKnown(id).At; at != start.UnixMilli() {
+		t.Fatalf("noted again within the hour: at = %d, want %d", at, start.UnixMilli())
+	}
+	later := start.Add(2 * time.Hour)
+	noteRequestSession(id, http.Header{}, body, later)
+	if got := namedKnown(id); got.At != later.UnixMilli() || got.Title != "Fix the tests" {
+		t.Fatalf("a session still running = %+v", got)
 	}
 }
 

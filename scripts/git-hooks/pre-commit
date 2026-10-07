@@ -2,14 +2,17 @@
 """Refuse a commit that carries this machine's private details, so the repository stays safe to push.
 
 Nothing private is written here: the details are read at run time from where they already live
-(the proxy's credentials and config, Codex's and Claude Code's own account files, the keychain,
-Tailscale) and matched against what is being committed, including the author's email.
+(the proxy's credentials and config, Codex's and Claude Code's own account files and the client
+keys their settings send to the proxy, the keychain, Tailscale) and matched against what is being
+committed, including the author's email. Claude Code's folder is CLAUDE_CONFIG_DIR when set, and
+Codex's is CODEX_HOME.
 
   pre-commit           check the staged lines (git runs this as the hook)
   pre-commit --all     check every tracked file and the whole history, before a first push
 
 Enabled per clone with `git config core.hooksPath scripts/git-hooks`; reading the proxy's
-configuration needs PyYAML. A false alarm can be passed with `git commit --no-verify`.
+configuration needs PyYAML, and reading Codex's needs Python 3.11. A false alarm can be passed with
+`git commit --no-verify`.
 """
 import glob
 import json
@@ -72,10 +75,14 @@ def private_details():
     keys = ('email', 'emailAddress', 'fullName', 'displayName', 'account_id', 'account_uuid', 'accountUuid',
             'organization_uuid', 'organizationUuid', 'organization_name', 'organizationName',
             'access_token', 'refresh_token', 'id_token', 'claude_device_ids')
-    for record in [load(p) for p in glob.glob(HOME + '/.cli-proxy-api/*.json')] + [
-        load('~/.codex/auth.json').get('tokens') or {},
-        load('~/.claude.json').get('oauthAccount') or {},
-    ]:
+    # Claude Code's and Codex's folders: the default ones, and those CLAUDE_CONFIG_DIR and CODEX_HOME name.
+    claude = {'~/.claude', os.environ.get('CLAUDE_CONFIG_DIR') or '~/.claude'}
+    codex = {'~/.codex', os.environ.get('CODEX_HOME') or '~/.codex'}
+    records = [load(p) for p in glob.glob(HOME + '/.cli-proxy-api/*.json')]
+    records += [load(d + '/auth.json').get('tokens') or {} for d in codex]
+    # Claude Code's .claude.json is beside its default folder, and inside one CLAUDE_CONFIG_DIR names.
+    records += [load(p).get('oauthAccount') or {} for p in ['~/.claude.json'] + [d + '/.claude.json' for d in claude]]
+    for record in records:
         for key in keys:
             value = record.get(key)
             found.update(value if isinstance(value, list) else [value] if isinstance(value, str) else [])
@@ -84,6 +91,15 @@ def private_details():
     for path in [os.environ.get('CLIPROXY_CONFIG', ''), '/opt/homebrew/etc/cliproxyapi.conf',
                  '/usr/local/etc/cliproxyapi.conf', '~/.cli-proxy-api/config.yaml', 'config.yaml']:
         found.update(config_secrets(read(path)) if path else [])
+    # The client keys Claude Code and Codex send to the proxy, which need not have a secret's shape.
+    for folder in claude:
+        found.update(secrets(load(folder + '/settings.json')))
+    for folder in codex:
+        config = toml(read(folder + '/config.toml'))
+        found.update(secrets(config))
+        # A provider's env_key names the variable its key is in: the key is that variable's value.
+        found.update(os.environ.get(name, '') for name in env_keys(config))
+    found.update(os.environ.get(name, '') for name in ('ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'))
     found.add(run('security', 'find-generic-password', '-s', 'cliproxyapi-management', '-w'))
     dns = (load_json(run('tailscale', 'status', '--json')).get('Self') or {}).get('DNSName', '')
     found.update(part for part in dns.split('.')[:2])
@@ -95,8 +111,9 @@ def private_details():
     return {v for v in found if isinstance(v, str) and len(v) >= 6 and not v.isdigit()}
 
 
-# Names whose values are secrets: api-keys, api-key, secret-key, band_tokens and the like.
-SECRET_NAME = re.compile(r'(?:key|token|secret)s?$', re.IGNORECASE)
+# Names whose values are secrets: api-keys, api-key, secret-key, band_tokens and the like; not Codex's
+# env_key, which names the variable a key is in.
+SECRET_NAME = re.compile(r'(?<!env_)(?:key|token|secret)s?$', re.IGNORECASE)
 
 
 def config_secrets(text):
@@ -106,7 +123,25 @@ def config_secrets(text):
         doc = yaml.load(text, Loader=yaml.BaseLoader) if text else None
     except yaml.YAMLError as e:
         sys.exit(f'pre-commit: cannot read the proxy configuration: {e}')
+    return secrets(doc)
 
+
+def toml(text):
+    """A TOML configuration, such as Codex's, as Codex reads it; None when there is none."""
+    if not text:
+        return None
+    try:
+        import tomllib
+    except ImportError:
+        sys.exit("pre-commit: reading Codex's configuration needs Python 3.11 or later")
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        sys.exit(f"pre-commit: cannot read Codex's configuration: {e}")
+
+
+def secrets(doc):
+    """Every string a parsed configuration keeps under a secret's name."""
     def walk(node, secret):
         if isinstance(node, dict):
             for name, value in node.items():
@@ -118,6 +153,19 @@ def config_secrets(text):
             yield node
 
     return list(walk(doc, False))
+
+
+def env_keys(doc):
+    """The variable names a parsed configuration gives under env_key, as Codex's providers do."""
+    if isinstance(doc, dict):
+        for name, value in doc.items():
+            if name == 'env_key' and isinstance(value, str):
+                yield value
+            else:
+                yield from env_keys(value)
+    elif isinstance(doc, list):
+        for value in doc:
+            yield from env_keys(value)
 
 
 def load_json(text):

@@ -1,7 +1,10 @@
-"""Checks the hook reads every secret a proxy configuration holds: python3 scripts/git-hooks/test_pre_commit.py"""
+"""Checks the hook reads every secret a proxy configuration holds, and the client keys Claude Code and
+Codex send to the proxy: python3 scripts/git-hooks/test_pre_commit.py"""
 import importlib.util
+import json
 import os
 import re
+import tempfile
 from importlib.machinery import SourceFileLoader
 
 path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pre-commit')
@@ -43,4 +46,31 @@ shapes = re.compile('|'.join(hook.SHAPES), re.IGNORECASE)
 assert shapes.search('Authorization: Bearer sk-' + 'proj-' + 'X' * 24)
 assert shapes.search('ANTHROPIC_API_KEY=sk-' + 'ant-api03-' + 'X' * 20)
 assert not shapes.search('the task-reassignment-handler-for-sessions')
+
+# Client keys of no secret's shape, kept only in Claude Code's and Codex's settings or the
+# environment, in the folders CLAUDE_CONFIG_DIR and CODEX_HOME name. Nothing of this machine is read.
+tmp = tempfile.mkdtemp()
+for folder in ('home', 'claude', 'codex'):
+    os.makedirs(os.path.join(tmp, folder))
+claude_key, codex_key, env_key, named_key = ('client-' + name + '-' + 'Q' * 10 for name in ('claude', 'codex', 'env', 'named'))
+email = 'tester' + '.' + 'x' * 3 + '@example.test'
+assert not any(shapes.search(k) for k in (claude_key, codex_key, env_key, named_key))
+with open(os.path.join(tmp, 'claude', 'settings.json'), 'w') as f:
+    json.dump({'env': {'ANTHROPIC_BASE_URL': 'http://127.0.0.1:8317', 'ANTHROPIC_AUTH_TOKEN': claude_key}}, f)
+with open(os.path.join(tmp, 'claude', '.claude.json'), 'w') as f:
+    json.dump({'oauthAccount': {'emailAddress': email}}, f)
+with open(os.path.join(tmp, 'codex', 'config.toml'), 'w') as f:
+    f.write('model_provider = "cliproxyapi"\n\n[model_providers.cliproxyapi]\n'
+            'base_url = "http://127.0.0.1:8317/v1"\n'
+            f'experimental_bearer_token = "{codex_key}"\nenv_key = "PROXY_CLIENT_KEY_VARIABLE"\n')
+os.environ.update(HOME=os.path.join(tmp, 'home'), CLAUDE_CONFIG_DIR=os.path.join(tmp, 'claude'),
+                  CODEX_HOME=os.path.join(tmp, 'codex'), ANTHROPIC_AUTH_TOKEN=env_key, CLIPROXY_CONFIG='',
+                  PROXY_CLIENT_KEY_VARIABLE=named_key)
+os.environ.pop('ANTHROPIC_API_KEY', None)
+hook.HOME = os.environ['HOME']
+hook.run = lambda *cmd: ''  # no keychain, no Tailscale
+details = hook.private_details()
+assert {claude_key, codex_key, env_key, named_key, email} <= details, 'a client key or account was missed'
+assert 'PROXY_CLIENT_KEY_VARIABLE' not in details, "Codex's env_key names a variable: its value is the key"
+assert hook.toml('') is None
 print('ok')

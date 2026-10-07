@@ -174,15 +174,17 @@ export function sessionLabel(t: TFunction, id: string, title: string) {
 }
 
 /**
- * Where a session came from, when not from Claude Code run on this machine: a program, another
- * device, or another app. `key` names an app (its tag) or explains a program or a device (its
- * detail); `raw` keeps an origin this page does not know, shown as given.
+ * One thing a session's tags say, when it is not Claude Code a person ran on this machine: it ran
+ * on another device, a program ran it, or another app. `key` names an app (its tag) or explains a
+ * program or a device (its detail); `raw` keeps an origin this page does not know, shown as given.
  */
 export interface SessionSource {
   kind: 'auto' | 'device' | 'app';
   key: string;
   raw?: string;
 }
+
+const DEVICE: SessionSource = { kind: 'device', key: 'why_remote' };
 
 const SOURCES: Record<string, SessionSource> = {
   // Run by a program: one tag for all, and the session's detail says which.
@@ -191,8 +193,6 @@ const SOURCES: Record<string, SessionSource> = {
   'sdk-cli': { kind: 'auto', key: 'why_print' },
   codex_exec: { kind: 'auto', key: 'why_codex_exec' },
   'Claude Code': { kind: 'auto', key: 'why_claude_code' },
-  // On another device, named by the band there.
-  remote: { kind: 'device', key: 'why_remote' },
   // Opened by a person in another app.
   'claude-desktop': { kind: 'app', key: 'origin_claude_desktop' },
   'codex-tui': { kind: 'app', key: 'origin_codex_cli' },
@@ -201,16 +201,20 @@ const SOURCES: Record<string, SessionSource> = {
 };
 
 /**
- * A session's source; null for Claude Code run on this machine, which carries no tag. In a Codex
- * view, Claude Code run by a person reached Codex through the proxy, and says so; a program's run
- * and another app keep their own tag.
+ * A session's tags: where it ran (another device), then what ran it; none for Claude Code a person
+ * ran on this machine. In a Codex view, Claude Code run by a person reached Codex through the
+ * proxy, and says so; a program's run and another app keep their own tag.
  */
-export function sessionSource(origin: string, onCodex: boolean): SessionSource | null {
-  if (!origin) return onCodex ? { kind: 'app', key: 'origin_proxy' } : null;
-  return SOURCES[origin] ?? { kind: 'app', key: '', raw: origin };
+export function sessionSources(origin: string, onCodex: boolean, remote = false): SessionSource[] {
+  const app: SessionSource | null = origin
+    ? (SOURCES[origin] ?? { kind: 'app', key: '', raw: origin })
+    : onCodex
+      ? { kind: 'app', key: 'origin_proxy' }
+      : null;
+  return [...(remote ? [DEVICE] : []), ...(app ? [app] : [])];
 }
 
-/** A source's tag: "Automated", "Other device", or the app's name. */
+/** A tag's text: "Automated", "Other device", or the app's name. */
 export function sourceTag(t: TFunction, source: SessionSource): string {
   if (source.kind === 'auto') return t('quota_usage.source_auto');
   if (source.kind === 'device') return t('quota_usage.source_device');
@@ -222,16 +226,16 @@ export function sourceWhy(t: TFunction, source: SessionSource): string {
   return source.kind === 'app' ? '' : t(`quota_usage.${source.key}`);
 }
 
-// Sessions that read the same tag count as one source: every program run is "Automated".
-const tagOf = (source: SessionSource | null) =>
-  source === null ? '' : source.kind === 'app' ? `app:${source.raw ?? source.key}` : source.kind;
+// Sessions whose tags read the same count as one source: every program run is "Automated".
+const tagsOf = (sources: SessionSource[]) =>
+  sources.map((s) => (s.kind === 'app' ? `app:${s.raw ?? s.key}` : s.kind)).join('+');
 
 export interface ProjectSources {
   /** Sessions, not counting the requests that came without one. */
   sessions: number;
-  /** Each tag the sessions carry, with how many, most first; none for Claude Code run here. */
-  sources: { source: SessionSource; count: number }[];
-  /** Every session carries the one tag listed: it is said for the project, not on each row. */
+  /** Each set of tags the sessions carry, with how many, most first; none for Claude Code run here. */
+  sources: { source: SessionSource[]; count: number }[];
+  /** Every session carries the one set of tags listed: it is said for the project, not on each row. */
   shared: boolean;
   /** Some requests came without a session. */
   none: boolean;
@@ -243,18 +247,18 @@ export interface ProjectSources {
  */
 export function projectSources<S extends { id: string }>(
   sessions: S[],
-  sourceOf: (session: S) => SessionSource | null
+  sourcesOf: (session: S) => SessionSource[]
 ): ProjectSources {
-  const counts = new Map<string, { source: SessionSource | null; count: number }>();
+  const counts = new Map<string, { source: SessionSource[]; count: number }>();
   for (const session of sessions) {
     if (session.id === '') continue;
-    const source = sourceOf(session);
-    const entry = counts.get(tagOf(source));
+    const source = sourcesOf(session);
+    const entry = counts.get(tagsOf(source));
     if (entry) entry.count += 1;
-    else counts.set(tagOf(source), { source, count: 1 });
+    else counts.set(tagsOf(source), { source, count: 1 });
   }
   const sources = [...counts.values()]
-    .filter((c): c is { source: SessionSource; count: number } => c.source !== null)
+    .filter((c) => c.source.length > 0)
     .sort((a, b) => b.count - a.count);
   return {
     sessions: [...counts.values()].reduce((sum, c) => sum + c.count, 0),
@@ -264,19 +268,34 @@ export function projectSources<S extends { id: string }>(
   };
 }
 
+/** Whether a session's tags say a program ran it. */
+export const isAutomated = (sources: SessionSource[]) => sources.some((s) => s.kind === 'auto');
+
 /**
  * A project's sessions as its rows list them. Two or more run by programs beside sessions a person
  * ran gather under one row, so those are not lost among them.
  */
 export function splitAutomated<S extends { id: string }>(
   sessions: S[],
-  sourceOf: (session: S) => SessionSource | null
+  sourcesOf: (session: S) => SessionSource[]
 ): { listed: S[]; automated: S[] } {
-  const automated = sessions.filter((s) => s.id !== '' && sourceOf(s)?.kind === 'auto');
+  const automated = sessions.filter((s) => s.id !== '' && isAutomated(sourcesOf(s)));
   const listed = sessions.filter((s) => !automated.includes(s));
   return automated.length >= 2 && listed.some((s) => s.id !== '')
     ? { listed, automated }
     : { listed: sessions, automated: [] };
+}
+
+/**
+ * Which token counts the providers report for cache writes: all, some (Codex reports none, so a
+ * mix counts only the others'), or none.
+ */
+export type CacheWrites = 'all' | 'some' | 'none';
+
+export function cacheWritesOf(providers: Iterable<string>): CacheWrites {
+  const list = [...new Set(providers)];
+  const codex = list.filter((p) => p === 'codex').length;
+  return codex === 0 ? 'all' : codex === list.length ? 'none' : 'some';
 }
 
 /** The earliest time the log began to see any of these accounts. */

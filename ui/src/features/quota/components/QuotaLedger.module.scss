@@ -426,7 +426,7 @@ $track: color-mix(in srgb, var(--text-primary) 9%, transparent);
 
 /* ---------- narrow: overview columns stack, rows fold ---------- */
 
-@container ledger (max-width: 720px) {
+@mixin folded {
   .row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     row-gap: 14px;
@@ -446,5 +446,19 @@ $track: color-mix(in srgb, var(--text-primary) 9%, transparent);
 
   .meterEmpty {
     display: none;
+  }
+}
+
+@container ledger (max-width: 720px) {
+  @include folded;
+}
+
+// A row needs its account column, each window's and the routing column (see .row): with more
+// windows it folds while the ledger is wider.
+@each $kinds in 2, 3, 4, 5, 6 {
+  @container ledger (max-width: #{300px + $kinds * 140px + 150px + ($kinds + 1) * $gutter - 1px}) {
+    .rows[data-kinds='#{$kinds}'] {
+      @include folded;
+    }
   }
 }

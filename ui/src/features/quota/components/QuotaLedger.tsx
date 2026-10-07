@@ -23,6 +23,7 @@ import {
 } from '@/utils/providers';
 import type { QuotaTabId } from '../constants';
 import {
+  accountRows,
   buildLedger,
   maskFileName,
   reasonKey,
@@ -98,7 +99,7 @@ export function QuotaLedgerView({
     () => (live ? buildLedger(live, tab, search, now) : { kinds: [], groups: [] }),
     [live, tab, search, now]
   );
-  const identityOf = (row: LedgerRow) =>
+  const identityOf = (row: Pick<LedgerRow, 'fileName' | 'email'>) =>
     showEmails ? row.fileName : maskFileName(row.fileName, row.email);
 
   return (
@@ -247,13 +248,14 @@ interface ProviderSummaryProps {
   now: number;
   locale?: string;
   resolvedTheme: ResolvedTheme;
-  identityOf: (row: LedgerRow) => string;
+  identityOf: (row: Pick<LedgerRow, 'fileName' | 'email'>) => string;
 }
 
 /** One column of the overview: the weekly pool, one segment per account, the next reset. */
 function ProviderSummary({ group, now, locale, resolvedTheme, identityOf }: ProviderSummaryProps) {
   const { t } = useTranslation();
-  const segments = group.rows.map((row) => ({ row, weekly: weeklyWindowOf(row) }));
+  // One segment per provider account, as the pool counts them.
+  const segments = accountRows(group.rows).map((row) => ({ row, weekly: weeklyWindowOf(row) }));
   const segmentsLabel = `${t('quota_ledger.pool_segments')}: ${segments
     .map(({ row, weekly }) => `${identityOf(row)} ${weekly ? `${usedOf(weekly.remaining)}%` : '–'}`)
     .join(', ')}`;
@@ -275,13 +277,18 @@ function ProviderSummary({ group, now, locale, resolvedTheme, identityOf }: Prov
       </div>
       <span className={styles.caption}>{t('quota_ledger.pool_used')}</span>
       <div className={styles.big}>
-        <span className={styles.bigValue}>
-          {group.pool ? `${group.pool.capacity - group.pool.remaining}%` : '--'}
-        </span>
+        <span className={styles.bigValue}>{group.pool ? `${group.pool.used}%` : '--'}</span>
         <span className={styles.bigOf}>
           {t('quota_ledger.of_capacity', { capacity: group.pool?.capacity ?? 100 })}
         </span>
       </div>
+      {group.pool && group.pool.unread.length > 0 && (
+        <span className={styles.muted}>
+          {t('quota_ledger.pool_unread', {
+            list: group.pool.unread.map(identityOf).join(', '),
+          })}
+        </span>
+      )}
       <div className={styles.segments} role="img" aria-label={segmentsLabel}>
         {segments.map(({ row, weekly }) => (
           <span key={row.key} className={styles.segment} title={`${identityOf(row)} ${weekly ? `${usedOf(weekly.remaining)}%` : '–'}`}>
@@ -300,7 +307,7 @@ function ProviderSummary({ group, now, locale, resolvedTheme, identityOf }: Prov
         <div className={styles.summaryFoot}>
           <span className={styles.muted}>{t('quota_ledger.five_used')}</span>
           <span className={styles.footPool}>
-            {group.fiveHour.capacity - group.fiveHour.remaining}%
+            {group.fiveHour.used}%
             <span className={styles.bigOf}>
               {t('quota_ledger.of_capacity', { capacity: group.fiveHour.capacity })}
             </span>
@@ -316,7 +323,7 @@ interface ProviderSectionProps {
   kinds: string[];
   now: number;
   locale?: string;
-  identityOf: (row: LedgerRow) => string;
+  identityOf: (row: Pick<LedgerRow, 'fileName' | 'email'>) => string;
 }
 
 function ProviderSection({ group, kinds, now, locale, identityOf }: ProviderSectionProps) {
@@ -325,13 +332,14 @@ function ProviderSection({ group, kinds, now, locale, identityOf }: ProviderSect
   const style = { '--ledger-kinds': Math.max(1, kinds.length) } as CSSProperties;
   // Kinds some account of this provider reports: another account missing one says so.
   const groupKinds = new Set(group.rows.flatMap((row) => row.windows.map((window) => window.kind)));
+
   return (
     <section className={styles.group} aria-label={providerName}>
       <h3 className={styles.groupTitle}>
         {providerName}
         <span className={styles.groupCount}>{group.rows.length}</span>
       </h3>
-      <ol className={styles.rows} role="list" style={style}>
+      <ol className={styles.rows} role="list" style={style} data-kinds={Math.max(1, kinds.length)}>
         {group.rows.map((row) => (
           <LedgerRowItem
             key={row.key}
@@ -342,6 +350,7 @@ function ProviderSection({ group, kinds, now, locale, identityOf }: ProviderSect
             now={now}
             locale={locale}
             identity={identityOf(row)}
+            sameAs={row.twin ? identityOf(row.twin) : ''}
           />
         ))}
       </ol>
@@ -364,9 +373,11 @@ interface LedgerRowItemProps {
   now: number;
   locale?: string;
   identity: string;
+  /** The credential of the same provider account as shown, '' for none. */
+  sameAs: string;
 }
 
-function LedgerRowItem({ row, kinds, groupKinds, soleAccount, now, locale, identity }: LedgerRowItemProps) {
+function LedgerRowItem({ row, kinds, groupKinds, soleAccount, now, locale, identity, sameAs }: LedgerRowItemProps) {
   const { t } = useTranslation();
   const reason = reasonText(row.reason, t);
 
@@ -380,6 +391,11 @@ function LedgerRowItem({ row, kinds, groupKinds, soleAccount, now, locale, ident
           {identity}
         </span>
         {row.plan && <span className={styles.plan}>{row.plan}</span>}
+        {sameAs && (
+          <span className={styles.plan} title={sameAs}>
+            {t('quota_ledger.same_as', { account: sameAs })}
+          </span>
+        )}
       </div>
 
       <div className={styles.meters}>
@@ -388,6 +404,7 @@ function LedgerRowItem({ row, kinds, groupKinds, soleAccount, now, locale, ident
           if (quotaWindow) {
             return <LedgerMeter key={kind} quotaWindow={quotaWindow} now={now} locale={locale} />;
           }
+          // A window another account of the provider has: this one has none, or it was not read.
           return groupKinds.has(kind) ? (
             <div key={kind} className={styles.meter} data-missing="true">
               <div className={styles.meterHead}>
@@ -395,7 +412,9 @@ function LedgerRowItem({ row, kinds, groupKinds, soleAccount, now, locale, ident
                 <span className={styles.meterValue}>—</span>
               </div>
               <div className={styles.track} aria-hidden="true" />
-              <span className={styles.meterReset}>{t('quota_ledger.not_reported')}</span>
+              <span className={styles.meterReset}>
+                {row.absent.includes(kind) ? t('quota_ledger.no_window') : t('quota_ledger.not_reported')}
+              </span>
             </div>
           ) : (
             <span key={kind} className={styles.meterEmpty} aria-hidden="true" />

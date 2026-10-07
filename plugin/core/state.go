@@ -3,6 +3,7 @@
 package core
 
 import (
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -75,6 +76,9 @@ type Cred struct {
 	Unavailable    bool
 	NextRetryAfter time.Time
 	Windows        map[string]Window
+	// Absent holds the window kinds the provider's last full reading said the account does not
+	// have, apart from those not read yet.
+	Absent map[string]bool
 	// Plan is the subscription, e.g. Max 20x or Pro 200; "" until a poll has read it.
 	Plan string
 	// refusedAt is when the account last turned a request away while read as used up; a request
@@ -83,6 +87,10 @@ type Cred struct {
 	// startedOver is when a window's use last fell back without a new period: what a plan change
 	// does, so the plan is read again. In memory only.
 	startedOver time.Time
+	// tracks apply the window rules (window.go) to each window kind's readings, and planAt is when
+	// the plan last changed. In memory only: after a restart they start from the windows kept.
+	tracks map[string]*track[Window]
+	planAt time.Time
 }
 
 // CredInfo is the inventory the host reports for a credential.
@@ -98,6 +106,9 @@ type Binding struct {
 	AuthID   string    `json:"auth_id"`
 	Reason   string    `json:"reason"`
 	LastUsed time.Time `json:"last_used"`
+	// At is when the request that set it was sent: a request sent earlier that answers later
+	// cannot take the binding back.
+	At time.Time `json:"at,omitzero"`
 }
 
 // Route is a per-session cross-provider override written by the band.
@@ -124,7 +135,7 @@ type Usage struct {
 	CacheRead      int64
 	CacheCreation  int64
 	ResponseHeader http.Header
-	TierAsked      string // the service tier the client asked for; "" for none
+	TierAsked      string // the service tier the client asked for, as the host read it; "auto" for none
 	TierServed     string // the service tier the provider reported serving it at; "" when it did not say
 }
 
@@ -174,9 +185,11 @@ type State struct {
 	// traces describe inbound requests by id until their usage record arrives, so the record can
 	// tell a conversation turn from a side request of the same session.
 	traces map[string]trace
-	// displaced holds the binding keys whose account was not offered at the last pick: the
-	// account is unavailable, so the next success elsewhere takes the binding over.
-	displaced    map[string]bool
+	// displaced holds, by binding key, the models for which the bound account was not offered at
+	// the last pick: it cannot serve them, so the next success of that model elsewhere takes the
+	// binding over. By model, as a request beside the conversation on another model may still be
+	// served there.
+	displaced    map[string]map[string]bool
 	log          []LogEntry // usage log lines not yet written to disk
 	acks         []Ack
 	lastActivity time.Time
@@ -185,6 +198,11 @@ type State struct {
 	// inventoryLoaded is false until the host's credential list arrived; until then a
 	// provider is never reported as used up, because unseen credentials may still serve.
 	inventoryLoaded bool
+	// inventoryAt is when the host's list was last read: an automatic takeover, which acts on every
+	// account of a provider being used up, waits for a fresh one.
+	inventoryAt time.Time
+	// identities name the provider account behind each credential read, kept past its removal.
+	identities map[string]Identity
 }
 
 // New creates an empty state. now may be nil for the wall clock.
@@ -193,15 +211,16 @@ func New(bootID string, now func() time.Time) *State {
 		now = time.Now
 	}
 	return &State{
-		cfg:       Config{}.Normalized(),
-		now:       now,
-		bootID:    bootID,
-		creds:     map[string]*Cred{},
-		bindings:  map[string]*Binding{},
-		sessions:  map[string]*session{},
-		routes:    map[string]Route{},
-		traces:    map[string]trace{},
-		displaced: map[string]bool{},
+		cfg:        Config{}.Normalized(),
+		now:        now,
+		bootID:     bootID,
+		creds:      map[string]*Cred{},
+		bindings:   map[string]*Binding{},
+		sessions:   map[string]*session{},
+		routes:     map[string]Route{},
+		traces:     map[string]trace{},
+		displaced:  map[string]map[string]bool{},
+		identities: map[string]Identity{},
 	}
 }
 
@@ -260,6 +279,68 @@ type Persisted struct {
 	// leave routing, the band and the report without it until the next reading: a used-up account
 	// stays out of new sessions, and a reading grown old counts as stale as it would have.
 	Accounts map[string]SavedAccount `json:"accounts,omitempty"`
+	// Identities name the provider account behind each credential read, removed ones included, so
+	// the report counts an account logged in again under a new credential as one account.
+	Identities map[string]Identity `json:"identities,omitempty"`
+}
+
+// Identity is the provider account a credential logs in to, and when that was last read.
+type Identity struct {
+	Account string    `json:"account"`
+	Seen    time.Time `json:"seen"`
+}
+
+// identityTTL is how long the identity of a credential no longer read is kept: as long as the log.
+const identityTTL = 100 * 24 * time.Hour
+
+// SetIdentity records the provider account a credential logs in to.
+func (s *State) SetIdentity(authID, account string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if authID == "" || account == "" {
+		return
+	}
+	s.identities[authID] = Identity{Account: account, Seen: s.now()}
+	s.dirty = true
+}
+
+// Canonical maps each credential that logs in to the same provider account as another to the one
+// the report counts that account under: the credential the host holds, enabled before disabled,
+// else the one read last. A credential with no other for its account is left out.
+func (s *State) Canonical() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.canonicalLocked()
+}
+
+func (s *State) canonicalLocked() map[string]string {
+	byAccount := map[string][]string{}
+	for id, ident := range s.identities {
+		byAccount[ident.Account] = append(byAccount[ident.Account], id)
+	}
+	out := map[string]string{}
+	for _, ids := range byAccount {
+		if len(ids) < 2 {
+			continue
+		}
+		sort.Slice(ids, func(i, j int) bool {
+			a, b := ids[i], ids[j]
+			if ha, hb := s.creds[a] != nil, s.creds[b] != nil; ha != hb {
+				return ha
+			}
+			if ea, eb := s.creds[a] != nil && !s.creds[a].Disabled, s.creds[b] != nil && !s.creds[b].Disabled; ea != eb {
+				return ea
+			}
+			if sa, sb := s.identities[a].Seen, s.identities[b].Seen; !sa.Equal(sb) {
+				return sa.After(sb)
+			}
+			return a < b
+		})
+		for _, id := range ids[1:] {
+			out[id] = ids[0]
+		}
+	}
+	return out
 }
 
 // SavedAccount is the part of an account kept across restarts. The host's inventory, read again
@@ -269,6 +350,7 @@ type SavedAccount struct {
 	Email    string            `json:"email,omitempty"`
 	Plan     string            `json:"plan,omitempty"`
 	Windows  map[string]Window `json:"windows,omitempty"`
+	Absent   []string          `json:"absent,omitempty"`
 }
 
 // SavedSession is the part of a session kept across restarts.
@@ -299,14 +381,23 @@ func (s *State) Export() Persisted {
 			RequestedModel: sess.RequestedModel, LastMainAt: sess.LastMainAt, LastSeen: sess.LastSeen, LastSwitch: sess.LastSwitch}
 	}
 	for id, c := range s.creds {
-		if len(c.Windows) == 0 && c.Plan == "" {
+		if len(c.Windows) == 0 && len(c.Absent) == 0 && c.Plan == "" {
 			continue
 		}
 		windows := make(map[string]Window, len(c.Windows))
 		for kind, w := range c.Windows {
 			windows[kind] = w
 		}
-		p.Accounts[id] = SavedAccount{Provider: c.Provider, Email: c.Email, Plan: c.Plan, Windows: windows}
+		var absent []string
+		for kind := range c.Absent {
+			absent = append(absent, kind)
+		}
+		sort.Strings(absent)
+		p.Accounts[id] = SavedAccount{Provider: c.Provider, Email: c.Email, Plan: c.Plan, Windows: windows, Absent: absent}
+	}
+	p.Identities = map[string]Identity{}
+	for id, ident := range s.identities {
+		p.Identities[id] = ident
 	}
 	return p
 }
@@ -335,6 +426,11 @@ func (s *State) Import(p Persisted) {
 				RequestedModel: saved.RequestedModel, LastMainAt: saved.LastMainAt, LastSeen: saved.LastSeen, LastSwitch: saved.LastSwitch}
 		}
 	}
+	for id, ident := range p.Identities {
+		if ident.Account != "" && now.Sub(ident.Seen) <= identityTTL {
+			s.identities[id] = ident
+		}
+	}
 	for id, saved := range p.Accounts {
 		if id == "" || !Supported(saved.Provider) {
 			continue
@@ -349,10 +445,22 @@ func (s *State) Import(p Persisted) {
 		windows := make([]Window, 0, len(saved.Windows))
 		for kind, w := range saved.Windows {
 			w.Kind = kind
+			// A reading dated ahead of the clock (the clock was set back since) is not trusted as
+			// fresh: a reading taken now replaces it.
+			if w.ObservedAt.After(now.Add(time.Minute)) {
+				w.ObservedAt = time.Time{}
+			}
 			windows = append(windows, w)
 		}
-		// A reading taken since the start stays: merging keeps the newer one.
 		s.mergeWindowsLocked(id, saved.Provider, windows)
+		for _, kind := range saved.Absent {
+			if _, read := c.Windows[kind]; !read {
+				if c.Absent == nil {
+					c.Absent = map[string]bool{}
+				}
+				c.Absent[kind] = true
+			}
+		}
 	}
 	s.dirty = true
 }
@@ -406,8 +514,17 @@ func (s *State) UpdateInventory(list []CredInfo) {
 			delete(s.creds, id)
 		}
 	}
-	s.inventoryLoaded = true
+	s.inventoryLoaded, s.inventoryAt = true, s.now()
 	s.dirty = true
+}
+
+// memberLocked is the account the host holds under id; nil once the host's list, read, does not
+// name it: a late record of a removed account is history, not an account again.
+func (s *State) memberLocked(id, provider string) *Cred {
+	if id == "" || s.inventoryLoaded && s.creds[id] == nil {
+		return nil
+	}
+	return s.credLocked(id, provider)
 }
 
 func (s *State) credLocked(id, provider string) *Cred {
@@ -429,7 +546,14 @@ func (s *State) SetPlan(authID, provider, plan string) {
 	if authID == "" || plan == "" {
 		return
 	}
-	if c := s.credLocked(authID, provider); c.Plan != plan {
+	if c := s.memberLocked(authID, provider); c != nil && c.Plan != plan {
+		if c.Plan != "" {
+			// A plan change can start the windows over by any amount: the log says when, for the
+			// report's walk.
+			now := s.now()
+			c.planChanged(now)
+			s.log = append(s.log, LogEntry{T: now.UnixMilli(), Account: authID, Provider: strings.ToLower(provider), Poll: true, Plan: plan})
+		}
 		c.Plan = plan
 		s.dirty = true
 	}
@@ -439,6 +563,7 @@ func (s *State) SetPlan(authID, provider, plan string) {
 type AccountInfo struct {
 	ID       string    `json:"id"`
 	Label    string    `json:"label"`
+	Email    string    `json:"-"` // for naming it apart from the others; never sent
 	Plan     string    `json:"plan,omitempty"`
 	Provider string    `json:"provider"`
 	ResetAt  time.Time `json:"reset_at"` // end of the current weekly window; zero when unknown
@@ -453,20 +578,21 @@ func (s *State) Account(authID string) (AccountInfo, bool) {
 		return AccountInfo{}, false
 	}
 	_, reset, _, _ := s.effective(c, KindWeekly, s.now())
-	return AccountInfo{ID: c.ID, Label: MaskEmail(c.Email), Plan: c.Plan, Provider: c.Provider, ResetAt: reset}, true
+	return AccountInfo{ID: c.ID, Label: s.labelsLocked()[c.ID], Email: c.Email, Plan: c.Plan, Provider: c.Provider, ResetAt: reset}, true
 }
 
-// FiveHour tells when an account's 5-hour window resets, zero when none runs or it is not known,
-// and whether the account has a 5-hour window at all (a Codex account may have only a weekly one).
-func (s *State) FiveHour(authID string) (reset time.Time, present bool) {
+// FiveHour tells when an account's 5-hour window resets, zero when none runs or it is not known;
+// whether a reading of it is in force; and whether the provider said the account has none (a Codex
+// plan with a weekly window only).
+func (s *State) FiveHour(authID string) (reset time.Time, present, absent bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.creds[authID]
 	if c == nil {
-		return time.Time{}, false
+		return time.Time{}, false, false
 	}
 	_, reset, present, _ = s.effective(c, KindFiveHour, s.now())
-	return reset, present
+	return reset, present, c.Absent[KindFiveHour]
 }
 
 // Accounts lists a provider's credentials for the usage view, by id.
@@ -499,11 +625,31 @@ func (s *State) Plan(authID string) string {
 	return ""
 }
 
-// MergeWindows stores observed windows for a credential; newer observations win.
+// MergeWindows stores windows a provider reported in part (response headers) by the window rules.
 func (s *State) MergeWindows(authID, provider string, windows []Window) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mergeWindowsLocked(authID, provider, windows)
+	s.logReadingLocked(authID, provider, windows)
+}
+
+// MergePoll stores a full reading of the provider's usage endpoint: the windows it names, and the
+// absence of those it does not.
+func (s *State) MergePoll(authID, provider string, windows []Window) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if authID == "" {
+		return
+	}
+	s.mergeWindowsLocked(authID, provider, windows)
+	if c := s.memberLocked(authID, provider); c != nil {
+		c.absentAfter(windows)
+		s.dirty = true
+	}
+	s.logReadingLocked(authID, provider, windows)
+}
+
+func (s *State) logReadingLocked(authID, provider string, windows []Window) {
 	if r, ok := readingOf(windows); authID != "" && ok {
 		r.T, r.Account, r.Provider, r.Poll = s.now().UnixMilli(), authID, strings.ToLower(provider), true
 		s.log = append(s.log, r)
@@ -511,25 +657,12 @@ func (s *State) MergeWindows(authID, provider string, windows []Window) {
 }
 
 func (s *State) mergeWindowsLocked(authID, provider string, windows []Window) {
-	if authID == "" || len(windows) == 0 {
+	c := s.memberLocked(authID, provider)
+	if c == nil || len(windows) == 0 {
 		return
 	}
-	c := s.credLocked(authID, provider)
 	for _, w := range windows {
-		old, ok := c.Windows[w.Kind]
-		if ok && old.ObservedAt.After(w.ObservedAt) {
-			continue
-		}
-		// Within one period use only grows. The usage endpoint and the response headers can
-		// trail each other by a step, so the newer reading is not always the higher one.
-		if ok && samePeriod(old.ResetAt, w.ResetAt) && w.Remaining > old.Remaining {
-			if w.Remaining-old.Remaining <= resetDrop {
-				w.Remaining = old.Remaining
-			} else {
-				c.startedOver = w.ObservedAt
-			}
-		}
-		c.Windows[w.Kind] = w
+		c.observe(w)
 	}
 	s.dirty = true
 }
@@ -543,15 +676,6 @@ func (s *State) StartedOver(authID string) time.Time {
 		return c.startedOver
 	}
 	return time.Time{}
-}
-
-// samePeriod reports whether two readings end at the same reset; sources round it differently.
-func samePeriod(a, b time.Time) bool {
-	if a.IsZero() || b.IsZero() {
-		return false
-	}
-	d := a.Sub(b)
-	return d > -10*time.Minute && d < 10*time.Minute
 }
 
 // Observe records one upstream usage record.
@@ -573,11 +697,16 @@ func (s *State) Observe(u Usage) {
 		}
 	}
 	supported := Supported(provider)
+	// What the client asked, as Intercept saw it; kept until the request succeeds, as each
+	// upstream attempt reports apart.
+	tr, known := s.traces[u.TraceID]
+	if !u.Failed {
+		delete(s.traces, u.TraceID)
+	}
 	if u.AuthID != "" {
 		var windows []Window
 		if supported {
-			c := s.credLocked(u.AuthID, provider)
-			if u.AuthIndex != "" {
+			if c := s.memberLocked(u.AuthID, provider); c != nil && u.AuthIndex != "" {
 				c.Index = u.AuthIndex
 			}
 			windows = WindowsFromHeaders(provider, u.ResponseHeader, at)
@@ -592,7 +721,9 @@ func (s *State) Observe(u Usage) {
 			switch {
 			case !u.Failed || ran:
 				c.refusedAt = time.Time{}
-			case s.classifyLocked(c, u.Model, now).Blocked:
+			case u.StatusCode == http.StatusTooManyRequests && s.classifyLocked(c, u.Model, now).Blocked:
+				// Turned away for quota: a request-scoped failure (a lost thread, a bad request, a
+				// cancel) says nothing of the account.
 				c.refusedAt = at
 			}
 		}
@@ -604,6 +735,9 @@ func (s *State) Observe(u Usage) {
 			root := RootSession(u.SessionID, u.ParentID)
 			r.Session, r.Agent = RawSession(root), u.SessionID != "" && u.SessionID != root
 			r.Model, r.TierAsked, r.TierServed = u.Model, u.TierAsked, u.TierServed
+			if known {
+				r.TierAsked, r.Remote = tr.Tier, tr.Remote
+			}
 			r.Input = freshInput(provider, u.Input, u.CacheRead, u.CacheCreation)
 			r.Output, r.CacheRead, r.CacheWrite = u.Output, u.CacheRead, u.CacheCreation
 			s.log = append(s.log, r)
@@ -617,10 +751,8 @@ func (s *State) Observe(u Usage) {
 	if u.Failed || u.AuthID == "" {
 		return
 	}
-	tr, known := s.traces[u.TraceID]
-	delete(s.traces, u.TraceID)
 	if supported {
-		s.commitLocked(provider, u.SessionID, root, u.AuthID, tr.Thread, known && tr.Side, now)
+		s.commitLocked(provider, u.SessionID, root, u.AuthID, u.Model, tr.Thread, known && tr.Side, at, now)
 	}
 	if u.SessionID != root || at.Before(sess.LastMainAt) || (known && tr.Side) {
 		return // a subagent, a fork, a side request, or a late record from an older request
@@ -650,29 +782,45 @@ func (s *State) Observe(u Usage) {
 // bound account stopped being offered. A side request (a permission check, a title) only binds a
 // thread that has no account yet: it may run on a smaller model whose limits say nothing about
 // where the conversation fits. A subagent without a thread of its own keeps following its parent.
-func (s *State) commitLocked(provider, canonical, root, authID string, threaded, side bool, now time.Time) {
+func (s *State) commitLocked(provider, canonical, root, authID, model string, threaded, side bool, at, now time.Time) {
 	key := provider + "|" + canonical
 	b := s.bindings[key]
-	moved := threaded || (s.displaced[key] && !side)
+	displaced := s.displaced[key][modelKey(model)]
+	moved := threaded || (displaced && !side)
 	switch {
 	case b != nil && b.AuthID == authID:
+		// A later request served here: one sent before it, answered late elsewhere, is older news.
 		b.LastUsed = now
-		delete(s.displaced, key)
+		if at.After(b.At) {
+			b.At = at
+		}
+		delete(s.displaced[key], modelKey(model))
 		return
-	case b != nil && !moved, b != nil && b.Reason == switchedReason && !s.displaced[key]:
+	case b != nil && at.Before(b.At):
+		return // sent before the binding was set: it says nothing of where the thread lives now
+	case b != nil && !moved, b != nil && b.Reason == switchedReason && !displaced:
 		// A late success elsewhere, a thread on the old account answering after the user switched,
 		// leaves the account the user chose: it moves only once that one stops being offered.
 		return
 	case b == nil && canonical != root && !threaded:
 		return
 	}
-	delete(s.displaced, key)
-	reason := s.classifyLocked(s.creds[authID], "", now).Reason
+	delete(s.displaced[key], modelKey(model))
+	reason := s.classifyLocked(s.creds[authID], model, now).Reason
 	if b != nil {
 		reason = "previous account unavailable; " + reason
 	}
-	s.bindings[key] = &Binding{AuthID: authID, Reason: reason, LastUsed: now}
+	s.bindings[key] = &Binding{AuthID: authID, Reason: reason, LastUsed: now, At: at}
 	s.dirty = true
+}
+
+// modelKey is a model as a pick and its usage record both name it: without a context or thinking
+// suffix ("[1m]", "(high)"), which one may carry and the other not.
+func modelKey(model string) string {
+	if i := strings.IndexAny(model, "[("); i >= 0 {
+		model = model[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(model))
 }
 
 func (s *State) sessionLocked(root string, now time.Time) *session {
@@ -731,12 +879,12 @@ func (s *State) Pick(in PickInput) PickResult {
 	root := RootSession(in.Canonical, in.Parent)
 	s.sessionLocked(root, now)
 	key, b := s.boundLocked(pickProviders(in), in.Canonical, root)
-	best := s.rankLocked(in.Candidates, in.Model, now)[0]
+	best := s.rankLocked(in.Candidates, in.Model, now, true)[0]
 	bound := b != nil && offered[b.AuthID]
 	refused := bound && s.refusedLocked(b, best, in.Model, now)
 	if bound && !refused && !s.moveIdleLocked(b, best, in.Model, now) {
 		b.LastUsed = now
-		delete(s.displaced, key)
+		delete(s.displaced[key], modelKey(in.Model))
 		return PickResult{Handled: true, AuthID: b.AuthID, Reason: b.Reason}
 	}
 	reason := best.Reason
@@ -747,7 +895,10 @@ func (s *State) Pick(in PickInput) PickResult {
 		reason = "moved while idle; " + reason
 	}
 	if b != nil {
-		s.displaced[key] = true
+		if s.displaced[key] == nil {
+			s.displaced[key] = map[string]bool{}
+		}
+		s.displaced[key][modelKey(in.Model)] = true
 	}
 	return PickResult{Handled: true, AuthID: best.ID, Reason: reason}
 }
@@ -758,7 +909,7 @@ func (s *State) Pick(in PickInput) PickResult {
 // once. It holds for a session the user switched too: the account cannot serve it.
 func (s *State) refusedLocked(b *Binding, best Ranked, model string, now time.Time) bool {
 	c := s.creds[b.AuthID]
-	if c == nil || c.refusedAt.IsZero() || best.Tier != 1 || best.ID == b.AuthID {
+	if c == nil || c.refusedAt.IsZero() || best.Blocked || best.ID == b.AuthID {
 		return false
 	}
 	return s.classifyLocked(c, model, now).Blocked
@@ -821,16 +972,22 @@ type Ranked struct {
 	reset   time.Time
 }
 
-func (s *State) rankLocked(cands []Candidate, model string, now time.Time) []Ranked {
+// rankLocked orders candidates for a model: by tier, an account that can serve before one that
+// cannot, the soonest reset among the ready. offered says the host offered them for this model, so
+// a cooldown it reports on some other model says nothing of them.
+func (s *State) rankLocked(cands []Candidate, model string, now time.Time, offered bool) []Ranked {
 	out := make([]Ranked, 0, len(cands))
 	for _, cand := range cands {
 		c := s.credLocked(cand.ID, cand.Provider)
-		out = append(out, s.classifyLocked(c, model, now))
+		out = append(out, s.classify(c, model, now, offered))
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if a.Tier != b.Tier {
 			return a.Tier < b.Tier
+		}
+		if a.Blocked != b.Blocked {
+			return b.Blocked
 		}
 		if a.Tier == 1 && !a.reset.Equal(b.reset) {
 			return a.reset.Before(b.reset)
@@ -844,6 +1001,7 @@ func (s *State) rankLocked(cands []Candidate, model string, now time.Time) []Ran
 // fresh enough to rank on. A window whose reset passed is shown as full but is not fresh: only
 // a new observation says what the account has now.
 func (s *State) effective(c *Cred, kind string, now time.Time) (rem float64, reset time.Time, present, fresh bool) {
+	c.settle(kind, now)
 	w, ok := c.Windows[kind]
 	if !ok {
 		return 0, time.Time{}, false, false
@@ -870,6 +1028,10 @@ func NextWeeklyReset(reset, now time.Time) time.Time {
 }
 
 func (s *State) classifyLocked(c *Cred, model string, now time.Time) Ranked {
+	return s.classify(c, model, now, false)
+}
+
+func (s *State) classify(c *Cred, model string, now time.Time, offered bool) Ranked {
 	if c == nil {
 		return Ranked{Tier: 2, Reason: "quota unknown"}
 	}
@@ -906,13 +1068,13 @@ func (s *State) classifyLocked(c *Cred, model string, now time.Time) Ranked {
 	}
 	needFive := c.Provider == "claude" || fivePresent
 	switch {
-	case c.Unavailable && now.Before(c.NextRetryAfter):
+	case !offered && c.Unavailable && now.Before(c.NextRetryAfter):
 		r.Tier, r.Reason = 2, "cooling down on some model"
 		return r
 	case !weeklyPresent || !weeklyFresh || (needFive && (!fivePresent || !fiveFresh)):
 		r.Tier, r.Reason = 2, "quota unknown"
 		return r
-	case fivePresent && five*100 < s.cfg.MinFiveHourLeftPercent && (fiveReset.IsZero() || fiveReset.Sub(now) > fiveRefillSoon):
+	case fivePresent && math.Round(five*1e4)/100 < s.cfg.MinFiveHourLeftPercent && (fiveReset.IsZero() || fiveReset.Sub(now) > fiveRefillSoon):
 		// Too little left to start a session on, and not refilled soon.
 		r.Tier, r.Reason, r.BackAt = 3, "5-hour quota low", fiveReset
 		return r
