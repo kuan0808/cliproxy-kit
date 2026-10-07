@@ -668,7 +668,8 @@ $selected: color-mix(in srgb, var(--text-primary) 72%, transparent);
   color: var(--text-secondary);
 }
 
-.barCardRows {
+// A list of labelled values: a bar's card, a session's service tier.
+.facts {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   gap: 3px 12px;
@@ -688,6 +689,12 @@ $selected: color-mix(in srgb, var(--text-primary) 72%, transparent);
     color: var(--text-primary);
     overflow-wrap: anywhere;
   }
+}
+
+// A session's service tier, set like the model rows above it.
+.tierFacts {
+  padding: 3px 0;
+  font-size: 13px;
 }
 
 // A session in a day's card: opens it in the table below.

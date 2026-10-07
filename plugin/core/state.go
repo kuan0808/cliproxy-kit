@@ -124,6 +124,8 @@ type Usage struct {
 	CacheRead      int64
 	CacheCreation  int64
 	ResponseHeader http.Header
+	TierAsked      string // the service tier the client asked for; "" for none
+	TierServed     string // the service tier the provider reported serving it at; "" when it did not say
 }
 
 type session struct {
@@ -601,7 +603,7 @@ func (s *State) Observe(u Usage) {
 		if !u.Failed || ran {
 			root := RootSession(u.SessionID, u.ParentID)
 			r.Session, r.Agent = RawSession(root), u.SessionID != "" && u.SessionID != root
-			r.Model = u.Model
+			r.Model, r.TierAsked, r.TierServed = u.Model, u.TierAsked, u.TierServed
 			r.Input = freshInput(provider, u.Input, u.CacheRead, u.CacheCreation)
 			r.Output, r.CacheRead, r.CacheWrite = u.Output, u.CacheRead, u.CacheCreation
 			s.log = append(s.log, r)

@@ -164,6 +164,20 @@ func TestCombineFollowsASessionAcrossASwitch(t *testing.T) {
 	}
 }
 
+// A session's requests are counted by the tier each asked for and the tier it was served at.
+func TestDetailCountsServiceTiers(t *testing.T) {
+	d := Detail([]LogEntry{
+		{T: 1000, Provider: "codex", Output: 10, TierAsked: "priority", TierServed: "default"},
+		{T: 2000, Provider: "codex", Output: 10, TierAsked: "priority", TierServed: "default"},
+		{T: 3000, Provider: "codex", Output: 10, TierAsked: "priority", TierServed: "priority"},
+		{T: 4000, Provider: "claude", Output: 10, Count: 3},
+	}, nil, time.UTC)
+	want := []Tier{{"claude", "", "", 3}, {"codex", "priority", "default", 2}, {"codex", "priority", "priority", 1}}
+	if fmt.Sprint(d.Tiers) != fmt.Sprint(want) {
+		t.Fatalf("tiers = %+v", d.Tiers)
+	}
+}
+
 func TestDetailBucketsBySessionLength(t *testing.T) {
 	tw := time.FixedZone("TW", 8*3600)
 	at := func(h, m int) int64 { return time.Date(2026, 10, 5, h, m, 0, 0, tw).UnixMilli() }

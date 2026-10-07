@@ -78,8 +78,9 @@ over; a Codex plan comes with each usage reading. The last readings survive a re
 
 ### Where quota went
 
-Every request is logged (`usage/YYYY-MM.jsonl`, three months) with its session, account, model
-and tokens. Each rise of an account's weekly reading is shared among the requests since the
+Every request is logged (`usage/YYYY-MM.jsonl`, three months) with its session, account, model,
+tokens, and the service tier it asked for and the one the provider reported (Codex sends Fast as
+`priority`; Claude Code asks for none). Each rise of an account's weekly reading is shared among the requests since the
 previous rise, weighted by tokens (output 5x, cache write 2x, cache read 0.1x) and model tier. A
 rise no request explains, such as use on claude.ai or another tool, is reported as not matched to
 a request; use from before the log began is reported apart and never split. A range is known only

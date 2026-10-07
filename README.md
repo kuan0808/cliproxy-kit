@@ -194,7 +194,7 @@ controls:
 | View | Shows |
 | --- | --- |
 | Ledger | Every account in the order new sessions get them, with each window and the reason. |
-| Usage | Each account's 5-hour window or week, or 7 or 30 days, by project and session, with a tag on sessions a program or another device ran; tokens, cache hit rate, days, and over 5 hours the windows of the last day. |
+| Usage | Each account's 5-hour window or week, or 7 or 30 days, by project and session, with a tag on sessions a program or another device ran; tokens, cache hit rate, days, and over 5 hours the windows of the last day. A session's detail also shows the service tier its requests asked for, such as Codex's Fast, and the one the provider reported. |
 
 ![The projects and sessions behind an account's week](docs/images/projects.png)
 

@@ -724,6 +724,18 @@ function SessionDetail({
   );
 }
 
+/** Service tiers with a name of their own in the locales (quota_usage.tier_*). */
+const TIER_NAMES = new Set([
+  'fast',
+  'priority',
+  'default',
+  'standard',
+  'auto',
+  'flex',
+  'scale',
+  'batch',
+]);
+
 export function SessionDetailView({
   detail: d,
   title,
@@ -774,6 +786,31 @@ export function SessionDetailView({
     };
   };
   const share = (x: number, of: number) => formatShare(of > 0 ? x / of : 0);
+  // The service tier its requests asked for and the one the provider reported, each by its share
+  // of the requests when they differ; shown once either is said.
+  const tierTotal = d.tiers.reduce((sum, x) => sum + x.requests, 0);
+  const tierProviders = new Set(d.tiers.map((x) => x.provider)).size;
+  const tierName = (provider: string, tier: string) => {
+    if (!tier) return t('quota_usage.tier_none');
+    // Codex calls its priority tier Fast; a tier with no name of ours shows as the provider names it.
+    const key = tier === 'priority' && provider === 'codex' ? 'fast' : tier;
+    const name = TIER_NAMES.has(key) ? t(`quota_usage.tier_${key}`) : tier;
+    return tierProviders > 1 ? `${providerTitle(provider)} ${name}` : name;
+  };
+  const tierRow = (side: 'asked' | 'served') => {
+    const counts = new Map<string, number>();
+    d.tiers.forEach((x) => {
+      const name = tierName(x.provider, x[side]);
+      counts.set(name, (counts.get(name) ?? 0) + x.requests);
+    });
+    const list = [...counts].sort((a, b) => b[1] - a[1]);
+    return list.length === 1
+      ? list[0][0]
+      : list.map(([name, n]) => `${name} ${share(n, tierTotal)}`).join(' · ');
+  };
+  const tiersSaid = d.tiers.some((x) => x.asked || x.served);
+  const tierRows = tiersSaid ? { asked: tierRow('asked'), served: tierRow('served') } : null;
+  const tiersMixed = d.tiers.length > 1;
   const modelsOf = (b: QuotaPilotUsageBucket) =>
     [
       b.models
@@ -892,6 +929,25 @@ export function SessionDetailView({
               <strong>{formatShare(total > 0 ? m.weight / total : 0)}</strong>
             </div>
           ))}
+
+          {tierRows && (
+            <>
+              <div className={styles.subhead}>
+                {t('quota_usage.tiers')}
+                {tiersMixed && <span>{t('quota_usage.tiers_note')}</span>}
+              </div>
+              <dl className={`${styles.facts} ${styles.tierFacts}`}>
+                <div>
+                  <dt>{t('quota_usage.tier_asked')}</dt>
+                  <dd>{tierRows.asked}</dd>
+                </div>
+                <div>
+                  <dt>{t('quota_usage.tier_served')}</dt>
+                  <dd>{tierRows.served}</dd>
+                </div>
+              </dl>
+            </>
+          )}
 
           <div className={styles.subhead}>{t('quota_usage.main_vs_agent')}</div>
           <div className={styles.duo} aria-hidden="true">

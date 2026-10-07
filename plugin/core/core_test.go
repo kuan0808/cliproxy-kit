@@ -927,6 +927,11 @@ func TestARefusedRequestStillLogsItsReading(t *testing.T) {
 	if len(log) != 1 || log[0].Used5h == nil || !near(*log[0].Used5h, 0.25) || log[0].Reset5 != c.t.Add(3*time.Hour).UnixMilli() {
 		t.Fatalf("log = %+v", log)
 	}
+	// So are the service tier the request asked for and the one the provider reported.
+	s.Observe(Usage{Provider: "codex", Model: "gpt-6.1-sol", AuthID: "codex-a", RequestedAt: c.t, Output: 10, TierAsked: "priority", TierServed: "default"})
+	if log = s.TakeLog(); len(log) != 1 || log[0].TierAsked != "priority" || log[0].TierServed != "default" {
+		t.Fatalf("log = %+v", log)
+	}
 }
 
 func TestTheViewShowsWhereTheNextTurnGoes(t *testing.T) {

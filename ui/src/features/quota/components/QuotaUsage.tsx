@@ -175,6 +175,7 @@ export function QuotaUsageView({
             {usage.mode !== 'account' && <p>{t('quota_usage.method_total')}</p>}
             {usage.range === '5h' && <p>{t('quota_usage.method_5h')}</p>}
             {!isWindowRange(usage.range) && <p>{t('quota_usage.method_range')}</p>}
+            <p>{t('quota_usage.method_tier')}</p>
           </details>
         </>
       )}

@@ -122,7 +122,7 @@ export function BarCard({
         <strong>{title}</strong>
         <span className={quiet ? styles.barCardQuiet : styles.barCardFigure}>{figure}</span>
       </div>
-      <dl className={styles.barCardRows}>
+      <dl className={styles.facts}>
         {rows.map((row) => (
           <div key={row.label}>
             <dt>{row.label}</dt>

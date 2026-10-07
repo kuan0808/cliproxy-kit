@@ -29,6 +29,8 @@ type LogEntry struct {
 	Reset5     int64    `json:"r5,omitempty"`   // when that 5-hour window resets (unix milliseconds), when the reading says
 	Used7d     *float64 `json:"u7,omitempty"`   // part of the weekly window used
 	Reset7     int64    `json:"r7,omitempty"`   // when that weekly window resets (unix milliseconds), when the reading says
+	TierAsked  string   `json:"ta,omitempty"`   // the service tier the request asked for (Codex's Fast is "priority")
+	TierServed string   `json:"ts,omitempty"`   // the service tier the provider reported serving it at
 	Count      int      `json:"n,omitempty"`    // requests the line sums: recovered history sums an hour; 0 is one
 	First      int64    `json:"f,omitempty"`    // a line summing several requests: when the first ran (T is the last)
 	History    bool     `json:"-"`              // recovered from Claude Code's transcripts rather than logged
@@ -762,14 +764,25 @@ type SessionDetail struct {
 	Agent       float64     `json:"agent"`   // weight sent by subagents
 	History     bool        `json:"history"` // includes lines recovered from transcripts, which sum an hour
 	Accounts    []Part      `json:"accounts"`
+	Tiers       []Tier      `json:"tiers"` // most requests first
+}
+
+// Tier is how many of a session's requests to a provider asked for one service tier and were
+// reported served at another; "" where the request asked for none or the provider did not say.
+type Tier struct {
+	Provider string `json:"provider"`
+	Asked    string `json:"asked"`
+	Served   string `json:"served"`
+	Requests int    `json:"requests"`
 }
 
 // Detail describes a session from its own lines, with buckets in loc: ten minutes for a short
 // session, hours for a day's, days beyond two days. Pieces, the session's settled requests, give
 // each stretch its quota. Accounts include "" for requests whose account is not known.
 func Detail(entries []LogEntry, pieces []Piece, loc *time.Location) SessionDetail {
-	out := SessionDetail{Models: []Part{}, Accounts: []Part{}, Buckets: []Bucket{}}
+	out := SessionDetail{Models: []Part{}, Accounts: []Part{}, Buckets: []Bucket{}, Tiers: []Tier{}}
 	models, accounts := map[string]float64{}, map[string]float64{}
+	tiers := map[Tier]int{}
 	for _, e := range entries {
 		if e.Poll {
 			continue
@@ -792,8 +805,20 @@ func Detail(entries []LogEntry, pieces []Piece, loc *time.Location) SessionDetai
 		}
 		out.History = out.History || e.History
 		accounts[e.Account] += w // "" when the account is not known
+		tiers[Tier{Provider: e.Provider, Asked: e.TierAsked, Served: e.TierServed}] += e.requests()
 	}
 	out.Models, out.Accounts = parts(models), parts(accounts)
+	for t, n := range tiers {
+		t.Requests = n
+		out.Tiers = append(out.Tiers, t)
+	}
+	sort.Slice(out.Tiers, func(i, j int) bool {
+		a, b := out.Tiers[i], out.Tiers[j]
+		if a.Requests != b.Requests {
+			return a.Requests > b.Requests
+		}
+		return a.Provider+"|"+a.Asked+"|"+a.Served < b.Provider+"|"+b.Asked+"|"+b.Served
+	})
 	if out.First == 0 {
 		return out
 	}

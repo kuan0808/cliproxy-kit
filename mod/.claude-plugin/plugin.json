@@ -1,6 +1,6 @@
 {
   "name": "quota-band",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Account, quota, context and cache tiles above the Claude Code prompt, for sessions that run through CLIProxyAPI with the quota-pilot plugin",
   "author": {
     "name": "kuan0808",

@@ -388,6 +388,14 @@ func TestFiveHourListsARunningWindowOnce(t *testing.T) {
 	}
 }
 
+// The host names "auto" when a client asks for no tier; the log keeps none then. A provider that
+// reports "auto" is taken at its word.
+func TestATierIsKeptAsAskedOrNone(t *testing.T) {
+	if askedTier(" Priority ") != "priority" || askedTier("auto") != "" || askedTier("") != "" || tierOf("Auto") != "auto" {
+		t.Fatal("tiers")
+	}
+}
+
 // A Claude plan is read again an hour on, on a refresh, and after a window started over in place.
 func TestAPlanIsReadAgainWhenItMayHaveChanged(t *testing.T) {
 	now := time.Date(2026, 10, 7, 6, 30, 0, 0, time.UTC)

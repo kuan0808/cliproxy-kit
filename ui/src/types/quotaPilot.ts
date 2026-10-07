@@ -273,6 +273,14 @@ export interface QuotaPilotUsage {
 }
 
 /** One session within a scope and range. */
+/** Requests to a provider by the service tier they asked for and the one reported; '' for none. */
+export interface QuotaPilotUsageTier {
+  provider: string;
+  asked: string;
+  served: string;
+  requests: number;
+}
+
 export interface QuotaPilotUsageSessionDetail {
   id: string;
   title: string;
@@ -291,4 +299,6 @@ export interface QuotaPilotUsageSessionDetail {
   /** Includes lines recovered from transcripts, which sum a whole day. */
   history: boolean;
   origin: string;
+  /** Most requests first. */
+  tiers: QuotaPilotUsageTier[];
 }

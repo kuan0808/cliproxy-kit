@@ -326,9 +326,23 @@ func usage(raw []byte) ([]byte, error) {
 		TraceID: r.TraceID, AuthID: r.AuthID, AuthIndex: r.AuthIndex, Failed: r.Failed, StatusCode: r.Failure.StatusCode,
 		RequestedAt: r.RequestedAt, Input: r.Detail.InputTokens, Output: r.Detail.OutputTokens,
 		CacheRead: r.Detail.CacheReadTokens, CacheCreation: r.Detail.CacheCreationTokens,
-		ResponseHeader: r.ResponseHeaders,
+		ResponseHeader: r.ResponseHeaders, TierAsked: askedTier(r.ServiceTier), TierServed: tierOf(r.ResponseServiceTier),
 	})
 	return okEnvelope(map[string]any{})
+}
+
+// tierOf is a service tier as the log keeps it.
+func tierOf(tier string) string {
+	return strings.ToLower(strings.TrimSpace(tier))
+}
+
+// askedTier is the tier a request asked for: "auto", which the host names when a client asks for
+// none, is none.
+func askedTier(tier string) string {
+	if tier = tierOf(tier); tier == "auto" {
+		return ""
+	}
+	return tier
 }
 
 func route(raw []byte) ([]byte, error) {

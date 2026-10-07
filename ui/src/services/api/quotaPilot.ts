@@ -417,6 +417,16 @@ export function normalizeQuotaPilotUsageSession(
     ),
     history: value.history === true,
     origin: asString(value.origin),
+    tiers: listOf(value.tiers, (x) =>
+      isRecord(x)
+        ? {
+            provider: asString(x.provider).toLowerCase(),
+            asked: asString(x.asked).toLowerCase(),
+            served: asString(x.served).toLowerCase(),
+            requests: asNumber(x.requests),
+          }
+        : null
+    ),
   };
 }
 

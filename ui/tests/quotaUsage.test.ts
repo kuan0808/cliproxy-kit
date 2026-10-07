@@ -1149,6 +1149,55 @@ describe('session detail', () => {
     expect(card).toContain('<dt>Accounts</dt>');
     expect(markup).toContain('Main 60%');
     expect(markup).toContain('Subagents 40%');
+    // Nothing asked for a tier and no provider said one: no tier section.
+    expect(markup).not.toContain('Service tier');
+  });
+
+  test('the service tier asked for and the one reported', () => {
+    const detail = normalizeQuotaPilotUsageSession({
+      id: 'codex:01a1',
+      title: 'Review',
+      composition: { requests: 4, tokens, weights },
+      models: [{ name: 'gpt-6.1-sol', weight: 1 }],
+      tiers: [{ provider: 'codex', asked: 'priority', served: 'default', requests: 4 }],
+    })!;
+    const render = (d: typeof detail) =>
+      renderToStaticMarkup(
+        createElement(SessionDetailView, {
+          detail: d,
+          title: 'Review',
+          project: '',
+          source: null,
+          range: 'week',
+          locale: 'en',
+        })
+      );
+    // One tier each way: said plainly, without shares.
+    const one = render(detail);
+    expect(one).toContain('Service tier</div>');
+    expect(one).toContain('<dt>Asked for</dt><dd>Fast</dd>');
+    expect(one).toContain('<dt>Provider reported</dt><dd>Standard</dd>');
+    // Requests from before tiers were logged: each side by its share of the requests.
+    const mixed = render({
+      ...detail,
+      tiers: [
+        ...detail.tiers.map((x) => ({ ...x, requests: 3 })),
+        { provider: 'codex', asked: '', served: '', requests: 1 },
+      ],
+    });
+    expect(mixed).toContain('Service tier<span>by requests</span>');
+    expect(mixed).toContain('<dd>Fast 75% · Not recorded 25%</dd>');
+    expect(mixed).toContain('<dd>Standard 75% · Not recorded 25%</dd>');
+    // A tier with no name of ours shows as the provider names it, never as one of our labels.
+    const odd = render({
+      ...detail,
+      tiers: [
+        { provider: 'codex', asked: 'none', served: 'auto', requests: 3 },
+        { provider: 'codex', asked: '', served: '', requests: 1 },
+      ],
+    });
+    expect(odd).toContain('<dd>none 75% · Not recorded 25%</dd>');
+    expect(odd).toContain('<dd>Auto 75% · Not recorded 25%</dd>');
   });
 });
 
