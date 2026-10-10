@@ -57,8 +57,9 @@ email = 'tester' + '.' + 'x' * 3 + '@example.test'
 assert not any(shapes.search(k) for k in (claude_key, codex_key, env_key, named_key))
 with open(os.path.join(tmp, 'claude', 'settings.json'), 'w') as f:
     json.dump({'env': {'ANTHROPIC_BASE_URL': 'http://127.0.0.1:8317', 'ANTHROPIC_AUTH_TOKEN': claude_key}}, f)
+author = 'tester' + 'name'
 with open(os.path.join(tmp, 'claude', '.claude.json'), 'w') as f:
-    json.dump({'oauthAccount': {'emailAddress': email}}, f)
+    json.dump({'oauthAccount': {'emailAddress': email, 'displayName': author}}, f)
 with open(os.path.join(tmp, 'codex', 'config.toml'), 'w') as f:
     f.write('model_provider = "cliproxyapi"\n\n[model_providers.cliproxyapi]\n'
             'base_url = "http://127.0.0.1:8317/v1"\n'
@@ -68,9 +69,18 @@ os.environ.update(HOME=os.path.join(tmp, 'home'), CLAUDE_CONFIG_DIR=os.path.join
                   PROXY_CLIENT_KEY_VARIABLE=named_key)
 os.environ.pop('ANTHROPIC_API_KEY', None)
 hook.HOME = os.environ['HOME']
-hook.run = lambda *cmd: ''  # no keychain, no Tailscale
+# No keychain, no Tailscale; commits are made under the account's own name, which they show anyway.
+identity = {'user.name': 'TesterName'}
+hook.run = lambda *cmd: identity.get(cmd[2], '') if cmd[:2] == ('git', 'config') else ''
 details = hook.private_details()
 assert {claude_key, codex_key, env_key, named_key, email} <= details, 'a client key or account was missed'
+assert author not in details, 'the name commits are made under is public by choice'
+# Made under the account's email too, that email and its name alone are public as well.
+identity['user.email'] = email
+public = hook.private_details()
+assert email not in public and email.split('@')[0] not in public, 'so is their email'
+assert not re.compile('|'.join(re.escape(d) for d in public), re.IGNORECASE).search(f'TesterName <{email}>'), \
+    'the author line itself is clean'
 assert 'PROXY_CLIENT_KEY_VARIABLE' not in details, "Codex's env_key names a variable: its value is the key"
 assert hook.toml('') is None
 print('ok')

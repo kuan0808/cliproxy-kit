@@ -70,6 +70,14 @@ $selected: color-mix(in srgb, var(--text-primary) 72%, transparent);
   background: var(--usage-hatch) !important;
 }
 
+// What a read that failed did not replace, and why: the report below is the one read before.
+.notUpdated {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--warning-text);
+}
+
 .foot {
   margin: 12px 0 0;
   font-size: 12.5px;

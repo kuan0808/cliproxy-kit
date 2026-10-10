@@ -45,14 +45,14 @@ var logMu sync.Mutex
 // appendLog writes pending log lines to their month's file; lines it could not write go back to
 // the queue for the next pass.
 func appendLog(entries []core.LogEntry) {
-	if failed := appendLines("", entries); len(failed) > 0 {
+	if failed := appendLines(entries); len(failed) > 0 {
 		state.ReturnLog(failed)
 	}
 }
 
-// appendLines writes lines to the files named prefix + month and returns the lines of each month
-// it could not write.
-func appendLines(prefix string, entries []core.LogEntry) (failed []core.LogEntry) {
+// appendLines writes lines to their month's file, and to the index once read (see logIndex), and
+// returns the lines of each month it could not write.
+func appendLines(entries []core.LogEntry) (failed []core.LogEntry) {
 	logMu.Lock()
 	defer logMu.Unlock()
 	byMonth := map[string][]core.LogEntry{}
@@ -68,7 +68,15 @@ func appendLines(prefix string, entries []core.LogEntry) (failed []core.LogEntry
 				body = append(append(body, line...), '\n')
 			}
 		}
-		if errWrite := appendFile(filepath.Join(usageDir(), prefix+month+".jsonl"), body); errWrite != nil {
+		errWrite := appendFile(filepath.Join(usageDir(), month+".jsonl"), body)
+		switch {
+		case errWrite == nil && logIndex.loaded:
+			for _, e := range lines {
+				logIndex.seq++
+				e.Seq = logIndex.seq
+				logIndex.pending = append(logIndex.pending, e)
+			}
+		case errWrite != nil:
 			state.NoteError("usage log: " + errWrite.Error())
 			if !errors.Is(errWrite, errUndone) {
 				failed = append(failed, lines...)
@@ -116,35 +124,139 @@ func pruneLog(now time.Time) {
 	}
 }
 
-// readLog returns the log lines since `since` and when the log began.
-func readLog(since time.Time) (entries []core.LogEntry, logStart int64) {
-	files, _ := filepath.Glob(filepath.Join(usageDir(), "20*.jsonl"))
-	sort.Strings(files)
-	first := since.Format("2006-01")
-	for i, f := range files {
-		month := strings.TrimSuffix(filepath.Base(f), ".jsonl")
-		if i > 0 && month < first {
-			continue
-		}
-		for _, e := range readEntries(f) {
-			if logStart == 0 || e.T < logStart {
-				logStart = e.T
-			}
-			if e.T >= since.UnixMilli() {
-				entries = append(entries, e)
-			}
-		}
-	}
-	if logStart == 0 {
-		logStart = time.Now().UnixMilli()
-	}
-	return entries, logStart
+// logIndex is the log's lines of the last usageDays, read from the files once and kept as they
+// are written, each account's in time order: a report reads them in memory rather than parsing
+// the files again, which took seconds on a busy machine and grew with the log.
+var logIndex struct {
+	mu     sync.RWMutex // lines, and loaded (with logMu too)
+	loaded bool
+	lines  map[string][]core.LogEntry // each account's lines ("" for none), oldest first
+	// pending are the lines written since they were last taken in, and seq the order the last
+	// line read or written was given (core.LogEntry.Seq), both under logMu, which every writer
+	// holds: a writer never waits on a report.
+	pending []core.LogEntry
+	seq     uint64
 }
 
-func readEntries(path string) []core.LogEntry {
+// logView is each account's lines from since on, and when the log began. The lines are shared:
+// the caller must not change them, and calls done once it no longer reads them.
+func logView(since int64) (lines map[string][]core.LogEntry, logStart int64, done func()) {
+	logIndex.mu.Lock()
+	logMu.Lock()
+	if !logIndex.loaded {
+		loadLogLocked(time.Now().AddDate(0, 0, -usageDays))
+	}
+	pending := logIndex.pending
+	logIndex.pending = nil
+	logMu.Unlock()
+	takeLinesLocked(pending, time.Now().AddDate(0, 0, -usageDays).UnixMilli())
+	logIndex.mu.Unlock()
+
+	logIndex.mu.RLock()
+	lines = make(map[string][]core.LogEntry, len(logIndex.lines))
+	for id, ls := range logIndex.lines {
+		if i := sort.Search(len(ls), func(i int) bool { return ls[i].T >= since }); i < len(ls) {
+			lines[id] = ls[i:]
+		}
+	}
+	return lines, logBegan(), logIndex.mu.RUnlock
+}
+
+// takeLines takes the lines written meanwhile into the index, unless a report is reading it.
+func takeLines() {
+	if !logIndex.mu.TryLock() {
+		return
+	}
+	defer logIndex.mu.Unlock()
+	logMu.Lock()
+	pending := logIndex.pending
+	logIndex.pending = nil
+	logMu.Unlock()
+	takeLinesLocked(pending, time.Now().AddDate(0, 0, -usageDays).UnixMilli())
+}
+
+// loadLogLocked reads the lines from since on out of the month files, in the order they were
+// written, under both locks. A file it cannot read whole leaves the index to be read again by
+// the next report, so no line is lost to a file that was out of reach for a moment.
+func loadLogLocked(since time.Time) {
+	logIndex.lines, logIndex.pending = map[string][]core.LogEntry{}, nil
+	files, _ := filepath.Glob(filepath.Join(usageDir(), "20*.jsonl")) // a month's file sorts after the one before
+	whole := true
+	for _, f := range files {
+		if strings.TrimSuffix(filepath.Base(f), ".jsonl") < since.Format("2006-01") {
+			continue
+		}
+		entries, errRead := readEntries(f)
+		if errRead != nil {
+			state.NoteError("usage log: " + errRead.Error())
+			whole = false
+		}
+		for _, e := range entries {
+			if e.T >= since.UnixMilli() {
+				logIndex.seq++
+				e.Seq = logIndex.seq
+				logIndex.lines[e.Account] = append(logIndex.lines[e.Account], e)
+			}
+		}
+	}
+	for _, ls := range logIndex.lines {
+		sort.Slice(ls, func(i, j int) bool { return byTime(ls[i], ls[j]) })
+	}
+	logIndex.loaded = whole
+}
+
+// byTime orders lines by time, and lines of one time in the order they were written.
+func byTime(a, b core.LogEntry) bool {
+	return a.T < b.T || a.T == b.T && a.Seq < b.Seq
+}
+
+// takeLinesLocked files new lines in time order (a long request is written after shorter ones
+// sent later) and lets go of those older than cutoff.
+func takeLinesLocked(pending []core.LogEntry, cutoff int64) {
+	for _, e := range pending {
+		ls := append(logIndex.lines[e.Account], e)
+		for i := len(ls) - 1; i > 0 && byTime(ls[i], ls[i-1]); i-- {
+			ls[i-1], ls[i] = ls[i], ls[i-1]
+		}
+		logIndex.lines[e.Account] = ls
+	}
+	for id, ls := range logIndex.lines {
+		i := sort.Search(len(ls), func(i int) bool { return ls[i].T >= cutoff })
+		switch {
+		case i == len(ls):
+			delete(logIndex.lines, id)
+		case i > len(ls)/2:
+			logIndex.lines[id] = append([]core.LogEntry(nil), ls[i:]...) // free what went
+		case i > 0:
+			logIndex.lines[id] = ls[i:]
+		}
+	}
+}
+
+// logBegan is when the log began: the first line of its oldest month file, now if there is none.
+func logBegan() int64 {
+	files, _ := filepath.Glob(filepath.Join(usageDir(), "20*.jsonl"))
+	sort.Strings(files)
+	if len(files) > 0 {
+		if f, errOpen := os.Open(files[0]); errOpen == nil {
+			defer f.Close()
+			sc := bufio.NewScanner(f)
+			sc.Buffer(make([]byte, 64*1024), 1024*1024)
+			var e core.LogEntry
+			if sc.Scan() && json.Unmarshal(sc.Bytes(), &e) == nil && e.T > 0 {
+				return e.T
+			}
+		}
+	}
+	return time.Now().UnixMilli()
+}
+
+// readEntries reads a month file's lines; a line it cannot parse is passed over, a file it cannot
+// read through is an error.
+func readEntries(path string) ([]core.LogEntry, error) {
 	f, errOpen := os.Open(path)
 	if errOpen != nil {
-		return nil
+		return nil, errOpen
 	}
 	defer f.Close()
 	var out []core.LogEntry
@@ -156,7 +268,7 @@ func readEntries(path string) []core.LogEntry {
 			out = append(out, e)
 		}
 	}
-	return out
+	return out, sc.Err()
 }
 
 // ---- sessions: project and title ----
@@ -178,10 +290,20 @@ type fileStamp struct{ size, mod int64 }
 
 var (
 	metaMu      sync.Mutex
-	transcripts = map[string]string{}    // session id to transcript path
-	readStamps  = map[string]fileStamp{} // each transcript as it was last read
+	transcripts = map[string]string{}          // session id to transcript path
+	reads       = map[string]*transcriptRead{} // session id to how far its transcript was read
 	indexedAt   time.Time
 )
+
+// transcriptRead is how far a session's transcript was read and what it said so far: the next
+// read takes only what was written since.
+type transcriptRead struct {
+	stamp      fileStamp
+	offset     int64          // read up to here: the end of its last whole line
+	mark       []byte         // the bytes it read last, before offset: a file written anew differs
+	head       transcriptHead // its folder, how Claude Code was run and its first request
+	custom, ai string         // the name the user gave it last, and Claude Code's latest title
+}
 
 var (
 	cwdField    = regexp.MustCompile(`"cwd":"((?:[^"\\]|\\.)*)"`)
@@ -203,8 +325,9 @@ func sessionMeta(id string) sessionInfo {
 
 // noteTranscript reads a session's transcript on this machine, when it changed since it was last
 // read, for its folder, how Claude Code was run, its title (the name the user gave it, else Claude
-// Code's latest) and its first request. It is read outside the lock, so a report over hundreds of
-// sessions reads only the ones that went on.
+// Code's latest) and its first request. It reads its head once and from then on only what was
+// written since, at most its last 8 MiB, outside the lock, so a report over hundreds of sessions
+// reads only what is new in those that went on.
 func noteTranscript(id string) {
 	metaMu.Lock()
 	path, ok := transcripts[id]
@@ -212,33 +335,76 @@ func noteTranscript(id string) {
 		indexTranscripts()
 		path, ok = transcripts[id]
 	}
-	last := readStamps[id]
+	last := reads[id]
 	metaMu.Unlock()
 	st, errStat := os.Stat(path)
 	if !ok || errStat != nil {
 		return
 	}
-	stamp := fileStamp{st.Size(), st.ModTime().UnixNano()}
-	if stamp == last {
+	r := transcriptRead{stamp: fileStamp{st.Size(), st.ModTime().UnixNano()}}
+	if last != nil && last.stamp == r.stamp {
 		return
 	}
-	head := readTranscriptHead(path)
-	tail := readTail(path, 8<<20)
-	title := lastMatch(tail, customField, true)
-	if title == "" {
-		title = lastMatch(tail, titleField, true)
+	from := max(0, st.Size()-8<<20)
+	goesOn := last != nil && st.Size() >= last.offset &&
+		bytes.Equal(readRange(path, last.offset-int64(len(last.mark)), last.offset), last.mark)
+	if goesOn {
+		// It goes on where the last read stopped: what was read there is still there.
+		r.head, r.custom, r.ai = last.head, last.custom, last.ai
+		from = max(from, last.offset)
+	} else {
+		r.head = readTranscriptHead(path) // new, or written anew
 	}
-	origin := head.entrypoint // how Claude Code was run: an SDK, claude -p, Claude Desktop
+	chunk := readRange(path, from, st.Size())
+	chunk = chunk[:bytes.LastIndexByte(chunk, '\n')+1] // whole lines: the rest is read next time
+	r.offset = from + int64(len(chunk))
+	r.mark = bytes.Clone(chunk[max(0, len(chunk)-64):])
+	if len(chunk) == 0 && last != nil && from == last.offset {
+		r.mark = last.mark // nothing whole was added
+	}
+	if title := lastMatch(chunk, customField, true); title != "" {
+		r.custom = title
+	}
+	if title := lastMatch(chunk, titleField, true); title != "" {
+		r.ai = title
+	}
+	for line := range bytes.Lines(chunk) {
+		if r.head.whole() {
+			break
+		}
+		r.head.take(line)
+	}
+	origin := r.head.entrypoint // how Claude Code was run: an SDK, claude -p, Claude Desktop
 	if origin == "cli" {
 		origin = ""
 	}
-	noteSession(id, namedSession{Title: title, Asked: head.prompt, Cwd: head.cwd, Origin: origin, Here: true}, time.Now())
+	// Told only by the read that went furthest: one that another report overtook says nothing.
 	metaMu.Lock()
-	readStamps[id] = stamp
-	metaMu.Unlock()
+	defer metaMu.Unlock()
+	if reads[id] != last {
+		return
+	}
+	reads[id] = &r
+	noteSession(id, namedSession{Title: cmp.Or(r.custom, r.ai), Asked: r.head.prompt, Cwd: r.head.cwd, Origin: origin, Here: true}, time.Now())
 }
 
 type transcriptHead struct{ cwd, entrypoint, prompt string }
+
+// whole tells whether the head says all it can.
+func (h transcriptHead) whole() bool { return h.cwd != "" && h.entrypoint != "" && h.prompt != "" }
+
+// take fills in what a line of the transcript says of its head that is not known yet.
+func (h *transcriptHead) take(line []byte) {
+	if h.cwd == "" {
+		h.cwd = lastMatch(line, cwdField, false)
+	}
+	if h.entrypoint == "" {
+		h.entrypoint = lastMatch(line, entryField, false)
+	}
+	if h.prompt == "" && bytes.Contains(line[:min(len(line), 300)], []byte(`"type":"user"`)) {
+		h.prompt = userPrompt(line)
+	}
+}
 
 // readTranscriptHead streams a transcript from the start for its folder, how Claude Code was run
 // and the first request: a large first prompt can push them far into the file.
@@ -250,7 +416,7 @@ func readTranscriptHead(path string) transcriptHead {
 	}
 	defer f.Close()
 	r := bufio.NewReaderSize(f, 4<<20)
-	for read := 0; read < 64<<20 && (h.cwd == "" || h.entrypoint == "" || h.prompt == ""); {
+	for read := 0; read < 64<<20 && !h.whole(); {
 		line, errRead := r.ReadSlice('\n')
 		read += len(line)
 		if errors.Is(errRead, bufio.ErrBufferFull) {
@@ -260,15 +426,7 @@ func readTranscriptHead(path string) transcriptHead {
 			}
 			continue
 		}
-		if h.cwd == "" {
-			h.cwd = lastMatch(line, cwdField, false)
-		}
-		if h.entrypoint == "" {
-			h.entrypoint = lastMatch(line, entryField, false)
-		}
-		if h.prompt == "" && bytes.Contains(line[:min(len(line), 300)], []byte(`"type":"user"`)) {
-			h.prompt = userPrompt(line)
-		}
+		h.take(line)
 		if errRead != nil {
 			break
 		}
@@ -352,8 +510,8 @@ func visible(r rune) rune {
 // remembered, so a session in a worktree keeps its project after the worktree is removed. False for
 // a folder never seen here.
 func placeSession(id, cwd string, remembered *placedProject, info *sessionInfo) bool {
-	if _, errStat := os.Stat(cwd); errStat == nil {
-		info.Path, info.Repo = gitRoot(cwd)
+	if root, repo, ok := folderRoot(cwd); ok {
+		info.Path, info.Repo = root, repo
 		info.Project = projectName(info.Path)
 		rememberProject(id, placedProject{Project: info.Project, Path: info.Path, Repo: info.Repo})
 		return true
@@ -383,22 +541,18 @@ func indexTranscripts() {
 	indexedAt = time.Now()
 }
 
-func readTail(path string, n int64) []byte {
+// readRange reads a file's bytes from from to to.
+func readRange(path string, from, to int64) []byte {
+	if to <= from {
+		return nil
+	}
 	f, errOpen := os.Open(path)
 	if errOpen != nil {
 		return nil
 	}
 	defer f.Close()
-	info, errStat := f.Stat()
-	if errStat != nil {
-		return nil
-	}
-	start := info.Size() - n
-	if start < 0 {
-		start = 0
-	}
-	buf := make([]byte, info.Size()-start)
-	read, _ := f.ReadAt(buf, start)
+	buf := make([]byte, to-from)
+	read, _ := f.ReadAt(buf, from)
 	return buf[:read]
 }
 
@@ -417,6 +571,44 @@ func lastMatch(body []byte, re *regexp.Regexp, last bool) string {
 		return string(m[1])
 	}
 	return s
+}
+
+// folders remembers where each folder belongs (see folderRoot) for folderFor: folders become
+// repositories and go away, but a report over hundreds of sessions need not look at every one of
+// their parents again.
+var folders = struct {
+	sync.Mutex
+	at map[string]folderPlace
+}{at: map[string]folderPlace{}}
+
+type folderPlace struct {
+	root       string
+	repo, here bool
+	read       time.Time
+}
+
+const folderFor = 10 * time.Minute
+
+// folderRoot is the repository, or the folder itself, a folder of this machine belongs to (see
+// gitRoot); false when it is not here.
+func folderRoot(cwd string) (root string, repo, here bool) {
+	folders.Lock()
+	p, ok := folders.at[cwd]
+	folders.Unlock()
+	if !ok || time.Since(p.read) > folderFor {
+		p = folderPlace{read: time.Now()}
+		if _, errStat := os.Stat(cwd); errStat == nil {
+			p.root, p.repo = gitRoot(cwd)
+			p.here = true
+		}
+		folders.Lock()
+		if len(folders.at) > 4096 { // folders clients name, past what one person has
+			folders.at = map[string]folderPlace{}
+		}
+		folders.at[cwd] = p
+		folders.Unlock()
+	}
+	return p.root, p.repo, p.here
 }
 
 // gitRoot is the repository a folder belongs to: the nearest folder holding .git (or .jj, .hg),
@@ -616,9 +808,12 @@ type dayUse struct {
 // reading is the log read once for a report: every account's current window of the range (its
 // week, or its 5-hour window) for the picker, and every account over the requested range.
 type reading struct {
-	rng       string
-	from      int64 // range start for 7d and 30d
-	entries   []core.LogEntry
+	rng  string
+	from int64 // range start for 7d and 30d
+	// lines are each account's lines, oldest first, counted under the account they count for;
+	// shared with the log's index until done is called.
+	lines     map[string][]core.LogEntry
+	done      func()
 	week      map[string]core.Attribution // each account's current window: its week, or over 5h its 5-hour window
 	ranged    map[string]core.Attribution // each account over the range (the current window for "week" and "5h")
 	froms     map[string]int64            // where each account's counting starts
@@ -663,23 +858,36 @@ func rangeDays(rng string) int {
 
 // readUsage reads the log for a report over rng; keep names sessions whose settled requests are
 // kept one by one (nil for none).
+// The caller calls the reading's done once it no longer reads its lines.
 func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
-	entries, logStart := readLog(now.AddDate(0, 0, -usageDays))
+	view, logStart, done := logView(now.AddDate(0, 0, -usageDays).UnixMilli())
 	// One provider account read under two credentials (logged in again under a new one) is one
-	// account: its lines count under one, read with the snapshot so the two agree.
+	// account: its lines count under one, read with the snapshot so the two agree. Only those
+	// lines are copied, to name that account; the rest are read where the index keeps them.
 	snap, canonical := state.BuildWithCanonical()
-	for i := range entries {
-		if to, ok := canonical[entries[i].Account]; ok {
-			entries[i].Account = to
+	lines := make(map[string][]core.LogEntry, len(view))
+	moved := map[string][]core.LogEntry{}
+	for id, ls := range view {
+		to, ok := canonical[id]
+		if !ok || to == id {
+			lines[id] = ls
+			continue
 		}
+		for _, e := range ls {
+			e.Account = to
+			moved[to] = append(moved[to], e)
+		}
+	}
+	for to, ls := range moved {
+		all := append(append([]core.LogEntry(nil), lines[to]...), ls...)
+		sort.Slice(all, func(i, j int) bool { return byTime(all[i], all[j]) })
+		lines[to] = all
 	}
 	// An account is watched from its first line: an account added later counts what it had used
 	// by then as used before logging.
 	firstSeen := map[string]int64{}
-	for _, e := range entries {
-		if s, ok := firstSeen[e.Account]; !ok || e.T < s {
-			firstSeen[e.Account] = e.T
-		}
+	for id, ls := range lines {
+		firstSeen[id] = ls[0].T
 	}
 	startOf := func(id string) int64 {
 		if s, ok := firstSeen[id]; ok {
@@ -689,26 +897,17 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 	}
 	u := &reading{rng: rng, canonical: canonical, week: map[string]core.Attribution{}, ranged: map[string]core.Attribution{},
 		froms: map[string]int64{}, starts: map[string]int64{}, owner: map[string]string{}, windows: map[string][]fiveWindow{}, noWindow: map[string]bool{},
-		namedFrom: map[string]int64{}, remote: map[string]bool{}}
+		namedFrom: map[string]int64{}, remote: map[string]bool{}, lines: lines, done: done}
 	if n := rangeDays(rng); n > 0 {
 		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		u.from = today.AddDate(0, 0, 1-n).UnixMilli()
 	}
-	u.entries = entries
-	for _, e := range entries {
-		if e.Remote {
-			u.remote[core.ViewSession(e.Session)] = true
-		}
-	}
-	// Each account's lines in time order, gathered once.
-	lines := map[string][]core.LogEntry{}
-	for _, e := range entries {
-		if e.Account != "" {
-			lines[e.Account] = append(lines[e.Account], e)
-		}
-	}
 	for _, ls := range lines {
-		sort.SliceStable(ls, func(i, j int) bool { return ls[i].T < ls[j].T })
+		for _, e := range ls {
+			if e.Remote {
+				u.remote[core.ViewSession(e.Session)] = true
+			}
+		}
 	}
 	// The proxy's credentials, then the accounts the log names that the proxy no longer holds:
 	// their quota counts as well.
@@ -747,6 +946,9 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 		}
 	}
 	for id, ls := range lines {
+		if id == "" {
+			continue // lines of no account
+		}
 		// Its latest line, request or reading, which names its provider; and its latest weekly reading.
 		var latest, weekly *core.LogEntry
 		for i := range ls {
@@ -779,9 +981,11 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 	}
 	if u.from > 0 {
 		// Over a range a provider whose lines name no account it holds still shows, with its tokens.
-		for _, e := range entries {
-			if _, ok := byProvider[e.Provider]; !ok && e.Provider != "" && !e.Poll {
-				byProvider[e.Provider] = nil
+		for _, ls := range lines {
+			for _, e := range ls {
+				if _, ok := byProvider[e.Provider]; !ok && e.Provider != "" && !e.Poll {
+					byProvider[e.Provider] = nil
+				}
 			}
 		}
 	}
@@ -840,6 +1044,27 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 
 const day = 24 * 3600 * 1000
 
+// each calls fn with every line a scope counts (see covers), account by account: an account's
+// lines before its counting starts are passed over at once.
+func (u *reading) each(inScope func(core.LogEntry) bool, fn func(core.LogEntry)) {
+	ids := make([]string, 0, len(u.lines))
+	for id := range u.lines {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		ls, from := u.lines[id], u.from
+		if f, ok := u.froms[id]; ok {
+			from = f
+		}
+		for _, e := range ls[sort.Search(len(ls), func(i int) bool { return ls[i].T >= from }):] {
+			if inScope(e) {
+				fn(e)
+			}
+		}
+	}
+}
+
 // covers tells which lines a scope counts and which accounts it holds: each account's own lines
 // from where its counting starts. Over 7 or 30 days a provider or every provider also counts the
 // lines whose account is not known (one the proxy no longer holds and never read), which add
@@ -873,10 +1098,10 @@ func (u *reading) covers(scope string) (func(core.LogEntry) bool, []string, bool
 	}, accounts, true
 }
 
-// warmReport reads the transcript of every session in the current weeks once, shortly after
-// start, so the first report a page asks for does not wait on that: after a restart a cold report
-// takes seconds per hundred sessions, longer than the page waits. What it reads is what the report
-// would (see noteTranscript); a stop ends it between two transcripts.
+// warmReport reads the log into its index and the transcript of every session in the current
+// weeks once, shortly after start, so the first report a page asks for does not wait on that. What
+// it reads is what the report would (see logView, noteTranscript); a stop ends it between two
+// transcripts.
 func warmReport(ctx context.Context) {
 	select {
 	case <-ctx.Done():
@@ -884,7 +1109,9 @@ func warmReport(ctx context.Context) {
 	case <-time.After(10 * time.Second):
 	}
 	defer func() { _ = recover() }()
-	for _, attr := range readUsage(time.Now(), "week", nil).week {
+	u := readUsage(time.Now(), "week", nil)
+	u.done() // its lines are not read below
+	for _, attr := range u.week {
 		for id := range attr.Sessions {
 			if ctx.Err() != nil {
 				return
@@ -915,6 +1142,7 @@ func usageResponse(query url.Values) ([]byte, error) {
 	}
 	rng = validRange(rng)
 	u := readUsage(now, rng, nil)
+	defer u.done()
 	scope = u.scopeOf(scope)
 	inScope, accounts, ok := u.covers(scope)
 	if !ok {
@@ -981,9 +1209,9 @@ func usageResponse(query url.Values) ([]byte, error) {
 	served := map[string]map[string]float64{}     // session to account to weight
 	usedProviders := map[string]map[string]bool{} // session to the providers it used
 	used7 := map[string]map[string]*dayUse{}      // provider to day to what ran
-	for _, e := range u.entries {
-		if e.Poll || !inScope(e) {
-			continue
+	u.each(inScope, func(e core.LogEntry) {
+		if e.Poll {
+			return
 		}
 		doc.Composition.Add(e)
 		id := core.ViewSession(e.Session)
@@ -1020,7 +1248,7 @@ func usageResponse(query url.Values) ([]byte, error) {
 			sh.Tokens.CacheWrite += e.CacheWrite
 			sh.Last = max(sh.Last, e.T)
 		}
-	}
+	})
 	// Each session's project is decided once for the whole report, so the accounts' parts, the
 	// table and the days name projects alike.
 	ids := map[string]bool{}
@@ -1199,17 +1427,18 @@ func usageSessionResponse(query url.Values) ([]byte, error) {
 	}
 	now := time.Now().In(reportZone(query.Get("tz")))
 	u := readUsage(now, rng, func(s string) bool { return core.ViewSession(s) == id })
+	defer u.done()
 	scope = u.scopeOf(scope)
 	inScope, accounts, ok := u.covers(scope)
 	if !ok {
 		return httpResponse(http.StatusNotFound, []byte(`{"error":"unknown account or provider"}`))
 	}
 	var lines []core.LogEntry
-	for _, e := range u.entries {
-		if !e.Poll && inScope(e) && core.ViewSession(e.Session) == id {
+	u.each(inScope, func(e core.LogEntry) {
+		if !e.Poll && core.ViewSession(e.Session) == id {
 			lines = append(lines, e)
 		}
-	}
+	})
 	type account struct {
 		ID       string  `json:"id"`
 		Label    string  `json:"label"` // "" when the account is no longer on the proxy

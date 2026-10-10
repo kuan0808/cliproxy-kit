@@ -34,6 +34,13 @@ $track: color-mix(in srgb, var(--text-primary) 9%, transparent);
   color: var(--text-secondary);
 }
 
+// Why the snapshot shown was not replaced: its age, beside it, says how old it is.
+.notUpdated {
+  display: block;
+  margin-top: 4px;
+  color: var(--warning-text);
+}
+
 .age::before {
   content: '·';
   margin: 0 6px;

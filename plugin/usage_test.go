@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
@@ -331,11 +332,11 @@ func TestLinesTheDiskRefusesComeBack(t *testing.T) {
 	}
 	defer os.Chmod(dir, 0o700)
 	lines := []core.LogEntry{{T: 1}, {T: 2}}
-	if failed := appendLines("", lines); len(failed) != 2 {
+	if failed := appendLines(lines); len(failed) != 2 {
 		t.Fatalf("a refused write kept %d of 2 lines", len(failed))
 	}
 	_ = os.Chmod(dir, 0o700)
-	if failed := appendLines("", lines); len(failed) != 0 {
+	if failed := appendLines(lines); len(failed) != 0 {
 		t.Fatalf("a write that went through returned %d lines", len(failed))
 	}
 }
@@ -357,18 +358,44 @@ func TestSessionTitlesFollowTheirTranscript(t *testing.T) {
 	write("First")
 	resetNamed()
 	metaMu.Lock()
-	transcripts, readStamps, indexedAt = map[string]string{}, map[string]fileStamp{}, time.Time{}
+	transcripts, reads, indexedAt = map[string]string{}, map[string]*transcriptRead{}, time.Time{}
 	metaMu.Unlock()
 	if got := sessionMeta("title-test").Title; got != "First" {
 		t.Fatalf("title = %q", got)
 	}
 	write("Second title")
 	if got := sessionMeta("title-test").Title; got != "Second title" {
-		t.Fatalf("after the transcript changed, title = %q", got)
+		t.Fatalf("after the transcript was written anew, title = %q", got)
+	}
+	// As Claude Code writes it, line by line: a rename shows, a line that names nothing keeps it,
+	// and only what was written since is read.
+	add := func(text string) {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.WriteString(text)
+		f.Close()
+	}
+	add(`{"type":"custom-title","customTitle":"Login revamp"}` + "\n")
+	if got := sessionMeta("title-test").Title; got != "Login revamp" {
+		t.Fatalf("after a rename, title = %q", got)
+	}
+	add(`{"type":"assistant","message":{"content":"done"}}` + "\n")
+	add(`{"type":"assistant","message":{"content":"half a li`) // still being written
+	if got := sessionMeta("title-test").Title; got != "Login revamp" {
+		t.Fatalf("after other lines, title = %q", got)
+	}
+	st, _ := os.Stat(path)
+	metaMu.Lock()
+	offset := reads["title-test"].offset
+	metaMu.Unlock()
+	if offset != st.Size()-int64(len(`{"type":"assistant","message":{"content":"half a li`)) {
+		t.Fatalf("read up to %d of %d", offset, st.Size())
 	}
 	// Claude Code deletes old transcripts; what this one said stays as long as the log.
 	os.Remove(path)
-	if got := sessionMeta("title-test").Title; got != "Second title" {
+	if got := sessionMeta("title-test").Title; got != "Login revamp" {
 		t.Fatalf("after the transcript was deleted, title = %q", got)
 	}
 }
@@ -658,5 +685,128 @@ func TestAttachmentsAreCountedApartFromText(t *testing.T) {
 		`{"role":"user","content":[{"type":"tool_result","content":[` + img + `]}]}]}`
 	if n, encoded := attachmentsOf([]byte(body)); n != 2 || encoded < 6000 || encoded > 6010 {
 		t.Fatalf("attachments %d, encoded %d", n, encoded)
+	}
+}
+
+// resetLogIndex forgets the log's index, as a restart does: the next report reads the files.
+func resetLogIndex() {
+	logIndex.mu.Lock()
+	defer logIndex.mu.Unlock()
+	logMu.Lock()
+	defer logMu.Unlock()
+	logIndex.loaded, logIndex.lines, logIndex.pending = false, nil, nil
+}
+
+// The log is read from its files once; what is written after reaches a report through the index,
+// in time order however late it was written, each line once, and lines past usageDays go. The
+// store loop takes written lines in, unless a report is reading them; then the next pass does.
+func TestTheLogIsReadOnceAndKeptAsItIsWritten(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetLogIndex()
+	defer resetLogIndex()
+	saved := state // the store loop writes what the state logged: here, nothing
+	state = core.New(newBootID(), nil)
+	defer func() { state = saved }()
+	now := time.Now()
+	at := func(d time.Duration) int64 { return now.Add(d).UnixMilli() }
+	outputs := func(ls []core.LogEntry) string {
+		got := []int64{}
+		for _, e := range ls {
+			got = append(got, e.Output)
+		}
+		return fmt.Sprint(got)
+	}
+	appendLines([]core.LogEntry{{T: at(-3 * time.Hour), Account: "a", Output: 1}, {T: at(-40 * 24 * time.Hour), Account: "a", Output: 9}})
+	// Lines past usageDays are not read, though the log began with one.
+	lines, began, done := logView(0)
+	if outputs(lines["a"]) != "[1]" || began != at(-40*24*time.Hour) {
+		done()
+		t.Fatalf("read from the files = %+v, began %d", lines, began)
+	}
+	// A report is reading: the store loop leaves what is written for its next pass.
+	appendLines([]core.LogEntry{{T: at(-time.Minute), Account: "a", Output: 2}})
+	var pass time.Time
+	storePass(&pass)
+	logMu.Lock()
+	waiting := len(logIndex.pending)
+	logMu.Unlock()
+	done()
+	if waiting != 1 {
+		t.Fatalf("taken in while a report read: %d waiting", waiting)
+	}
+	// A long request sent before a short one is written after it.
+	appendLines([]core.LogEntry{{T: at(-2 * time.Hour), Account: "a", Output: 3}, {T: at(-time.Minute), Account: "b", Output: 4}})
+	storePass(&pass)
+	logMu.Lock()
+	waiting = len(logIndex.pending)
+	logMu.Unlock()
+	if waiting != 0 {
+		t.Fatalf("the store loop left %d lines waiting", waiting)
+	}
+	lines, _, done = logView(at(-150 * time.Minute))
+	a, b := outputs(lines["a"]), outputs(lines["b"])
+	done()
+	if a != "[3 2]" || b != "[4]" {
+		t.Fatalf("lines since 2.5 hours ago = %s, b %s", a, b)
+	}
+	// Read anew from the files, as after a restart, it is the same.
+	resetLogIndex()
+	lines, _, done = logView(at(-150 * time.Minute))
+	a, b = outputs(lines["a"]), outputs(lines["b"])
+	done()
+	if a != "[3 2]" || b != "[4]" {
+		t.Fatalf("after a restart = %s, %s", a, b)
+	}
+}
+
+// A month file out of reach when the log is read is read again by the next report: no line is
+// lost to it.
+func TestAFileOutOfReachIsReadAgain(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetLogIndex()
+	defer resetLogIndex()
+	now := time.Now()
+	appendLines([]core.LogEntry{{T: now.Add(-time.Hour).UnixMilli(), Account: "a", Output: 1}})
+	file := filepath.Join(usageDir(), now.Add(-time.Hour).Format("2006-01")+".jsonl")
+	os.Chmod(file, 0)
+	defer os.Chmod(file, 0o600)
+	lines, _, done := logView(0)
+	n := len(lines["a"])
+	done()
+	if n != 0 {
+		t.Skip("this user reads files it may not") // root
+	}
+	os.Chmod(file, 0o600)
+	lines, _, done = logView(0)
+	n = len(lines["a"])
+	done()
+	if n != 1 {
+		t.Fatalf("after the file came back: %d lines", n)
+	}
+}
+
+// Two credentials of one account count as one, their lines in the order they were written: a
+// request answered in the same millisecond as a reading of the other comes first, as it was.
+func TestOneAccountsCredentialsKeepTheirOrder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetLogIndex()
+	defer resetLogIndex()
+	saved := state
+	state = core.New(newBootID(), nil)
+	defer func() { state = saved }()
+	state.UpdateInventory([]core.CredInfo{{ID: "claude-new.json", Provider: "claude"}})
+	state.SetIdentity("claude-old.json", "acct-1")
+	state.SetIdentity("claude-new.json", "acct-1")
+	at := time.Now().Add(-time.Hour).UnixMilli()
+	used := 0.5
+	appendLines([]core.LogEntry{
+		{T: at, Account: "claude-old.json", Provider: "claude", Session: "s1", Output: 10},
+		{T: at, Account: "claude-new.json", Provider: "claude", Poll: true, Used7d: &used},
+	})
+	u := readUsage(time.Now(), "week", nil)
+	defer u.done()
+	ls := u.lines["claude-new.json"]
+	if len(ls) != 2 || ls[0].Poll || !ls[1].Poll || ls[0].Account != "claude-new.json" {
+		t.Fatalf("lines = %+v", ls)
 	}
 }

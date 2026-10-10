@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import type { ReadFailure } from '@/services/api';
 import type {
   QuotaPilotTokens,
   QuotaPilotUsage,
@@ -223,6 +224,11 @@ export function sessionSources(
       ? [{ kind: 'device', key: 'why_remote_named', raw: device }]
       : [DEVICE];
   return [...where, ...(app ? [app] : [])];
+}
+
+/** Why a read of the proxy failed, in words. */
+export function failureText(t: TFunction, failure: ReadFailure): string {
+  return t(`quota_pilot.failure_${failure.kind}`, failure.kind === 'error' ? { message: failure.message } : {});
 }
 
 /** A tag's text: "Automated", the device's name or "Other device", or the app's name. */

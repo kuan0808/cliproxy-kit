@@ -1,28 +1,29 @@
 import { useEffect, useState } from 'react';
-import { quotaPilotApi, useManagementKey } from '@/services/api';
+import { failureOf, quotaPilotApi, useManagementKey, type ReadFailure } from '@/services/api';
 import type { QuotaPilotSnapshot } from '@/types';
 import { useUsageVersion } from '../usageRefresh';
+import { polledAfter, type Polled } from './useQuotaPilotUsage';
 
 export const QUOTA_PILOT_POLL_MS = 15_000;
 
+/** `failure` on a live snapshot says why the last read did not replace it. */
 export type QuotaPilotSnapshotState =
   | { status: 'loading' }
-  | { status: 'live'; snapshot: QuotaPilotSnapshot }
-  | { status: 'unavailable' };
+  | { status: 'live'; snapshot: QuotaPilotSnapshot; failure: ReadFailure | null }
+  | { status: 'unavailable'; failure: ReadFailure };
 
 const LOADING: QuotaPilotSnapshotState = { status: 'loading' };
 
 /**
  * Polls the quota-pilot snapshot every 15 s while mounted and the browser tab is visible;
- * returning to the tab, or a refresh, reads it at once. A failure reads as "unavailable". Results are tagged
- * with the key they were read with, so an answer from before the key changed never shows.
+ * returning to the tab, or a refresh, reads it at once. A read that fails keeps the last snapshot,
+ * saying why; with none it reads as "unavailable". Results are tagged with the key they were read
+ * with, so an answer from before the key changed never shows.
  */
 export function useQuotaPilotSnapshot(): QuotaPilotSnapshotState {
   const key = useManagementKey();
   const version = useUsageVersion();
-  const [result, setResult] = useState<{ key: string; state: QuotaPilotSnapshotState } | null>(
-    null
-  );
+  const [result, setResult] = useState<Polled<QuotaPilotSnapshot> | null>(null);
 
   useEffect(() => {
     if (!key) return;
@@ -35,9 +36,10 @@ export function useQuotaPilotSnapshot(): QuotaPilotSnapshotState {
       inFlight = true;
       try {
         const snapshot = await quotaPilotApi.getSnapshot();
-        if (!disposed) setResult({ key, state: { status: 'live', snapshot } });
-      } catch {
-        if (!disposed) setResult({ key, state: { status: 'unavailable' } });
+        if (!disposed) setResult((prev) => polledAfter(prev, key, key, { value: snapshot }));
+      } catch (err: unknown) {
+        const failure = failureOf(err);
+        if (!disposed) setResult((prev) => polledAfter(prev, key, key, { failure }));
       } finally {
         inFlight = false;
       }
@@ -56,5 +58,7 @@ export function useQuotaPilotSnapshot(): QuotaPilotSnapshotState {
     };
   }, [key, version]);
 
-  return key && result?.key === key ? result.state : LOADING;
+  if (!key || result?.key !== key) return LOADING;
+  if (result.value) return { status: 'live', snapshot: result.value, failure: result.failure };
+  return result.failure ? { status: 'unavailable', failure: result.failure } : LOADING;
 }

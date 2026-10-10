@@ -15,7 +15,7 @@ const baseProps: QuotaLedgerViewProps = {
   tab: 'all',
   search: '',
   resolvedTheme: 'light',
-  snapshot: { status: 'live', snapshot },
+  snapshot: { status: 'live', snapshot, failure: null },
   showEmails: false,
   onShowEmailsChange: () => {},
   now: NOW_MS,
@@ -64,16 +64,23 @@ describe('QuotaLedger rendering', () => {
     expect(render({ showEmails: true })).toContain('alice@example.com');
   });
 
-  test('says so when the plugin does not answer, with no rows and no footer', () => {
-    const markup = render({ snapshot: { status: 'unavailable' } });
+  test('says why when no snapshot was read, with no rows and no footer', () => {
+    const markup = render({ snapshot: { status: 'unavailable', failure: { kind: 'missing' } } });
     expect(markup).toContain('Cannot read quota-pilot');
+    expect(markup).toContain('quota-pilot does not answer on this proxy; check it under Plugins');
     expect(markup).not.toContain('Sessions bound now');
     expect(markup).not.toContain('Plugin settings');
   });
 
+  test('keeps the snapshot read before when a read fails, and says why', () => {
+    const markup = render({ snapshot: { status: 'live', snapshot, failure: { kind: 'timeout' } } });
+    expect(markup).toContain('Not updated: the proxy took over 30 seconds to answer');
+    expect(markup).toContain('Sessions bound now');
+  });
+
   test('with no account at all, says how to add one; with a filter, that nothing matches', () => {
     const none = { ...snapshot, providers: {} };
-    expect(render({ snapshot: { status: 'live', snapshot: none } })).toContain(
+    expect(render({ snapshot: { status: 'live', snapshot: none, failure: null } })).toContain(
       'No Claude or Codex account is logged in to the proxy yet.'
     );
     expect(render({ search: 'nobody@' })).toContain('quota-pilot reports no credentials for this provider or search.');

@@ -32,6 +32,7 @@ import {
   averageContext,
   cacheHitRate,
   cacheWritesOf,
+  failureText,
   formatDate,
   formatDay,
   formatDayTime,
@@ -741,20 +742,27 @@ function SessionDetail({
         <p className={styles.foot}>
           {state.status === 'loading'
             ? t('quota_usage.detail_loading')
-            : t('quota_usage.unavailable_title')}
+            : `${t('quota_usage.unavailable_title')}: ${failureText(t, state.failure)}`}
         </p>
       </div>
     );
   }
   return (
-    <SessionDetailView
-      detail={state.detail}
-      title={title}
-      project={project}
-      sources={sources}
-      range={range}
-      locale={locale}
-    />
+    <>
+      {state.failure && (
+        <p className={styles.notUpdated} role="status">
+          {t('quota_pilot.not_updated', { why: failureText(t, state.failure) })}
+        </p>
+      )}
+      <SessionDetailView
+        detail={state.detail}
+        title={title}
+        project={project}
+        sources={sources}
+        range={range}
+        locale={locale}
+      />
+    </>
   );
 }
 

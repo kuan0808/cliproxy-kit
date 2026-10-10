@@ -30,6 +30,7 @@ import type { QuotaTabId } from '../constants';
 import type { QuotaPilotSnapshotState } from '../hooks/useQuotaPilotSnapshot';
 import { useQuotaPilotUsage, type QuotaPilotUsageResult } from '../hooks/useQuotaPilotUsage';
 import {
+  failureText,
   formatDayTime,
   formatShare,
   isWindowRange,
@@ -92,7 +93,11 @@ export function QuotaUsage({
       onPick={(next, provider) => setPicked({ scope: next, provider })}
       range={range}
       onRange={setRange}
-      state={snapshot.status === 'unavailable' ? { status: 'unavailable', latest: null } : usage}
+      state={
+        snapshot.status === 'unavailable'
+          ? { status: 'unavailable', failure: snapshot.failure, latest: null }
+          : usage
+      }
       tab={tab}
       search={search}
       onClearSearch={onClearSearch}
@@ -164,13 +169,18 @@ export function QuotaUsageView({
           <Skeleton height={220} rounded={12} />
           <Skeleton height={260} rounded={12} />
         </div>
-      ) : !usage ? (
+      ) : state.status === 'unavailable' ? (
         <EmptyState
           title={t('quota_usage.unavailable_title')}
-          description={t('quota_usage.unavailable_desc')}
+          description={t('quota_usage.unavailable_desc', { why: failureText(t, state.failure) })}
         />
-      ) : (
+      ) : usage ? (
         <>
+          {state.status === 'ready' && state.failure && (
+            <p className={styles.notUpdated} role="status">
+              {t('quota_pilot.not_updated', { why: failureText(t, state.failure) })}
+            </p>
+          )}
           <UsageSummary usage={usage} now={now} />
           <UsageTable usage={usage} search={search} now={now} onClearSearch={onClearSearch} />
           <details className={styles.method}>
@@ -184,7 +194,7 @@ export function QuotaUsageView({
             <p>{t('quota_usage.method_tier')}</p>
           </details>
         </>
-      )}
+      ) : null}
     </section>
   );
 }

@@ -1,5 +1,10 @@
 {
   "quota_pilot": {
+    "failure_timeout": "proxy 超過 30 秒沒有回應，機器非常忙時會這樣",
+    "failure_missing": "這個 proxy 上的 quota-pilot 沒有回應，請到「插件」確認",
+    "failure_unreachable": "連不到 proxy",
+    "failure_error": "proxy 回應：{{message}}",
+    "not_updated": "沒有更新：{{why}}。先顯示上次讀到的資料，頁面很快會再試一次。",
     "title": "用量帳本",
     "meta_accounts": "{{count}} 個帳號",
     "meta_sessions": "{{count}} 個 session 使用中",
@@ -73,7 +78,7 @@
     "view_usage": "用量",
     "source_unavailable": "讀不到 quota-pilot 的資料",
     "unavailable_title": "讀不到 quota-pilot 的資料",
-    "unavailable_desc": "外掛沒有回應。確認 proxy 正在執行，再按「重新整理」。",
+    "unavailable_desc": "讀取失敗：{{why}}。頁面每 15 秒會再試一次。",
     "pool_used": "每週已用",
     "five_used": "5 小時已用",
     "used_value": "已用 {{value}}%",
@@ -212,7 +217,7 @@
     "empty_title": "沒有符合的項目",
     "empty_search": "沒有專案或 session 符合搜尋。",
     "unavailable_title": "讀不到用量資料",
-    "unavailable_desc": "需要 quota-pilot 插件在執行。",
+    "unavailable_desc": "讀取失敗：{{why}}。頁面每分鐘會再試一次。",
     "project_unknown": "未歸類",
     "project_home": "家目錄（~）",
     "project_root": "根目錄（/）",

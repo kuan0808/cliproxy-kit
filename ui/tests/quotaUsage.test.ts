@@ -184,7 +184,7 @@ const baseProps: QuotaUsageViewProps = {
   onPick: () => {},
   range: 'week',
   onRange: () => {},
-  state: { status: 'ready', usage, latest: usage },
+  state: { status: 'ready', usage, failure: null, latest: usage },
   tab: 'all',
   search: '',
   resolvedTheme: 'dark',
@@ -373,7 +373,7 @@ describe('usage view', () => {
     });
     const markup = render({
       scope: 'codex-k.json',
-      state: { status: 'ready', usage: codex, latest: codex },
+      state: { status: 'ready', usage: codex, failure: null, latest: codex },
     });
     expect(markup).toContain('No request has gone through the proxy since logging began');
     // What the requests cannot explain claims no source, and its hint names the proxy.
@@ -401,7 +401,7 @@ describe('usage view', () => {
     });
     const markup = render({
       scope: 'codex-k.json',
-      state: { status: 'ready', usage: codex, latest: codex },
+      state: { status: 'ready', usage: codex, failure: null, latest: codex },
     });
     expect(markup).toContain('Pro 200');
     expect(markup).toContain('19%');
@@ -467,7 +467,7 @@ describe('usage view', () => {
     });
     const markup = render({
       scope: 'codex-k.json',
-      state: { status: 'ready', usage: codex, latest: codex },
+      state: { status: 'ready', usage: codex, failure: null, latest: codex },
     });
     // Codex started by Claude Code is a program's run; the others name their app.
     expect(markup).toContain('Automated</span>');
@@ -486,7 +486,7 @@ describe('usage view', () => {
     });
     const single = render({
       scope: 'codex-k.json',
-      state: { status: 'ready', usage: one, latest: one },
+      state: { status: 'ready', usage: one, failure: null, latest: one },
     });
     expect(single).toContain('Automated</span>1 session');
     expect(single.split('Automated</span>').length - 1).toBe(1);
@@ -504,7 +504,7 @@ describe('usage view', () => {
         },
       ],
     });
-    const runs = render({ state: { status: 'ready', usage: sdk, latest: sdk } });
+    const runs = render({ state: { status: 'ready', usage: sdk, failure: null, latest: sdk } });
     expect(runs).toContain('Automated</span>2 sessions');
     expect(runs).not.toContain('Agent SDK');
     expect(runs).not.toContain('claude -p');
@@ -520,7 +520,7 @@ describe('usage view', () => {
     const gathered = report({
       projects: [{ ...projects[0], sessions: [projects[0].sessions[0], ...reviews] }],
     });
-    const state = { status: 'ready' as const, usage: gathered, latest: gathered };
+    const state = { status: 'ready' as const, usage: gathered, failure: null, latest: gathered };
     const closed = render({ state });
     expect(closed).toContain('4 sessions</span> · ');
     expect(closed).toContain('Automated</span>3');
@@ -598,7 +598,7 @@ describe('usage view', () => {
     expect(five.providers[0].accounts[0].restartedAtMs).toBe(NOW_MS - H);
     expect(five.providers[1].accounts[0].noWindow).toBe(true);
     expect(five.windows.claude).toHaveLength(2);
-    const markup = render({ range: '5h', state: { status: 'ready', usage: five, latest: five } });
+    const markup = render({ range: '5h', state: { status: 'ready', usage: five, failure: null, latest: five } });
     expect(markup).toContain('<button type="button" aria-pressed="true">5-hour window</button>');
     // The picker speaks of 5-hour quota; Codex has none.
     expect(markup).toContain('2 accounts · 5-hour quota');
@@ -618,7 +618,7 @@ describe('usage view', () => {
     expect(markup).not.toContain('Usage per day');
     // The window before is not a bar when its readings did not name their reset.
     const alone = { ...five, windows: { claude: five.windows.claude.filter((w) => w.running) } };
-    const aloneMarkup = render({ range: '5h', state: { status: 'ready', usage: alone, latest: alone } });
+    const aloneMarkup = render({ range: '5h', state: { status: 'ready', usage: alone, failure: null, latest: alone } });
     expect(aloneMarkup).toContain('this window counts from then.');
     expect(aloneMarkup).not.toContain('The window before shows in the bars above.');
   });
@@ -632,7 +632,7 @@ describe('usage view', () => {
         ),
       })),
     });
-    const markup = render({ state: { status: 'ready', usage: restarted, latest: restarted } });
+    const markup = render({ state: { status: 'ready', usage: restarted, failure: null, latest: restarted } });
     expect(markup).toContain('k••• started over on');
     expect(markup).toContain(
       'this week counts from then. What it used before shows in the last 7 days.'
@@ -657,7 +657,7 @@ describe('usage view', () => {
     });
     const markup = render({
       scope: 'claude-k.json',
-      state: { status: 'ready', usage: blank, latest: blank },
+      state: { status: 'ready', usage: blank, failure: null, latest: blank },
     });
     expect(markup).toContain('Not read this week');
     expect(markup).toContain('No quota reading this week yet');
@@ -700,7 +700,7 @@ describe('usage view', () => {
         },
       ],
     });
-    const markup = render({ scope: 'all', state: { status: 'ready', usage: all, latest: all } });
+    const markup = render({ scope: 'all', state: { status: 'ready', usage: all, failure: null, latest: all } });
     expect(markup).toContain('Each provider in its own quota, never added together');
     expect(markup).toContain('Claude quota');
     expect(markup).toContain('Codex quota');
@@ -753,7 +753,7 @@ describe('usage view', () => {
     const markup = render({
       scope: 'all',
       range: '7d',
-      state: { status: 'ready', usage: ranged, latest: ranged },
+      state: { status: 'ready', usage: ranged, failure: null, latest: ranged },
     });
     expect(markup).toContain('Last 7 days');
     expect(markup).toContain('145%');
@@ -813,7 +813,7 @@ describe('usage view', () => {
     });
     const markup = render({
       scope: 'claude-k.json',
-      state: { status: 'ready', usage: one, latest: one },
+      state: { status: 'ready', usage: one, failure: null, latest: one },
     });
     const start = markup.indexOf('class="legend"');
     const legend = markup.slice(start, markup.indexOf('</ul>', start));
@@ -830,7 +830,7 @@ describe('usage view', () => {
       to: NOW_MS + 50_000,
       projects: [{ ...projects[0], last: NOW_MS + 40_000 }],
     });
-    const markup = render({ state: { status: 'ready', usage: fresh, latest: fresh } });
+    const markup = render({ state: { status: 'ready', usage: fresh, failure: null, latest: fresh } });
     expect(markup).not.toContain('in 1 minute');
     expect(markup).not.toContain(' from now');
   });
@@ -846,7 +846,7 @@ describe('usage view', () => {
     });
     const markup = render({
       range: '30d',
-      state: { status: 'ready', usage: blank, latest: blank },
+      state: { status: 'ready', usage: blank, failure: null, latest: blank },
     });
     const summary = markup.slice(
       markup.indexOf('class="summary"'),
@@ -873,7 +873,7 @@ describe('usage view', () => {
     });
     const markup = render({
       range: '7d',
-      state: { status: 'ready', usage: ranged, latest: ranged },
+      state: { status: 'ready', usage: ranged, failure: null, latest: ranged },
     });
     expect(markup).toContain('logged since k•••');
     expect(markup).toContain(', d•••');
@@ -930,7 +930,7 @@ describe('usage view', () => {
       ],
     });
     expect(all.projects[0].usedBy).toEqual({ claude: 0, codex: 0.05 });
-    const markup = render({ scope: 'all', state: { status: 'ready', usage: all, latest: all } });
+    const markup = render({ scope: 'all', state: { status: 'ready', usage: all, failure: null, latest: all } });
     const table = markup.slice(markup.indexOf('role="table"'));
     expect(table).toContain('<span class="value">0%</span>');
     expect(table).toContain('Claude Code via proxy');
@@ -946,7 +946,7 @@ describe('usage view', () => {
       outside: 0,
       daily: { claude: week7('claude') },
     });
-    const none = render({ range: '7d', state: { status: 'ready', usage: blank, latest: blank } });
+    const none = render({ range: '7d', state: { status: 'ready', usage: blank, failure: null, latest: blank } });
     expect(none.split('chartDay chartUnread').length - 1).toBe(7);
     // No reading at all is not the same as before logging began.
     expect(none).toContain('No quota reading: tokens only');
@@ -963,7 +963,7 @@ describe('usage view', () => {
     });
     const markup = render({
       range: '7d',
-      state: { status: 'ready', usage: partial, latest: partial },
+      state: { status: 'ready', usage: partial, failure: null, latest: partial },
     });
     expect(markup).toContain('d••• had no quota reading in this range');
     expect(markup).toContain('2.0% of the use not matched to a request was read across midnight');
@@ -984,7 +984,7 @@ describe('usage view', () => {
     const markup = render({
       scope: 'all',
       range: '30d',
-      state: { status: 'ready', usage: all, latest: all },
+      state: { status: 'ready', usage: all, failure: null, latest: all },
     });
     const picker = markup.slice(0, markup.indexOf('class="summary"'));
     expect(picker).not.toContain('Gemini');
@@ -1002,7 +1002,7 @@ describe('usage view', () => {
       unread: ['claude-d.json'],
       daily: { claude: week7('claude') },
     });
-    const ranged = render({ range: '7d', state: { status: 'ready', usage: zero, latest: zero } });
+    const ranged = render({ range: '7d', state: { status: 'ready', usage: zero, failure: null, latest: zero } });
     expect(ranged).toContain('d••• had no quota reading in this range');
     expect(ranged).not.toContain('Nothing used in this range');
     const half = providers.map((p) => ({
@@ -1010,7 +1010,7 @@ describe('usage view', () => {
       accounts: p.accounts.map((a, i) => ({ ...a, used: 0, before_log: 0, known: i === 0 })),
     }));
     const week = report({ used: 0, before_log: 0, outside: 0, providers: half, projects: [] });
-    expect(render({ state: { status: 'ready', usage: week, latest: week } })).not.toContain(
+    expect(render({ state: { status: 'ready', usage: week, failure: null, latest: week } })).not.toContain(
       'Nothing used this week yet.'
     );
   });
@@ -1034,15 +1034,24 @@ describe('usage view', () => {
     expect(markup).not.toContain('Cache hit rate');
   });
 
-  test('without the plugin it says what is missing', () => {
-    expect(render({ state: { status: 'unavailable', latest: null } })).toContain(
-      'The quota-pilot plugin needs to be running.'
+  test('with no report read it says why: not answering in time is not a missing plugin', () => {
+    expect(render({ state: { status: 'unavailable', failure: { kind: 'timeout' }, latest: null } })).toContain(
+      'Could not read it: the proxy took over 30 seconds to answer'
     );
+    expect(render({ state: { status: 'unavailable', failure: { kind: 'missing' }, latest: null } })).toContain(
+      'quota-pilot does not answer on this proxy'
+    );
+  });
+
+  test('a read that fails keeps the report read before, and says why', () => {
+    const markup = render({ state: { status: 'ready', usage, failure: { kind: 'unreachable' }, latest: usage } });
+    expect(markup).toContain('Not updated: the proxy cannot be reached');
+    expect(markup).toContain('Projects and sessions');
   });
 });
 
 describe('days, totals and texts that follow what is known', () => {
-  const ready = (u: ReturnType<typeof report>) => ({ status: 'ready' as const, usage: u, latest: u });
+  const ready = (u: ReturnType<typeof report>) => ({ status: 'ready' as const, usage: u, failure: null, latest: u });
   const covered = [
     { provider: 'claude', accounts: [account('claude-k.json', 'k•••', { covered_from: NOW_MS - 30 * 24 * H })] },
   ];

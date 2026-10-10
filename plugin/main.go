@@ -1079,29 +1079,33 @@ func storeLoop(ctx context.Context) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	for {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					state.NoteError(fmt.Sprintf("store loop panic: %v", r))
-				}
-			}()
-			appendLog(state.TakeLog())
-			if time.Since(lastPrune) >= 24*time.Hour {
-				pruneLog(time.Now())
-				lastPrune = time.Now()
-			}
-			state.Sweep()
-			if state.TakeDirty() {
-				saveState()
-			}
-			saveNamed()
-		}()
+		storePass(&lastPrune)
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 		}
 	}
+}
+
+// storePass is one pass of the store loop.
+func storePass(lastPrune *time.Time) {
+	defer func() {
+		if r := recover(); r != nil {
+			state.NoteError(fmt.Sprintf("store loop panic: %v", r))
+		}
+	}()
+	appendLog(state.TakeLog())
+	takeLines()
+	if time.Since(*lastPrune) >= 24*time.Hour {
+		pruneLog(time.Now())
+		*lastPrune = time.Now()
+	}
+	state.Sweep()
+	if state.TakeDirty() {
+		saveState()
+	}
+	saveNamed()
 }
 
 func writeAtomic(path string, body []byte) error {

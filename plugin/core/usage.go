@@ -15,6 +15,7 @@ import (
 // LogEntry is one line of the usage log.
 type LogEntry struct {
 	T          int64    `json:"t"`           // unix milliseconds
+	Seq        uint64   `json:"-"`           // the order it was written in, among lines of one time: set by the log's index
 	Session    string   `json:"s,omitempty"` // Claude Code's session id of the main conversation
 	Agent      bool     `json:"a,omitempty"` // sent by a subagent or a fork of that session
 	Account    string   `json:"acct"`

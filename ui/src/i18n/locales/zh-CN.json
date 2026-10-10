@@ -1,5 +1,10 @@
 {
   "quota_pilot": {
+    "failure_timeout": "proxy 超过 30 秒没有响应，机器非常忙时会这样",
+    "failure_missing": "这个 proxy 上的 quota-pilot 没有响应，请到「插件」确认",
+    "failure_unreachable": "连不上 proxy",
+    "failure_error": "proxy 响应：{{message}}",
+    "not_updated": "没有更新：{{why}}。先显示上次读到的数据，页面很快会再试一次。",
     "title": "用量账本",
     "meta_accounts": "{{count}} 个账号",
     "meta_sessions": "{{count}} 个 session 使用中",
@@ -73,7 +78,7 @@
     "view_usage": "用量",
     "source_unavailable": "读不到 quota-pilot 的数据",
     "unavailable_title": "读不到 quota-pilot 的数据",
-    "unavailable_desc": "插件没有响应。确认 proxy 正在运行，再点「刷新」。",
+    "unavailable_desc": "读取失败：{{why}}。页面每 15 秒会再试一次。",
     "pool_used": "每周已用",
     "five_used": "5 小时已用",
     "used_value": "已用 {{value}}%",
@@ -212,7 +217,7 @@
     "empty_title": "没有符合的条目",
     "empty_search": "没有项目或 session 符合搜索。",
     "unavailable_title": "读不到用量数据",
-    "unavailable_desc": "需要 quota-pilot 插件在运行。",
+    "unavailable_desc": "读取失败：{{why}}。页面每分钟会再试一次。",
     "project_unknown": "未归类",
     "project_home": "主目录（~）",
     "project_root": "根目录（/）",

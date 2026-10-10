@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { submitKey, useManagementKey } from '@/services/api/client';
+import { ApiError, failureOf, submitKey, useManagementKey } from '@/services/api/client';
+import { polledAfter } from '@/features/quota/hooks/useQuotaPilotUsage';
 import {
   QUOTA_PILOT_SNAPSHOT_PATH,
   normalizeQuotaPilotSnapshot,
@@ -108,5 +109,33 @@ describe('quota-pilot snapshot API', () => {
     ]);
     expect(normalizeQuotaPilotSnapshot(null)).toBeNull();
     expect(normalizeQuotaPilotSnapshot({ providers: [] })).toBeNull();
+  });
+});
+
+describe('read failures', () => {
+  test('say why a read failed', () => {
+    expect(failureOf(new DOMException('timed out', 'TimeoutError'))).toEqual({ kind: 'timeout' });
+    expect(failureOf(new ApiError('HTTP 404', 404))).toEqual({ kind: 'missing' });
+    expect(failureOf(new ApiError('boom', 500))).toEqual({ kind: 'error', message: 'boom' });
+    expect(failureOf(new TypeError('Failed to fetch'))).toEqual({ kind: 'unreachable' });
+  });
+});
+
+describe('a poll that fails', () => {
+  test('keeps what it read for the same request and key, beside why; for another, nothing', () => {
+    const read = polledAfter<string>(null, 'week', 'k1', { value: 'report' });
+    expect(read).toEqual({ key: 'week', auth: 'k1', value: 'report', failure: null });
+    const failed = polledAfter(read, 'week', 'k1', { failure: { kind: 'timeout' } });
+    expect(failed).toEqual({ key: 'week', auth: 'k1', value: 'report', failure: { kind: 'timeout' } });
+    expect(polledAfter(failed, 'week', 'k1', { value: 'newer' }).failure).toBe(null);
+    expect(polledAfter(read, '7d', 'k1', { failure: { kind: 'timeout' } }).value).toBe(null);
+    expect(polledAfter(read, 'week', 'k2', { failure: { kind: 'timeout' } }).value).toBe(null);
+  });
+
+  test('a 404 the plugin names is its answer, not a missing plugin', () => {
+    expect(failureOf(new ApiError('unknown account or provider', 404, true))).toEqual({
+      kind: 'error',
+      message: 'unknown account or provider',
+    });
   });
 });

@@ -136,6 +136,14 @@ credentials the snapshot names the second as the same account, so the ledger, th
 report count its quota once. Accounts are named by masked labels, kept apart with more letters, then
 a number, when two would read alike.
 
+The report reads the log from memory: the last 38 days are read from the files once, shortly
+after start, and each line is added as it is written, every account's in time order. A report
+then walks only the lines of its range. A transcript is read once from its start for its folder,
+how it was run and its first request, then only for what was written since; where a folder
+belongs is looked up again after ten minutes. A busy machine gives the proxy, a background service,
+little CPU, so a report that did all of this anew took seconds and grew with the log. The page
+waits 30 seconds for a read; one that fails keeps what was read before and says why.
+
 Over 5 hours the same split runs on the 5-hour readings: each account's running window, and the
 windows of the last day, told apart by the reset each reading names (logged from 0.1.4 on, so
 earlier windows are not listed). For an idle account Claude still names a reset, a later one with

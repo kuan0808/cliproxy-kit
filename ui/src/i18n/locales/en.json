@@ -1,5 +1,10 @@
 {
   "quota_pilot": {
+    "failure_timeout": "the proxy took over 30 seconds to answer, as a very busy machine can",
+    "failure_missing": "quota-pilot does not answer on this proxy; check it under Plugins",
+    "failure_unreachable": "the proxy cannot be reached",
+    "failure_error": "the proxy answered: {{message}}",
+    "not_updated": "Not updated: {{why}}. Showing what was read before; the page tries again shortly.",
     "title": "Usage ledger",
     "meta_accounts_one": "{{count}} account",
     "meta_accounts_other": "{{count}} accounts",
@@ -79,7 +84,7 @@
     "view_usage": "Usage",
     "source_unavailable": "Cannot read quota-pilot",
     "unavailable_title": "Cannot read quota-pilot",
-    "unavailable_desc": "The plugin did not answer. Check that the proxy is running, then press Refresh.",
+    "unavailable_desc": "Could not read it: {{why}}. The page tries again every 15 seconds.",
     "pool_used": "Weekly used",
     "five_used": "5-hour used",
     "used_value": "{{value}}% used",
@@ -225,7 +230,7 @@
     "empty_title": "Nothing matches",
     "empty_search": "No project or session matches the search.",
     "unavailable_title": "No usage data",
-    "unavailable_desc": "The quota-pilot plugin needs to be running.",
+    "unavailable_desc": "Could not read it: {{why}}. The page tries again every minute.",
     "project_unknown": "Unsorted",
     "project_home": "Home folder (~)",
     "project_root": "Root folder (/)",

@@ -34,6 +34,7 @@ import {
   type LedgerWindow,
 } from '../ledgerModel';
 import type { QuotaPilotSnapshotState } from '../hooks/useQuotaPilotSnapshot';
+import { failureText } from '../usageFormat';
 import { readQuotaUiState, writeQuotaUiState } from '../uiState';
 import { QUOTA_PROGRESS_HIGH_THRESHOLD, QUOTA_PROGRESS_MEDIUM_THRESHOLD } from '../constants';
 import styles from './QuotaLedger.module.scss';
@@ -112,6 +113,11 @@ export function QuotaLedgerView({
               ? t('quota_ledger.source_loading')
               : t('quota_ledger.source_unavailable')}
           {live && <SnapshotAge generatedAtMs={live.generatedAtMs} now={nowProp} />}
+          {snapshot.status === 'live' && snapshot.failure && (
+            <span className={styles.notUpdated} role="status">
+              {t('quota_pilot.not_updated', { why: failureText(t, snapshot.failure) })}
+            </span>
+          )}
         </p>
         <ToggleSwitch
           name="show-emails"
@@ -130,7 +136,11 @@ export function QuotaLedgerView({
       ) : !live ? (
         <EmptyState
           title={t('quota_ledger.unavailable_title')}
-          description={t('quota_ledger.unavailable_desc')}
+          description={
+            snapshot.status === 'unavailable'
+              ? t('quota_ledger.unavailable_desc', { why: failureText(t, snapshot.failure) })
+              : undefined
+          }
         />
       ) : ledger.groups.length === 0 ? (
         <EmptyState

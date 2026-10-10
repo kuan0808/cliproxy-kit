@@ -107,8 +107,11 @@ def private_details():
     for value in list(found):
         for email in re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', value):
             found.update((email, email.split('@')[0]))
-    # Short or ordinary words would only raise false alarms.
-    return {v for v in found if isinstance(v, str) and len(v) >= 6 and not v.isdigit()}
+    # The name and email commits are made under are public by choice, though an account names the
+    # person alike; short or ordinary words would only raise false alarms.
+    email = run('git', 'config', 'user.email').lower()
+    public = {run('git', 'config', 'user.name').lower(), email, email.split('@')[0]}
+    return {v for v in found if isinstance(v, str) and len(v) >= 6 and not v.isdigit() and v.lower() not in public}
 
 
 # Names whose values are secrets: api-keys, api-key, secret-key, band_tokens and the like; not Codex's

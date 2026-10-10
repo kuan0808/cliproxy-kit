@@ -1,5 +1,10 @@
 {
   "quota_pilot": {
+    "failure_timeout": "прокси не ответил за 30 секунд; так бывает, когда машина сильно загружена",
+    "failure_missing": "quota-pilot не отвечает на этом прокси; проверьте его в разделе «Плагины»",
+    "failure_unreachable": "прокси недоступен",
+    "failure_error": "прокси ответил: {{message}}",
+    "not_updated": "Не обновлено: {{why}}. Показаны прежние данные; страница скоро попробует снова.",
     "title": "Учёт квот",
     "meta_accounts_one": "{{count}} аккаунт",
     "meta_accounts_few": "{{count}} аккаунта",
@@ -91,7 +96,7 @@
     "view_usage": "Использование",
     "source_unavailable": "Нет данных quota-pilot",
     "unavailable_title": "Нет данных quota-pilot",
-    "unavailable_desc": "Плагин не ответил. Проверьте, что прокси запущен, и нажмите «Обновить».",
+    "unavailable_desc": "Не удалось прочитать: {{why}}. Страница пробует снова каждые 15 секунд.",
     "pool_used": "Использовано за неделю",
     "five_used": "Использовано за 5 часов",
     "used_value": "Использовано {{value}}%",
@@ -251,7 +256,7 @@
     "empty_title": "Ничего не найдено",
     "empty_search": "Нет проектов или сессий по запросу.",
     "unavailable_title": "Нет данных об использовании",
-    "unavailable_desc": "Нужен запущенный плагин quota-pilot.",
+    "unavailable_desc": "Не удалось прочитать: {{why}}. Страница пробует снова каждую минуту.",
     "project_unknown": "Без категории",
     "project_home": "Домашняя папка (~)",
     "project_root": "Корневая папка (/)",
