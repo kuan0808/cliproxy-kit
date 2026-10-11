@@ -293,6 +293,9 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296:
 - A plugin library replaced in place is loaded again only when the proxy restarts.
 - The desktop app points its Claude Code sessions at Anthropic's own API with its own sign-in, so
   they bypass the proxy; a prompt a `prompt.submit` hook drops goes back into the prompt box.
+- The desktop app lays a plugin's tree out as CSS: widths in `ch`, heights and vertical spacing in
+  half lines, colour names from its theme, an SVG as an image that sees none of the theme. Beneath
+  the band it draws a slot for the engine's own drawing, as an element even when that is empty.
 - Claude Code sends its session id in `X-Claude-Code-Session-Id`, and continues server-side message
   threads; an expired thread is answered `404 thread_not_found`, which CLIProxyAPI 8.0.14 and later
   pass through so Claude Code replays the conversation.

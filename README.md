@@ -266,9 +266,9 @@ Cards while Claude waits, one line while it works:
 | Control | What it does |
 | --- | --- |
 | `switch` | Moves this session to another account, or to another provider's model and back. While the cache is warm it first says what the move costs, and can hand off first. |
-| `hand off` | In the row when the context passes 60%, the next turn would start cold, or a move would. Claude writes a note (goal, done, not done, changes, watch out, next step), the conversation clears, and a new one starts from it. `/handoff [message]` does it any time, with the message after the note. |
+| `hand off` | In the row when the context passes 60%, the next turn would start cold, or a move would. Claude writes a note (goal, done, not done, changes, watch out, next step), the conversation clears, and a new one starts from it. `/handoff [message]` does it any time, with the message after the note. |
 | `quota` | Every account's windows; `/quota` opens the same. |
-| `more` / `less` | Cards or one line, until the turn changes. |
+| `more` / `less` | Cards or one line, until the turn changes (**Expand** / **Collapse** in the desktop app). |
 
 **Before a cold turn.** When the next turn would rewrite more than 100k tokens of cache, a message
 you send waits in the prompt and the row asks: **Enter** again sends it, or hand off with it. While
@@ -276,7 +276,11 @@ you are away the band refreshes the cache up to three times, each shortly before
 the cache-read price.
 
 In the desktop app the band draws cards in the app's own light or dark theme, with that account's
-own quota (see [without the proxy](#with-and-without-the-band)).
+own quota (see [without the proxy](#with-and-without-the-band)):
+
+<p align="center">
+  <img src="docs/images/desktop.png" width="720" alt="The band in the desktop app: the signed-in account and model, its 5-hour and weekly use, the context and the cache, as cards with ring gauges">
+</p>
 
 ### In the management panel
 
