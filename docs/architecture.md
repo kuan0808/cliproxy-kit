@@ -270,6 +270,20 @@ Context, cache and model come from Claude Code itself, so the rest works either 
   up to `keepWarm` times each idle stretch, only while the cache is still there, and not for a
   conversation under 20k tokens. Through the proxy it is a request of the same session.
 
+### Desktop preview
+
+The desktop app draws a mod's tree with its own CSS: Box widths in `ch` (percent strings kept),
+heights and vertical gap or padding as `calc(n * .5lh)`, `borderStyle` as a 1px theme border with
+radius and padding, colour names as theme variables, plain Buttons as ghost buttons, Svg as an
+`<img>` that sees no theme variables, and the slot under AbovePrompt present even when empty.
+
+To see the band there without the app: a scratch test in `mod/tests` (fixtures from
+`band.test.ts`) prints `JSON.stringify(await ui.drawn())` for a `surface: 'desktop'` mount, a small
+script maps that tree to HTML with the rules above, and a browser screenshots it; remove the scratch
+files after. The app's dark theme, sampled: page `#151515`, band frame and card `#212121`, card
+border `#373737`, composer `#1d1d1d` with border `#4a4a4a`, success text `#459625`, warning text
+`#c78b28`, muted text about `#9c9a92`.
+
 ## Codex hooks
 
 Codex shows no custom status line, so its quota comes through hooks (see the README). A
