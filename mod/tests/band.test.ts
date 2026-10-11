@@ -965,3 +965,29 @@ test('send sends the held message, also from a box that reads empty', async ($, 
   await ui.unmount()
   expect(submitted.at(-1)).toBe('the login page next')
 })
+
+test("a handoff note follows the reader's own prompt when there is one, and the built-in one else", async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CONFIG_DIR: '/Users/me/.config/claude' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  forkReply = { value: { isAnswered: true, text: '- ship it', usage: { input_tokens: 5, output_tokens: 9, cache_read_input_tokens: 412_000, cache_creation_input_tokens: 0 } } } as never
+  // Under CLAUDE_CONFIG_DIR, as Claude Code's own folder; blank, it is none.
+  files['/Users/me/.config/claude/quota-band/handoff-prompt.md'] = '  \n'
+  duringFork = async () => {
+    expect(await rowText($, 'notice')).toMatch(/^· Writing the handoff note…/)
+  }
+  await $.command.run({ command: 'handoff', args: '', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  for (let k = 0; k < 20 && !submitted.length; k++) await clock.settle()
+  expect(forks[0]).toMatch(/^Write a handoff note so a new session can carry on this work/)
+  // The reader's own: it replaces how the note is written; the context still follows it.
+  currentId = SESSION.id
+  submitted = []
+  files['/Users/me/.config/claude/quota-band/handoff-prompt.md'] = 'Three bullet points: what is done, what is next, what to avoid.\n'
+  duringFork = async () => {
+    expect(await rowText($, 'notice')).toMatch(/^· Writing the handoff note with your prompt…/)
+  }
+  await $.command.run({ command: 'handoff', args: 'then the tests', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  for (let k = 0; k < 20 && !submitted.length; k++) await clock.settle()
+  expect(forks[1]).toMatch(/^Three bullet points: what is done, what is next, what to avoid\.\n\nYour latest reply, which may be missing from this request, was:\nDone\.\n\nThe new session gets this message from the user right after the note:\nthen the tests$/)
+})

@@ -259,7 +259,9 @@ Context, cache and model come from Claude Code itself, so the rest works either 
   off first: the move then waits until the proxy has seen the new session, which it does after the
   note's turn (it refuses a command for a session it has not seen).
 - **Handoff.** Claude writes a note over the conversation from its cache (`$.model.fork`), in fixed
-  sections: goal, done, not done, changes, watch out, next step. The note is saved under
+  sections: goal, done, not done, changes, watch out, next step; or as the reader's own prompt in
+  `<Claude Code's folder>/quota-band/handoff-prompt.md` says, read at each handoff, with the same
+  context after it (the latest reply, a held message). The note is saved under
   `~/.cache/cliproxy-kit/handoff/` and read back, the conversation clears, and the new one starts
   from the note, sent at once with any held message after it (put in the prompt if that fails).
   Suggested at `handoffAt` percent of the context; `/handoff [message]` at any time.

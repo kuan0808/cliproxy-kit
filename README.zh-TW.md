@@ -222,7 +222,7 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | 按鈕 | 作用 |
 | --- | --- |
 | `switch` | 把這個 session 換到另一個帳號，或另一個供應商的模型，也能換回來。快取還熱著時，會先說切換要花多少，也可以先交接。 |
-| `hand off` | context 超過 60%、下一輪會冷啟動，或切換會造成冷啟動時，出現在上方那一列。Claude 寫一份交接筆記（目標、已完成、未完成、修改內容、注意事項、下一步），清空對話，新的對話從筆記開始。輸入 `/handoff [訊息]` 隨時都能交接，訊息會接在筆記後面。 |
+| `hand off` | context 超過 60%、下一輪會冷啟動，或切換會造成冷啟動時，出現在上方那一列。Claude 寫一份交接筆記（目標、已完成、未完成、修改內容、注意事項、下一步，或[你自己定的段落](#自訂交接筆記)），清空對話，新的對話從筆記開始。輸入 `/handoff [訊息]` 隨時都能交接，訊息會接在筆記後面。 |
 | `quota` | 所有帳號的各個額度週期；輸入 `/quota` 也一樣。 |
 | `more` / `less` | 在換輪之前固定顯示方塊或一行（桌面版是 **Expand** / **Collapse**）。 |
 
@@ -271,6 +271,27 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | 保持快取的次數 | `3` | 你離開時刷新快取的次數。`0` 表示關閉。 |
 
 費用是 Anthropic 和 OpenAI 的 API 定價，僅供比較：訂閱方案不是按 token 計費。沒有已知價格的模型只顯示 token 數。
+
+#### 自訂交接筆記
+
+交接筆記是照一段 prompt 寫的。想照自己的方式寫，把你的 prompt 放進 `~/.claude/quota-band/handoff-prompt.md`（有設定 `CLAUDE_CONFIG_DIR` 時放在那個資料夾底下）：每次交接都會重新讀取，改了不用重新載入；檔案是空的或不存在，就用內建的 prompt。Claude 最後一則回覆，以及你帶著交接的訊息，仍會附在它後面。
+
+<details>
+<summary>內建的 prompt，可以從這裡改起</summary>
+
+```text
+Write a handoff note so a new session can carry on this work without this conversation.
+Use these sections, in this order, each as a markdown heading:
+Goal (what the user wants, and why);
+Done (what was finished, and how it was verified);
+Not done (what is left, and what was tried that failed);
+Changes (each file touched, and what changed in it);
+Watch out (decisions made and why, and the limits and preferences the user stated, in their words where it matters);
+Next step (the one exact next action).
+Be specific: paths, commands, names, numbers. Write in the language the user writes in. No preamble.
+```
+
+</details>
 
 ## 它改了什麼
 

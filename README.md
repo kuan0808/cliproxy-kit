@@ -266,7 +266,7 @@ Cards while Claude waits, one line while it works:
 | Control | What it does |
 | --- | --- |
 | `switch` | Moves this session to another account, or to another provider's model and back. While the cache is warm it first says what the move costs, and can hand off first. |
-| `hand off` | In the row when the context passes 60%, the next turn would start cold, or a move would. Claude writes a note (goal, done, not done, changes, watch out, next step), the conversation clears, and a new one starts from it. `/handoff [message]` does it any time, with the message after the note. |
+| `hand off` | In the row when the context passes 60%, the next turn would start cold, or a move would. Claude writes a note (goal, done, not done, changes, watch out, next step, or [your own sections](#your-own-handoff-note)), the conversation clears, and a new one starts from it. `/handoff [message]` does it any time, with the message after the note. |
 | `quota` | Every account's windows; `/quota` opens the same. |
 | `more` / `less` | Cards or one line, until the turn changes (**Expand** / **Collapse** in the desktop app). |
 
@@ -326,6 +326,30 @@ The band's settings are in Claude Code's `/config`, and asked for when it is ins
 
 Costs are Anthropic's and OpenAI's API list prices, for comparison: a subscription is not billed per
 token. A model without a known price shows tokens only.
+
+#### Your own handoff note
+
+A handoff note follows a prompt. To write it your way, put your own in
+`~/.claude/quota-band/handoff-prompt.md` (under `CLAUDE_CONFIG_DIR` when you set one): it is read
+at each handoff, so an edit needs no reload, and an empty file, or none, goes back to the built-in
+prompt. Claude's latest reply and a message you hand off with still follow it.
+
+<details>
+<summary>The built-in prompt, to start from</summary>
+
+```text
+Write a handoff note so a new session can carry on this work without this conversation.
+Use these sections, in this order, each as a markdown heading:
+Goal (what the user wants, and why);
+Done (what was finished, and how it was verified);
+Not done (what is left, and what was tried that failed);
+Changes (each file touched, and what changed in it);
+Watch out (decisions made and why, and the limits and preferences the user stated, in their words where it matters);
+Next step (the one exact next action).
+Be specific: paths, commands, names, numbers. Write in the language the user writes in. No preamble.
+```
+
+</details>
 
 ## What it changes
 

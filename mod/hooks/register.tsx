@@ -413,6 +413,17 @@ let leftTurn = ''
 const ownStep = (e: { agentId?: string; turnId: string }) =>
   Boolean(e.agentId) || e.turnId === leftTurn || (forking && (!mainTurn || e.turnId !== mainTurn))
 
+/**
+ * How handoff notes are written: the reader's own prompt when `<Claude Code's folder>/quota-band/
+ * handoff-prompt.md` holds one, read at each handoff so an edit needs no reload; else the built-in
+ * one. Either way the note's context (the latest reply, a held message) follows it.
+ */
+async function handoffPrompt($: $T, home: string): Promise<{ text: string; own: boolean }> {
+  const folder = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${home}/.claude`
+  const own = await $.fs.read(`${folder}/quota-band/handoff-prompt.md`).then(t => String(t).trim(), () => '')
+  return own ? { text: own, own: true } : { text: HANDOFF_PROMPT, own: false }
+}
+
 /** A plugin's message names no file with `@`: one that does is sent from the prompt box instead. */
 const mentionsFile = (text: string) => /(^|\s)@\S/.test(text)
 
@@ -439,12 +450,13 @@ async function runHandoff($: $T, given: Handoff): Promise<void> {
       const box = await $.prompt.read().catch(() => null)
       if (box?.text.trim()) then.held = box.text
     }
-    await setUi($, { busy: true, confirm: '', move: null, held: then.held ?? '', notice: 'Writing the handoff note…', noticeIsError: false })
+    const prompt = await handoffPrompt($, sess.home)
+    await setUi($, { busy: true, confirm: '', move: null, held: then.held ?? '', notice: `Writing the handoff note${prompt.own ? ' with your prompt' : ''}…`, noticeIsError: false })
     if (given.fromBox) await $.prompt.fill({ text: '' }).catch(() => undefined)
     const tail = cache.lastAnswer ? `\n\nYour latest reply, which may be missing from this request, was:\n${cache.lastAnswer.slice(0, 6000)}` : ''
     const next = then.held ? `\n\nThe new session gets this message from the user right after the note:\n${then.held}` : ''
     forking = true
-    const r = await $.model.fork({ prompt: HANDOFF_PROMPT + tail + next }).finally(() => { forking = false })
+    const r = await $.model.fork({ prompt: prompt.text + tail + next }).finally(() => { forking = false })
     if (!r.isAnswered || !r.text.trim()) {
       await setNotice($, `Handoff stopped: no note (${r.isAnswered ? 'empty' : r.reason}); the conversation is kept`, true)
       return
