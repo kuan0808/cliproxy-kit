@@ -1,52 +1,34 @@
 // quota-band: the cards above the Claude Code prompt. Session, context and cache come from
 // Claude Code itself; accounts, quota and routing come from the proxy's quota-pilot snapshot.
+// What the band shows is decided once (view.ts) and drawn per surface: in character cells in a
+// terminal (terminal.tsx), as cards in the desktop app (desktop.tsx).
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { BandError, CacheInfo, ModelInfo, SessionAbout, SessionInfo, Snap, UiState } from '../types'
+import type { BandError, CacheInfo, ModelInfo, Move, SessionAbout, SessionInfo, Snap, UiState } from '../types'
+import { desktopBand, lengthBar } from './desktop'
 import {
   C,
+  DESK,
   HANDOFF_PROMPT,
   bandErrorText,
-  barFill,
-  blockedOthers,
-  cacheState,
-  cannotTake,
   cacheTtlMs,
-  fmtDuration,
-  fmtTokens,
-  hitRate,
-  currentModel,
-  latestModels,
-  missingText,
-  usedText,
-  nextTurnMoves,
-  providerOfModel,
-  providerTitle,
-  layout,
-  tileWidths,
-  tilesSpan,
-  likelyAccount,
-  kindLabel,
-  nextUp,
-  offerCacheActions,
+  coldConfirmed,
+  isAnthropicHost,
+  movedKey,
   parseModels,
-  pickAlert,
-  pooled,
   readBand,
   repoOf,
-  resetText,
+  rewriteText,
   sessionAccount,
+  settingsOf,
   settlePending,
-  sev,
-  switchTargets,
-  otherAccounts,
-  untilIso,
-  weeklyFor,
-  windowOf,
-  type Alert,
-  type SessionAccount,
+  warmDueAt,
+  type Settings,
 } from './logic'
+import { quotaPane } from './pane'
+import { cellBar, terminalBand } from './terminal'
+import { bandFacts, nextTurn, type BandInput, type Do, type Handoff } from './view'
 
 const PANE = 'quota'
 
@@ -55,9 +37,10 @@ const EMPTY_SESSION: SessionInfo = {
   contextTokens: null, contextWindow: 0, rateLimits: [], proxied: false, home: '',
 }
 const EMPTY_ABOUT: SessionAbout = { id: '', transcript: '', eventTitle: '', fileTitle: '', fileTitleAt: 0, request: '', start: '', root: '', repo: '' }
-const EMPTY_CACHE: CacheInfo = { lastAt: 0, prompt: 0, read: 0, creation: 0, input: 0, ttlMs: 0, lastAnswer: '' }
+const EMPTY_CACHE: CacheInfo = { lastAt: 0, prompt: 0, read: 0, creation: 0, input: 0, ttlMs: 0, lastAnswer: '', model: '', route: '', warmed: 0, warmStop: false }
 const EMPTY_UI: UiState = {
-  switchStep: '', confirm: '', pending: [], notice: '', noticeIsError: false, busy: false,
+  switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
+  pending: [], notice: '', noticeIsError: false, busy: false,
   viewOverride: '', viewPhase: '', viewTurn: 0, turns: 0, dismissedSwitch: '',
 }
 
@@ -72,10 +55,25 @@ const modelsA = atom({ plugin: 'quota-band', key: 'models' } as const, [] as Mod
 
 type $T = EngineInterface
 
+/** The plugin's settings (its `userConfig`), as the module last loaded with them. */
+let settings: Settings = settingsOf({})
+
 /** Patch the band's UI state; typed so literal fields keep their union types. */
 const setUi = ($: $T, patch: Partial<UiState>) => update($, uiA, (u: UiState): UiState => ({ ...u, ...patch }))
 
 const kitPath = (home: string, rest: string) => `${home}/.cache/cliproxy-kit/${rest}`
+
+/**
+ * What the band reads to decide what it shows: as of its last refresh for a drawing, or as of now
+ * (`fresh`) for a decision that cannot wait for one.
+ */
+async function bandInput($: $T, working: boolean, fresh = false): Promise<BandInput> {
+  const [snap, bandError, polled, sess, cache, ui, models] = await Promise.all([
+    read($, snapA), read($, bandErrorA), read($, nowA), read($, sessA), read($, cacheA), read($, uiA), read($, modelsA),
+  ])
+  const now = fresh ? await $.clock.now() : polled || Date.now()
+  return { snap, bandError, now, sess, cache, ui, models, settings, working }
+}
 
 // ---- data refresh ----
 
@@ -113,7 +111,9 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
     $.env.get('ANTHROPIC_API_KEY'),
   ])
   const [id, model, usage, cwd] = await Promise.all([$.session.id(), $.session.model(), $.session.usage(), $.session.cwd()])
-  const proxied = Boolean(base)
+  // The desktop app points its sessions at Anthropic's own API, signed in to the app's account:
+  // no proxy there, so the band shows that account's own limits.
+  const proxied = Boolean(base) && !isAnthropicHost(base)
   const now = await $.clock.now()
   const prev = await read($, sessA)
   const next: SessionInfo = {
@@ -124,14 +124,14 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
     rateLimits: usage.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: r.resetsAt })),
   }
   if (JSON.stringify(next) !== JSON.stringify(prev)) await update($, sessA, () => next)
-  const ttlMs = cacheTtlMs(ttl, proxied)
+  const ttlMs = cacheTtlMs(ttl, Boolean(authToken || apiKey))
   if ((await read($, cacheA)).ttlMs !== ttlMs) await update($, cacheA, c => ({ ...c, ttlMs }))
 
   // Everything comes from the proxy, over the network, with the key Claude Code sends it (none for
   // a proxy without api-keys): the same wherever the proxy runs (beside it, in a container, on a
   // server).
   const token = authToken || apiKey
-  if (base) {
+  if (proxied && base) {
     const url = base.replace(/\/+$/, '')
     const auth: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
     if (full) {
@@ -140,7 +140,7 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
         const list = r.ok ? parseModels(r.text) : null
         if (list) await update($, modelsA, () => list)
       } catch {
-        // The switch row then offers accounts only.
+        // The switch menu then offers accounts only.
       }
     }
     // What only this device knows of the session goes in headers, kept out of the proxy's request
@@ -175,6 +175,10 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
     if (JSON.stringify(error) !== JSON.stringify(await read($, bandErrorA))) await update($, bandErrorA, () => error)
     // Every read, changed or not: a command can also expire, or its proxy be gone.
     await settle($, snap ?? old, now)
+    // After this read: a command goes with the next one, which waits for this one to end.
+    if (snap) void moveAfterHandoff($, id, snap, now)
+  } else if (await read($, bandErrorA)) {
+    await update($, bandErrorA, () => null)
   }
   await update($, nowA, () => now)
 }
@@ -302,108 +306,347 @@ function titleLine(text: string): string {
   return chars.length > 90 ? `${chars.slice(0, 89).join('')}…` : line
 }
 
-/** Settle pending commands by the snapshot just read (see `settlePending`). */
-async function settle($: $T, snap: Snap | null, now: number): Promise<void> {
-  if (!(await read($, uiA)).pending.length) return
-  await update($, uiA, (u: UiState): UiState => {
-    const { left, notice } = settlePending(u.pending, snap, now)
-    return notice ? { ...u, pending: left, notice: notice.text, noticeIsError: notice.isError } : u
-  })
-}
-
 /**
- * Send a command to quota-pilot with the next read of /band, and track it until the snapshot that
- * read returns, or a later one, acknowledges it.
+ * Settle pending commands by the snapshot just read (see `settlePending`). Once none is left, a
+ * route or a way back the reader chose names the account it landed on, so a later move to another
+ * is told and held again.
  */
-async function sendCommand($: $T, action: string, fields: Record<string, string>, text: string): Promise<void> {
-  const [sess, snap, bandError] = await Promise.all([read($, sessA), read($, snapA), read($, bandErrorA)])
-  if (!snap || bandError) {
-    await setUi($, { notice: bandError ? bandErrorText(bandError) : 'The proxy plugin is not running', noticeIsError: true, confirm: '' })
+async function settle($: $T, snap: Snap | null, now: number): Promise<void> {
+  const ui = await read($, uiA)
+  if (ui.pending.length) {
+    await update($, uiA, (u: UiState): UiState => {
+      const { left, notice } = settlePending(u.pending, snap, now)
+      return notice ? { ...u, pending: left, notice: notice.text, noticeIsError: notice.isError } : u
+    })
     return
   }
+  const landed = snap?.sessions[(await read($, sessA)).id]?.auth_id
+  if (!landed || !(ui.coldOk.endsWith(':*') || ui.coldDismissed.endsWith(':*'))) return
+  const name = (key: string) => (key.endsWith(':*') ? `${key.slice(0, -1)}${landed}` : key)
+  await update($, uiA, (u: UiState): UiState => ({ ...u, coldOk: name(u.coldOk), coldDismissed: name(u.coldDismissed) }))
+}
+
+/** The account a move takes the session to, as its cold spell's key names it: `*` when the proxy picks it. */
+const moveTarget = (move: Move) => (move.action === 'switch' ? move.fields.auth_id ?? '*' : '*')
+
+/**
+ * Send a command to quota-pilot with the next read of /band, for `session` (this one when not
+ * given), and track it until the snapshot that read returns, or a later one, acknowledges it.
+ */
+async function sendCommand($: $T, move: Move, session?: string): Promise<void> {
+  const [sess, snap, bandError, cache] = await Promise.all([read($, sessA), read($, snapA), read($, bandErrorA), read($, cacheA)])
+  if (!snap || bandError) {
+    await setUi($, { notice: bandError ? bandErrorText(bandError) : 'The proxy plugin is not running', noticeIsError: true, confirm: '', move: null })
+    return
+  }
+  // The reader chose this move, with what it costs in front of them: its cold turn is neither
+  // told again nor held.
+  const chosen = movedKey(cache, moveTarget(move))
   const id = crypto.randomUUID()
   const at = await $.clock.now()
-  const doc = { command_id: id, session: sess.id, boot_id: snap.boot_id, created_at: new Date(at).toISOString(), action, ...fields }
-  const pending = { id, text, boot: snap.boot_id, at }
-  await update($, uiA, (u: UiState): UiState => ({ ...u, confirm: '', switchStep: '', notice: `${text}…`, noticeIsError: false, pending: [...u.pending, pending] }))
+  const doc = { command_id: id, session: session ?? sess.id, boot_id: snap.boot_id, created_at: new Date(at).toISOString(), action: move.action, ...move.fields }
+  const pending = { id, text: move.text, boot: snap.boot_id, at }
+  await update($, uiA, (u: UiState): UiState => ({
+    ...u, confirm: '', switchStep: '', move: null, coldOk: chosen, coldDismissed: chosen,
+    notice: `${move.text}…`, noticeIsError: false, pending: [...u.pending, pending],
+  }))
   outbox.push(doc)
   await refresh($, false)
+}
+
+let moving = false
+
+/**
+ * The move a handoff left for its new session (`to`), sent for that session once the proxy has
+ * seen it (it refuses a command for one it has not); dropped after ten minutes. The new session's
+ * first turn, the note, is small to resend.
+ */
+async function moveAfterHandoff($: $T, id: string, snap: Snap, now: number): Promise<void> {
+  if (moving) return
+  moving = true
+  try {
+    const after = (await read($, uiA)).afterHandoff
+    if (!after) return
+    if (now - after.at > 10 * 60_000) {
+      await setUi($, { afterHandoff: null })
+      return
+    }
+    if (after.to !== id || !snap.sessions[id]) return
+    await setUi($, { afterHandoff: null })
+    await sendCommand($, after, after.to)
+  } finally {
+    moving = false
+  }
 }
 
 async function setNotice($: $T, notice: string, isError: boolean): Promise<void> {
   await setUi($, { notice, noticeIsError: isError, busy: false, confirm: '' })
 }
 
-async function compactNow($: $T): Promise<void> {
-  await setUi($, { busy: true, confirm: '', notice: 'Compacting…', noticeIsError: false })
+// One band action at a time, its own model call included (a handoff, sending a held message,
+// keeping the cache warm): taken before anything is awaited, so a second press meanwhile does
+// nothing.
+let acting = false
+
+async function exclusive(run: () => Promise<void>): Promise<boolean> {
+  if (acting) return false
+  acting = true
   try {
-    const r = await $.session.compact({})
-    if ('skip' in r && r.skip) await setNotice($, `Compaction skipped: ${r.skip}`, true)
-    else await setNotice($, 'Compacted', false)
+    await run()
+  } finally {
+    acting = false
+  }
+  return true
+}
+
+// What tells one conversation's events from another's: `generation` counts the conversations of
+// this process (a /clear or a resume starts another), `mainTurn` is the reader's turn while it
+// runs, and `working` whether Claude works, as the band was last drawn (a reload mid-turn hears
+// no start). While the band's own model call runs (`forking`), a step outside the reader's turn
+// is that call's.
+let generation = 0
+let mainTurn = ''
+let working = false
+let forking = false
+// The turn a /clear or a resume left running: its end, heard later, is not the new conversation's.
+let leftTurn = ''
+const ownStep = (e: { agentId?: string; turnId: string }) =>
+  Boolean(e.agentId) || e.turnId === leftTurn || (forking && (!mainTurn || e.turnId !== mainTurn))
+
+/** A plugin's message names no file with `@`: one that does is sent from the prompt box instead. */
+const mentionsFile = (text: string) => /(^|\s)@\S/.test(text)
+
+/**
+ * Hand off to a new session: Claude writes a note over this conversation (from its cache), the
+ * note is saved and read back, the conversation clears, and the new one starts from the note,
+ * sent at once, with the reader's held message after it. A move waits for the new session.
+ */
+async function handoffNow($: $T, given: Handoff = {}): Promise<void> {
+  const ran = await exclusive(() => runHandoff($, given))
+  // Pressed again while one runs, its row says so already; else the cache was being kept warm.
+  if (!ran && !(await read($, uiA)).busy) await setUi($, { notice: 'The band was busy: try the handoff again in a moment', noticeIsError: true })
+}
+
+async function runHandoff($: $T, given: Handoff): Promise<void> {
+  const then = { ...given }
+  let handedOff = false
+  let saved = ''
+  try {
+    const [sess, cache, before] = await Promise.all([read($, sessA), read($, cacheA), read($, uiA)])
+    // The held message as the box has it now, the reader's edits included. It is kept in the
+    // band's state before the box empties (as for a message sent), so a reload can give it back.
+    if (given.fromBox) {
+      const box = await $.prompt.read().catch(() => null)
+      if (box?.text.trim()) then.held = box.text
+    }
+    await setUi($, { busy: true, confirm: '', move: null, held: then.held ?? '', notice: 'Writing the handoff note…', noticeIsError: false })
+    if (given.fromBox) await $.prompt.fill({ text: '' }).catch(() => undefined)
+    const tail = cache.lastAnswer ? `\n\nYour latest reply, which may be missing from this request, was:\n${cache.lastAnswer.slice(0, 6000)}` : ''
+    const next = then.held ? `\n\nThe new session gets this message from the user right after the note:\n${then.held}` : ''
+    forking = true
+    const r = await $.model.fork({ prompt: HANDOFF_PROMPT + tail + next }).finally(() => { forking = false })
+    if (!r.isAnswered || !r.text.trim()) {
+      await setNotice($, `Handoff stopped: no note (${r.isAnswered ? 'empty' : r.reason}); the conversation is kept`, true)
+      return
+    }
+    // The session's short id and the local time: short enough to read in a notice.
+    const at = new Date(await $.clock.now())
+    const two = (n: number) => String(n).padStart(2, '0')
+    const stamp = `${at.getFullYear()}${two(at.getMonth() + 1)}${two(at.getDate())}-${two(at.getHours())}${two(at.getMinutes())}${two(at.getSeconds())}`
+    const path = kitPath(sess.home, `handoff/${sess.id.slice(0, 8)}-${stamp}.md`)
+    const shown = sess.home && path.startsWith(sess.home) ? `~${path.slice(sess.home.length)}` : path
+    await $.fs.write(path, r.text)
+    if ((await $.fs.read(path)) !== r.text) {
+      await setNotice($, 'Handoff stopped: the note could not be saved; the conversation is kept', true)
+      return
+    }
+    saved = shown
+    // The conversation must be the one the note is about, as it was: not another (a /clear or a
+    // resume meanwhile), and not one that went on while the note was written.
+    const [id, after] = await Promise.all([$.session.id(), read($, uiA)])
+    if (id !== sess.id || after.turns !== before.turns || mainTurn) {
+      await setNotice($, `Note saved at ${shown}; the conversation changed or went on while it was written, so it was not cleared`, true)
+      return
+    }
+    // The /clear runs once the session is idle, and ends one conversation: two ended meanwhile
+    // means another came first (a resume), and the note is not that one's. The band cannot hold
+    // its own /clear back (a plugin's command passes none of its own hooks), so the checks above
+    // come right before it.
+    const gen = generation
+    await $.command.run({ command: 'clear' })
+    const fresh = await $.session.id()
+    if (fresh === sess.id || generation > gen + 1) {
+      await setNotice($, `Note saved at ${shown}; ${fresh === sess.id ? 'the conversation was not cleared' : 'another conversation came first, so the note was not sent'}`, true)
+      return
+    }
+    // From here on the note is the only copy of the context: every message names where it is.
+    handedOff = true
+    if (then.move) await setUi($, { afterHandoff: { ...then.move, to: fresh, at: await $.clock.now() } })
+    const text = `Continue from this handoff note (saved at ${path}):\n\n${r.text.trim()}${then.held ? `\n\n---\n\n${then.held}` : ''}`
+    const sent = !mentionsFile(then.held ?? '') && await $.prompt.submit({ text, asUser: true }).then(s => !s.drop, () => false)
+    if (sent) {
+      await setNotice($, `Handed off: the new session starts from ${shown}`, false)
+      return
+    }
+    const fill = await $.prompt.fill({ text }).catch(() => ({ isFilled: false }))
+    await setNotice($, fill.isFilled ? 'New session ready: the note is in the prompt; press Enter to start' : `New session started. Note saved at ${shown}`, !fill.isFilled)
   } catch (err) {
-    await setNotice($, `Compaction failed: ${String(err)}`, true)
+    await setNotice($, `Handoff failed: ${String(err)}${saved ? `; the note is at ${saved}` : ''}`, true)
+  } finally {
+    await giveBack($, handedOff ? undefined : then.held)
   }
 }
 
-/** Summary first, saved and read back, then clear, then pre-fill the new session's prompt. */
-async function handoffNow($: $T): Promise<void> {
-  await setUi($, { busy: true, confirm: '', notice: 'Writing handoff note…', noticeIsError: false })
-  const [sess, cache] = await Promise.all([read($, sessA), read($, cacheA)])
-  try {
-    const tail = cache.lastAnswer ? `\n\nYour latest reply, which may be missing from this request, was:\n${cache.lastAnswer.slice(0, 6000)}` : ''
-    const r = await $.model.fork({ prompt: HANDOFF_PROMPT + tail })
-    if (!r.isAnswered || !r.text.trim()) {
-      await setNotice($, `Handoff stopped: no summary (${r.isAnswered ? 'empty' : r.reason}); conversation kept`, true)
+/** A held message back into the prompt: after what the reader typed there since, if anything. */
+async function giveBack($: $T, held: string | undefined): Promise<void> {
+  await setUi($, { held: '' })
+  if (!held) return
+  const box = await $.prompt.read().catch(() => null)
+  const draft = box?.text.trim() ? box.text : ''
+  await $.prompt.fill(draft ? { text: `\n\n${held}`, mode: 'append' } : { text: held }).catch(() => undefined)
+}
+
+/** Send the message the guard held, as it is in the prompt now: the reader may have changed it. */
+async function sendHeld($: $T): Promise<void> {
+  await exclusive(async () => {
+    const ui = await read($, uiA)
+    // As the box has it now; a box with nothing in it (or none, as an SDK host's) sends what was
+    // held. Taking it back is `cancel`.
+    const box = await $.prompt.read().catch(() => null)
+    const text = box?.text.trim() ? box.text : ui.held
+    await setUi($, { confirm: '', held: '' })
+    if (!text.trim()) return
+    if (mentionsFile(text)) {
+      await setUi($, { notice: 'Press Enter to send it: a message that names files with @ goes from the prompt box', noticeIsError: false })
       return
     }
-    const stamp = new Date(await $.clock.now()).toISOString().replace(/[:.]/g, '-')
-    const path = kitPath(sess.home, `handoff/${sess.id}-${stamp}.md`)
-    await $.fs.write(path, r.text)
-    if ((await $.fs.read(path)) !== r.text) {
-      await setNotice($, 'Handoff stopped: the note could not be saved; conversation kept', true)
-      return
+    await $.prompt.fill({ text: '' }).catch(() => undefined)
+    const r = await $.prompt.submit({ text, asUser: true }).catch(() => null)
+    if (!r || r.drop) {
+      await giveBack($, text)
+      await setNotice($, `Not sent${r?.drop ? `: ${r.drop}` : ''}; the message is back in the prompt`, true)
     }
-    await $.command.run({ command: 'clear' })
-    // From here on the note is the only copy of the context: every message names where it is.
-    try {
-      if ((await $.session.id()) === sess.id) {
-        await setNotice($, `Note saved at ${path}; the session did not clear`, true)
-        return
-      }
-      const fill = await $.prompt.fill({ text: `Continue from this handoff note (saved at ${path}):\n\n${r.text}` })
-      await setNotice($, fill.isFilled ? 'New session started with the handoff note in the prompt' : `New session started. Note saved at ${path}`, false)
-    } catch (err) {
-      await setNotice($, `New session started; the note is at ${path} (${String(err)})`, true)
-    }
-  } catch (err) {
-    await setNotice($, `Handoff failed: ${String(err)}`, true)
-  }
+  })
+}
+
+// ---- keeping the cache warm ----
+
+let warmTimer: Timer | null = null
+// Counts the times the next refresh was (re)timed, so a timing that took a while never sets a
+// timer after a newer one did.
+let warmSeq = 0
+const KEEP_WARM_PROMPT = 'This is an automatic prompt-cache refresh, not a message from the user. Reply with only the word: ok'
+/** A conversation smaller than this is cheap to write again: it is not kept warm. */
+const KEEP_WARM_FLOOR = 20_000
+
+function stopWarm(): void {
+  warmSeq++
+  warmTimer?.cancel()
+  warmTimer = null
+}
+
+/**
+ * Time the next refresh of the cache: shortly before it would expire, between the reader's turns,
+ * while refreshes are left for this idle stretch and the last one found the cache there.
+ */
+async function scheduleWarm($: $T): Promise<void> {
+  stopWarm()
+  const seq = warmSeq
+  if (!settings.keepWarm || mainTurn) return
+  const [cache, sess, now] = await Promise.all([read($, cacheA), read($, sessA), $.clock.now()])
+  const due = warmDueAt(cache)
+  if (seq !== warmSeq || !due || cache.warmStop || cache.warmed >= settings.keepWarm || cache.prompt < KEEP_WARM_FLOOR) return
+  warmTimer = $.clock.after(Math.max(0, due - now), () => {
+    void warmNow($, sess.id, cache.lastAt, seq).catch(() => undefined)
+  })
+}
+
+/**
+ * One refresh: a fork of the conversation reads its whole prefix from the cache, at the cache's
+ * read price, and keeps it there for another TTL from the fork's start. Only while it is still
+ * there and nothing else runs; a fork that wrote more than a sliver of it found it gone, and the
+ * band stops trying until the reader's next turn.
+ */
+async function warmNow($: $T, id: string, at: number, seq: number): Promise<void> {
+  if (seq !== warmSeq) return
+  let refreshed = false
+  await exclusive(async () => {
+    const [cache, now] = await Promise.all([read($, cacheA), $.clock.now()])
+    if (cache.lastAt !== at || mainTurn || working || (await $.session.id()) !== id) return
+    if (now >= cache.lastAt + cache.ttlMs - 30_000) return
+    const next = nextTurn(await bandInput($, false, true))
+    // Again after the reads: a turn the reader started meanwhile keeps the cache itself.
+    if (next.isCodex || next.cold || mainTurn || working) return
+    forking = true
+    const r = await $.model.fork({ prompt: KEEP_WARM_PROMPT }).catch(() => null).finally(() => { forking = false })
+    if (!r || !('usage' in r)) return
+    const { cache_read_input_tokens: hit, cache_creation_input_tokens: wrote } = r.usage
+    if (hit + wrote <= 0) return
+    const kept = hit > 0 && wrote <= hit / 10
+    await update($, cacheA, c => (c.lastAt === at ? { ...c, lastAt: now, warmed: c.warmed + (kept ? 1 : 0), warmStop: !kept } : c))
+    // The next one only after this one kept it; else the reader's next turn times it again.
+    if (kept) refreshed = true
+  })
+  if (refreshed) await scheduleWarm($)
 }
 
 // ---- hooks ----
 
-export const register: Register = on => {
+/** What the band's controls do. */
+function actsOf($: $T): Do {
+  return {
+    ui: patch => setUi($, patch),
+    send: move => sendCommand($, move),
+    handoff: then => handoffNow($, then),
+    sendHeld: () => sendHeld($),
+    quota: () => $.ui.open({ id: PANE, title: 'Accounts and quota' }),
+  }
+}
+
+const CONFIRMS: readonly UiState['confirm'][] = ['handoff', 'switch', 'move', 'send']
+
+export const register: Register = (on, options) => {
+  settings = settingsOf(options)
+
   on('session.start', async ($, e, next) => {
+    // A reload keeps the band's state, perhaps an older version's, but none of the module's
+    // timers or the actions it was running: a handoff it stopped gives its message back.
+    const before = await read($, uiA)
+    await update($, cacheA, c => ({ ...EMPTY_CACHE, ...c }))
+    await update($, uiA, (u: UiState): UiState => ({
+      ...EMPTY_UI, ...u, busy: false, notice: u.busy ? 'The band reloaded during a handoff; the conversation is kept' : u.notice,
+      confirm: CONFIRMS.includes(u.confirm) ? u.confirm : '',
+    }))
+    if (before.busy && before.held) await giveBack($, before.held)
     await $.command.register({ name: 'quota', description: 'Show every account, quota window and route of the proxy' })
+    await $.command.register({ name: 'handoff', description: 'Hand off to a new session: a note on this one is saved, it clears, and the new one starts from the note' })
     await refresh($, true)
     $.clock.every(10_000, () => {
       void refresh($, false)
     })
+    await scheduleWarm($)
     return next(e)
   })
 
   // What Claude Code's hook events say of a session, for the band on another device to pass on:
-  // a session reloaded mid-way hears no start, so its prompts say it too.
+  // a session reloaded mid-way hears no start, so its prompts say it too. A resumed conversation
+  // also says how big it is and when it last had a reply, which its cache dates from.
   // These events wait for their hooks: what the band learns from them never holds them up.
   on('classic.SessionStart', async ($, e, next) => {
     await heardAbout($, e.session_id, e.transcript_path, e.session_title).catch(() => undefined)
+    if ((e.source === 'resume' || e.source === 'fork') && e.context_tokens) {
+      const now = await $.clock.now()
+      const tokens = e.context_tokens
+      const ago = (e.seconds_since_last_response ?? 0) * 1000
+      await update($, cacheA, c => ({ ...c, prompt: tokens, lastAt: now - ago, model: e.model ?? c.model, route: null }))
+    }
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 
   on('classic.UserPromptSubmit', async ($, e, next) => {
     await heardAbout($, e.session_id, e.transcript_path, e.session_title).catch(() => undefined)
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'quota' }, async $ => {
     await refresh($, true)
@@ -411,21 +654,68 @@ export const register: Register = on => {
     return { text: 'Quota pane opened.' }
   })
 
+  // `/handoff`, and what follows it is the message the new session gets after the note.
+  on('command.run', { command: 'handoff' }, async ($, e) => {
+    void handoffNow($, { held: e.args.trim() || undefined })
+    return { text: 'Writing the handoff note…' }
+  })
+
+  /**
+   * A message that would start the next turn cold, in a conversation past the reader's threshold,
+   * waits: Claude Code puts a dropped prompt back in the box, and the band asks. Enter again sends
+   * it. Never held: one with images (a plugin can send text only), a command, one typed while
+   * Claude works, one the reader did not type here, or a cold turn already confirmed.
+   */
+  on('prompt.submit', async ($, e, next) => {
+    if (!settings.confirmAbove || e.turnId || e.attachments?.length || !e.text.trim() || /^\s*[/!]/.test(e.text)) return next(e)
+    const typed = e.origin.kind === 'composer'
+      || (e.origin.kind === 'sdk' && (await $.session.surfaces().catch(() => [] as string[])).includes('desktop'))
+    if (!typed) return next(e)
+    const input = await bandInput($, false, true)
+    const { cold, cost } = nextTurn(input)
+    // Claude Code asks before /model itself, saying the history is read again: not asked twice.
+    if (!cold || cold.reason === 'model' || cold.tokens < settings.confirmAbove) return next(e)
+    // Asked once each cold spell: the next Enter sends, as after the reader closed the question.
+    if (coldConfirmed(cold, input.ui.coldOk)) return next(e)
+    await setUi($, { confirm: 'send', held: e.text, coldOk: cold.key, switchStep: '', move: null })
+    return { drop: `held by quota-band: the next turn starts cold and ${rewriteText(cold.tokens, cost)}. Enter sends it.` }
+  }).catch(($, e, next) => next(e)) // a guard that fails lets the message through
+
+  // A turn of the reader's: the cache is not kept warm while it runs, a new idle stretch starts
+  // after it, and a question about a held message is settled. A prompt starts it; the band's own
+  // model calls start no turn.
+  on('turn.start', async ($, e, next) => {
+    mainTurn = e.turnId
+    stopWarm()
+    await update($, cacheA, c => (c.warmed || c.warmStop ? { ...c, warmed: 0, warmStop: false } : c))
+    await update($, uiA, (u: UiState): UiState => (u.confirm === 'send' ? { ...u, confirm: '', held: '' } : u))
+    return next(e)
+  })
+
   on('turn.step', async function* ($, e, next) {
+    const gen = generation
+    // A cache entry lives from its request's start, the time spent answering included. The clock
+    // is asked before the step and answers after it: a streaming hook passes the step on first.
+    const asked = $.clock.now()
     const r = yield* next(e)
-    if (!e.agentId && r?.usage) {
+    const started = await asked
+    // A step of another conversation (one a /clear or a resume left) is not this one's.
+    if (gen === generation && !ownStep(e) && r?.usage) {
       const u = r.usage
-      const now = await $.clock.now()
+      const [snap, sess] = await Promise.all([read($, snapA), read($, sessA)])
       // Only a reply that read or wrote the cache says it is warm; one that did neither, as one under
       // the provider's smallest cached prompt, leaves it unknown.
       const cached = u.cache_read_input_tokens + u.cache_creation_input_tokens > 0
-      await update($, cacheA, c => ({
+      // Checked again as it is written: a /clear or resume while the reads above ran leaves it.
+      await update($, cacheA, c => (gen !== generation ? c : {
         ...c,
-        lastAt: cached ? now : 0,
+        lastAt: cached ? started : 0,
         prompt: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
         read: u.cache_read_input_tokens,
         creation: u.cache_creation_input_tokens,
         input: u.input_tokens,
+        model: e.model || c.model,
+        route: snap?.sessions[sess.id]?.route?.model ?? '',
       }))
       if (e.effort !== undefined) await update($, sessA, s => ({ ...s, effort: String(e.effort) }))
     }
@@ -433,9 +723,14 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (!e.agentId) {
+    if (!ownStep(e)) {
       await update($, cacheA, c => ({ ...c, lastAnswer: e.answer }))
       await update($, uiA, (u: UiState): UiState => ({ ...u, turns: u.turns + 1 }))
+      // The end of the reader's turn, or of one the band did not hear start (it reloaded).
+      if (!mainTurn || e.turnId === mainTurn) {
+        mainTurn = ''
+        await scheduleWarm($)
+      }
     }
     const result = await next(e)
     void refresh($, false)
@@ -447,10 +742,15 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
-    // After a clear or a resume the process goes on with another conversation.
+    // After a clear or a resume the process goes on with another conversation: a handoff's
+    // notice and the move it leaves for the new one stay.
     if (e.reason === 'clear' || e.reason === 'resume') {
+      generation++
+      leftTurn = mainTurn
+      mainTurn = ''
+      stopWarm()
       await update($, cacheA, c => ({ ...EMPTY_CACHE, ttlMs: c.ttlMs }))
-      await update($, uiA, (u: UiState): UiState => ({ ...EMPTY_UI, notice: u.notice, noticeIsError: u.noticeIsError, busy: u.busy }))
+      await update($, uiA, (u: UiState): UiState => ({ ...EMPTY_UI, notice: u.notice, noticeIsError: u.noticeIsError, busy: u.busy, held: u.held, afterHandoff: u.afterHandoff }))
     }
     const result = await next(e)
     void refresh($, true)
@@ -465,462 +765,31 @@ export const register: Register = on => {
     // drawn beneath, the band keeps to its one line, as while Claude works; `more` opens the cards.
     const below = await next(e)
     const beneath = below.type !== 'engine'
-    const { Box, Text, Button } = $.ui.resolve(e)
-    const [snap, bandError, now0, sess, cache, ui, models] = await Promise.all([
-      read($, snapA), read($, bandErrorA), read($, nowA), read($, sessA), read($, cacheA), read($, uiA), read($, modelsA),
-    ])
-    const now = now0 || Date.now()
-    const acct = sess.proxied ? sessionAccount(snap, sess.id) : null
-    // Right after a switch, a move or a route the next turn lands where nothing is cached yet.
-    const cs = nextTurnMoves(acct) ? { state: 'cold' as const, leftMs: 0, frac: 0 } : cacheState(cache, now)
-    const working = e.props.isWorking
-    // One column of air before the engine's own [-] at the top right.
-    const rowWidth = Math.max(20, e.props.bodyColumns - 1)
-    // One line while Claude works and cards while it waits, unless the reader chose otherwise
-    // for this stretch; cards only where the terminal has room for them.
-    const phase = working ? 'working' : 'idle'
-    const roomy = layout(rowWidth, e.props.maxRows, false)
-    const chosen = ui.viewPhase === phase && ui.viewTurn === ui.turns ? ui.viewOverride : ''
-    const mode = chosen === 'line' ? 'compact' : chosen === 'cards' ? roomy : layout(rowWidth, e.props.maxRows, working || beneath)
-    const setView = (view: 'cards' | 'line') => setUi($, { viewOverride: view, viewPhase: phase, viewTurn: ui.turns })
-
-    const dim = (t: string) => <Text color={C.dim}>{t}</Text>
-    const bar = (fraction: number, cells: number, color: string) => {
-      const n = barFill(fraction, cells)
-      return (
-        <Box>
-          <Text color={color}>{'━'.repeat(n)}</Text>
-          <Text color={C.track}>{'━'.repeat(Math.max(0, cells - n))}</Text>
-        </Box>
-      )
-    }
-    // Every meter reads as used, as Claude's own /usage and the usage view do: a fresh session's
-    // context and a new week start empty and fill. The colour still warns as what is left runs low.
-    const pctText = (remaining: number, stale = false) => (
-      <Text bold color={stale ? C.dim : sev(remaining)}>{`${Math.round(100 - remaining)}%${stale ? '~' : ''}`}</Text>
-    )
-    const usedFrac = (remaining: number) => (100 - remaining) / 100
-    const usedBar = (remaining: number, cells: number, color: string) => bar(usedFrac(remaining), cells, color)
-    // Controls read as words, not boxes: dim at rest, bright under the pointer or the focus.
-    // No hotkey letters: they only work once the band has the keyboard (ctrl+x tab), so a letter
-    // beside a control reads as a shortcut that does nothing. Main actions are bright.
-    const link = (key: string, label: string, onPress: () => void, main = false) => (
-      <Button key={key} label={label} plain dimColor={!main} onPress={onPress} />
-    )
-
-    // -- what the band shows --
-    // A routed session runs the route's model; otherwise the model and context window are Claude
-    // Code's own, which change with /model before any reply.
-    const route = acct?.session.route
-    const ctxWindow = route && snap?.context_lengths[route.model] ? snap.context_lengths[route.model]! : sess.contextWindow
-    const ctxUsed = sess.contextTokens
-    const ctxLeft = ctxUsed != null && ctxWindow > 0 ? Math.max(0, 100 - (ctxUsed / ctxWindow) * 100) : null
-    const model = route ? route.model : currentModel(sess.model, acct?.session.requested_model || (acct?.provider === 'claude' ? acct.session.model : ''))
-    const isCodex = acct?.provider === 'codex'
-    const longContext = !route && /\[1m\]$/.test(sess.model) ? ' 1M' : ''
-    const modelName = `${model.replace(/^claude-/, '')}${longContext}`
-    const rate = hitRate(cache)
-
-    type Meter = { remaining: number; reset: string; stale: boolean; label: string }
-    const meterOf = (w: { remaining: number; reset_at?: string; stale: boolean; label: string } | undefined): Meter | undefined =>
-      w ? { remaining: w.remaining * 100, reset: untilIso(w.reset_at, now), stale: w.stale, label: w.label } : undefined
-    let five: Meter | undefined
-    let week: Meter | undefined
-    let acctLabel = ''
-    let acctNote = ''
-    const likely = sess.proxied && !acct?.cred ? likelyAccount(snap, acct?.provider ?? providerOfModel(sess.model)) : null
-    if (acct?.cred) {
-      acctLabel = acct.cred.label
-      // The plan only: a move is told once, by the switch notice above the band.
-      acctNote = acct.cred.plan ?? ''
-      five = meterOf(windowOf(acct.cred, '5h'))
-      week = meterOf(weeklyFor(acct.cred, model))
-    } else if (likely) {
-      // Before the proxy has seen this session: the account a new session gets.
-      acctLabel = likely.cred.label
-      acctNote = [likely.cred.plan, 'expected'].filter(Boolean).join(' · ')
-      five = meterOf(windowOf(likely.cred, '5h'))
-      week = meterOf(weeklyFor(likely.cred, model))
-    } else if (!sess.proxied) {
-      acctLabel = 'claude.ai'
-      acctNote = 'direct login'
-      const r5 = sess.rateLimits.find(r => r.kind === 'five_hour')
-      const r7 = sess.rateLimits.find(r => r.kind === 'seven_day')
-      five = r5 && { remaining: 100 - r5.percentUsed, reset: untilIso(r5.resetsAt, now), stale: false, label: '5-hour' }
-      week = r7 && { remaining: 100 - r7.percentUsed, reset: untilIso(r7.resetsAt, now), stale: false, label: 'Weekly' }
-    } else {
-      acctLabel = 'proxy'
-      acctNote = 'no quota data'
-    }
-    const poolView = acct?.view ?? (likely ? snap?.providers[likely.provider] : undefined)
-    const poolCurrent = acct?.session.auth_id ?? likely?.cred.id ?? ''
-    const all = poolView && poolView.credentials.length ? pooled(poolView) : null
-    const shownCred = acct?.cred ?? likely?.cred
-    // The provider the session asks for, which `back` returns a routed session to.
-    const original = acct?.session.requested_model ? providerOfModel(acct.session.requested_model) : acct?.provider ?? ''
-    // Providers this proxy has accounts and models for: the switch row offers the others, and while
-    // routed the route's own too, for another of its models.
-    const switchProviders = acct && snap
-      ? Object.keys(snap.providers).filter(p => (route ? p !== original : p !== acct.provider) && latestModels(models, p).length)
-      : []
-    // Commands reach the proxy as the snapshot does: not while it gives none.
-    const canSend = !bandError
-    const canSwitch = Boolean(acct && canSend && (acct.view.credentials.length > 1 || switchProviders.length || acct.session.route))
-    const toggleSwitch = () => setUi($, { confirm: ui.confirm === 'switch' ? '' : 'switch', switchStep: '' })
-
-    // -- rows above the band: a confirmation, a notice or an alert --
-    const width = mode === 'compact' ? rowWidth : tilesSpan(mode, rowWidth)
-    const rowBox = (key: string, bg: string, children: RenderChildren[]) => (
-      <Box key={key} backgroundColor={bg} paddingX={2} justifyContent="space-between" width={width}>
-        {children}
-      </Box>
-    )
-    const say = (mark: string, color: string, text: string) => <Text><Text bold color={color}>{mark}</Text>{text}</Text>
-    const top: RenderChildren[] = []
-    if (ui.confirm === 'compact') {
-      top.push(rowBox('ask', C.askBg, [
-        say('? ', C.accent, `Compact this conversation? A summary replaces ${fmtTokens(cache.prompt)} of history.`),
-        <Box gap={2}>
-          {link('yes-compact', 'compact', () => compactNow($), true)}
-          {link('no', 'cancel', () => setUi($, { confirm: '' }))}
-        </Box>,
-      ]))
-    } else if (ui.confirm === 'handoff') {
-      top.push(rowBox('ask', C.askBg, [
-        say('? ', C.accent, 'Hand off to a new session? Writes a note, clears this conversation, fills the prompt.'),
-        <Box gap={2}>
-          {link('yes-handoff', 'hand off', () => handoffNow($), true)}
-          {link('no', 'cancel', () => setUi($, { confirm: '' }))}
-        </Box>,
-      ]))
-    } else if (ui.confirm === 'switch' && acct) {
-      // Two steps: accounts of this provider and the providers to route to, then that provider's models.
-      const close = () => setUi($, { confirm: '', switchStep: '' })
-      if (ui.switchStep) {
-        const provider = ui.switchStep
-        const list = latestModels(models, provider)
-        top.push(rowBox('ask', C.askBg, [
-          say('? ', C.accent, `${providerTitle(provider)} model, the next reply resends the conversation (${fmtTokens(cache.prompt)})`),
-          <Box gap={2}>
-            {list.map(m => route?.model === m
-              ? dim(`${m} (now)`)
-              : link(`model-${m}`, m, () => sendCommand($, 'route', { provider, model: m }, `Switch to ${m}`), true))}
-            {link('back', '‹ back', () => setUi($, { switchStep: '' }))}
-            {link('no', 'cancel', close)}
-          </Box>,
-        ]))
-      } else {
-        const others = otherAccounts(acct.view, acct.session.auth_id)
-        const ready = new Set(switchTargets(acct.view, acct.session.auth_id, acct.session.blocked).map(c => c.id))
-        top.push(rowBox('ask', C.askBg, [
-          say('? ', C.accent, 'Switch this session to:'),
-          <Box gap={2}>
-            {others.map(c => ready.has(c.id)
-              ? link(`to-${c.id}`, `${c.label} ${usedText(windowOf(c, '7d'))}`,
-                  () => sendCommand($, 'switch', { auth_id: c.id }, `Switch to ${c.label}`), true)
-              : dim(cannotTake(c, acct.session.model, now)))}
-            {route
-              ? link('unroute', `back to ${providerTitle(original)}`, () => sendCommand($, 'unroute', {}, `Back to ${providerTitle(original)}`), true)
-              : null}
-            {switchProviders.map(p => link(`prov-${p}`, `${providerTitle(p)} ›`, () => setUi($, { switchStep: p }), true))}
-            {link('no', 'cancel', close)}
-          </Box>,
-        ]))
-      }
-    } else if (ui.notice) {
-      top.push(rowBox('notice', ui.noticeIsError ? C.warnBg : C.infoBg, [
-        say(ui.noticeIsError ? '! ' : '· ', ui.noticeIsError ? C.orange : C.aqua, ui.notice),
-        ui.busy ? dim('working…') : link('dismiss', 'ok', () => setUi($, { notice: '' })),
-      ]))
-    } else {
-      // Without quota data from the proxy, the reason it gave goes first.
-      const alert: Alert | null = bandError
-        ? { level: 'warn', text: bandErrorText(bandError) }
-        : pickAlert(snap, acct, sess.proxied, now, ui.dismissedSwitch)
-      if (alert) {
-        const fallback = acct ? snap?.config.fallback_map[acct.provider] : undefined
-        const [fbProvider, fbModel] = (fallback ?? ':').split(':')
-        top.push(rowBox('alert', alert.level === 'warn' ? C.warnBg : C.infoBg, [
-          say(alert.level === 'warn' ? '! ' : '↪ ', alert.level === 'warn' ? C.orange : C.aqua, alert.text),
-          alert.action === 'route' && fbProvider && fbModel && canSend
-            ? link('route', `use ${fbModel}`, () => sendCommand($, 'route', { provider: fbProvider, model: fbModel }, `Route to ${fbModel}`))
-            : alert.action === 'handoff' && !working
-              ? link('alert-handoff', 'hand off', () => setUi($, { confirm: 'handoff' }))
-              : alert.action === 'dismiss'
-                ? link('alert-ok', 'ok', () => setUi($, { dismissedSwitch: alert.key ?? '' }))
-                : <Text> </Text>,
-        ]))
-      }
-    }
-
-    const cacheWord = isCodex
-      ? rate == null ? dim('waiting') : <Text bold color={sev(rate * 100)}>{`hit ${Math.round(rate * 100)}%`}</Text>
-      : cs.state === 'warm' ? <Text bold color={C.green}>Warm</Text>
-      : cs.state === 'expiring' ? <Text bold color={C.yellow}>Expiring</Text>
-      : cs.state === 'cold' ? <Text bold color={C.red}>Cold</Text>
-      : dim('waiting')
-    const cacheFrac = isCodex ? rate ?? 0 : cs.frac
-    const cacheColor = isCodex ? sev((rate ?? 0) * 100) : cs.state === 'expiring' ? C.yellow : cs.state === 'cold' ? C.red : C.green
-
-    // -- one or two rows: while Claude works, or when the terminal is too narrow for tiles --
-    if (mode === 'compact') {
-      // The width of a meter's figure, which shows what is used.
-      const pctWidth = (remaining: number) => `${Math.round(100 - remaining)}%`.length
-      const hit = rate == null ? '' : `hit ${Math.round(rate * 100)}%`
-      const cacheValue = isCodex ? (hit || '—') : cs.state === 'unknown' ? '—' : cs.state === 'cold' ? 'cold' : fmtDuration(cs.leftMs)
-      const cacheTone = isCodex ? (rate == null ? C.dim : sev(rate * 100)) : cs.state === 'unknown' ? C.dim : cacheColor
-      const effort = sess.effort ? ` · ${sess.effort}` : ''
-      // `drop` orders what goes first when even the plainest row is too wide: higher goes first.
-      type Slot = { width: number; node: RenderChildren; drop: number; model?: true }
-      // label, a five-cell bar filled to `fill` (unless plain), the value, and an optional dim tail.
-      // A quota meter fills with what is used; the cache's with what its tile's bar shows.
-      const mini = (drop: number, label: string, fill: number, color: string, value: RenderChildren, valueWidth: number, bars: boolean, tail = ''): Slot => ({
-        drop,
-        width: label.length + 1 + (bars ? 6 : 0) + valueWidth + (tail ? tail.length + 1 : 0),
-        node: <Box key={`meter-${label}`} gap={1}>{dim(label)}{bars ? bar(fill, 5, color) : null}{value}{tail ? dim(tail) : null}</Box>,
-      })
-      // Who and what: the account, then the model with its effort (or the route).
-      const identity = (withEffort: boolean, divider: boolean): Slot[] => {
-        const model = route ? `→ ${route.model}` : modelName
-        const tail = route || !withEffort ? '' : effort
-        return [
-          { drop: 0, width: acctLabel.length, node: <Text bold>{acctLabel}</Text> },
-          {
-            drop: 4,
-            model: true,
-            // A divider after the model is counted here and drawn only when something follows it.
-            width: model.length + tail.length + (divider ? 4 : 0),
-            node: <Text><Text color={route ? C.aqua : C.fg}>{model}</Text><Text color={C.dim}>{tail}</Text></Text>,
-          },
-        ]
-      }
-      // The meters at a detail level: 0 everything, 1 without the pool and cache hit, 2 without
-      // reset times, 4 without bars.
-      const meters = (level: number): Slot[] => {
-        const bars = level < 4
-        const row: Slot[] = []
-        if (ctxLeft != null) row.push(mini(1, 'ctx', usedFrac(ctxLeft), sev(ctxLeft), pctText(ctxLeft), pctWidth(ctxLeft), bars))
-        for (const [drop, label, m] of [[2, '5h', five], [3, '7d', week]] as const) {
-          if (!m) continue
-          row.push(mini(drop, label, usedFrac(m.remaining), m.stale ? C.dim : sev(m.remaining), pctText(m.remaining, m.stale),
-            pctWidth(m.remaining) + (m.stale ? 1 : 0), bars, level < 2 ? m.reset : ''))
-        }
-        row.push(mini(5, 'cache', cacheFrac, cacheTone, <Text bold color={cacheTone}>{cacheValue}</Text>, cacheValue.length, bars,
-          level < 1 && !isCodex && hit ? `· ${hit}` : ''))
-        if (level < 1 && all && all.left !== null && all.parts.length > 1) {
-          const left = all.left
-          row.push({ drop: 6, width: 5 + pctWidth(left) + (all.stale ? 1 : 0), node: <Box gap={1}>{dim('all')}{pctText(left, all.stale)}</Box> })
-        }
-        return row
-      }
-      // The way into the switch menu, and the cards where the terminal has room for them: kept to
-      // the last when space runs out.
-      const controls: Slot[] = []
-      if (canSwitch) controls.push({ drop: -1, width: 6, node: link('switch', 'switch', toggleSwitch) })
-      if (roomy !== 'compact') controls.push({ drop: -1, width: 4, node: link('view-cards', 'more', () => setView('cards')) })
-      const budget = rowWidth - 4
-      const span = (row: Slot[]) => row.reduce((sum, s) => sum + s.width, 0) + 3 * (row.length - 1)
-      // The richest level that fits (level 3 also drops the effort), then items by `drop`.
-      const fit = (build: (level: number) => Slot[]) => {
-        let level = 0
-        let row = build(level)
-        while (span(row) > budget && level < 4) row = build(++level)
-        while (span(row) > budget && row.length > 1) {
-          const worst = row.reduce((a, b) => (b.drop > a.drop ? b : a))
-          row = row.filter(s => s !== worst)
-        }
-        return row
-      }
-      const withControls = (row: Slot[]) => [...row, ...controls]
-      const full = withControls([...identity(true, true), ...meters(0)])
-      // Everything on one row when it fits; else, given the height and nothing drawn beneath, who
-      // and what on one row and the meters with full detail on a second; else one row that sheds
-      // detail, leaving the rest of the band to what lies beneath.
-      const lines: Slot[][] = span(full) <= budget
-        ? [full]
-        : !beneath && e.props.maxRows >= top.length + 2
-          ? [fit(level => withControls(identity(level < 1, false))), fit(meters)]
-          : [fit(level => withControls([...identity(level < 3, true), ...meters(level)]))]
-      return (
-        <Box flexDirection="column">
-          {top}
-          {lines.map((row, n) => (
-            <Box key={`line-${n}`} paddingX={2} gap={3} width={rowWidth}>
-              {row.map((s, i) => (s.model && lines.length === 1 && i < row.length - 1 ? <Box key="model" gap={3}>{s.node}{dim('│')}</Box> : s.node))}
-            </Box>
-          ))}
-          {below}
-        </Box>
-      )
-    }
-
-    // -- tiles: this session, then its quota, context, cache and the account pool --
-    const tws = tileWidths(mode, rowWidth)
-    // A tile: label and value, a meter as wide as the tile's inside, a caption.
-    const tile = (key: string, label: string, value: RenderChildren, meter: (cells: number) => RenderChildren, caption: RenderChildren) => {
-      const w = tws[tiles.length % tws.length]!
-      return (
-        <Box key={key} width={w} paddingX={2} flexDirection="column" backgroundColor={C.tile}>
-          <Box justifyContent="space-between">{dim(label)}{value}</Box>
-          {meter(w - 4)}
-          {caption}
-        </Box>
-      )
-    }
-    const used = (m: Meter | undefined) => m ? <Box>{pctText(m.remaining, m.stale)}{dim(' used')}</Box> : dim('—')
-    const meterBar = (m: Meter | undefined) => (cells: number) => m ? usedBar(m.remaining, cells, m.stale ? C.dim : sev(m.remaining)) : bar(0, cells, C.track)
-    const caption = (t: string) => <Text color={C.dim} wrap="truncate-end">{t}</Text>
-    const tiles: RenderChildren[] = []
-    // A routed session's route goes with `back` beside it: the controls row has no room for both
-    // `back` and `switch`, and `switch` stays, for another account or model.
-    tiles.push(
-      <Box key="account" width={tws[0]} paddingX={2} flexDirection="column" backgroundColor={C.tile}>
-        <Box justifyContent="space-between">
-          {dim('Account')}
-          <Text bold color={C.fg}>{acctLabel}</Text>
-        </Box>
-        {route
-          ? (
-            <Box justifyContent="space-between" gap={1}>
-              <Text color={C.aqua} wrap="truncate-end">{`→ ${route.model}`}</Text>
-              {canSend ? link('unroute', 'back', () => sendCommand($, 'unroute', {}, `Back to ${providerTitle(original)}`)) : null}
-            </Box>
-          )
-          : <Text color={C.dim} wrap="truncate-end">{acctNote}</Text>}
-        <Box gap={2}>
-          {canSwitch ? link('switch', 'switch', toggleSwitch) : null}
-          {link('quota', 'quota', () => $.ui.open({ id: PANE, title: 'Accounts and quota' }))}
-          {link('view-line', 'less', () => setView('line'))}
-        </Box>
-      </Box>,
-    )
-    tiles.push(tile('five', '5-hour', used(five), meterBar(five), caption(five ? resetText(five.reset) : missingText(shownCred, '5h'))))
-    tiles.push(tile('week', week?.label ?? 'Weekly', used(week), meterBar(week), caption(week ? resetText(week.reset) : missingText(shownCred, '7d'))))
-    tiles.push(tile('ctx', 'Context', ctxLeft != null ? <Box>{pctText(ctxLeft)}{dim(' used')}</Box> : dim('—'),
-      cells => ctxLeft != null ? usedBar(ctxLeft, cells, sev(ctxLeft)) : bar(0, cells, C.track),
-      <Text wrap="truncate-end"><Text color={C.dim}>{modelName}</Text><Text color={C.dim}>{sess.effort ? ` · ${sess.effort}` : ''}</Text></Text>))
-    tiles.push(tile('cache', 'Cache', cacheWord, cells => bar(cacheFrac, cells, cacheColor),
-        !working && !ui.busy && offerCacheActions(cs.state, acct)
-          ? <Box gap={2}>{link('compact', 'compact', () => setUi($, { confirm: 'compact' }), true)}{link('handoff', 'hand off', () => setUi($, { confirm: 'handoff' }), true)}</Box>
-          : caption(isCodex ? 'last request' : cs.state === 'unknown' ? 'after the first reply' : cs.state === 'cold' ? `next turn rewrites ${fmtTokens(cache.prompt)}` : `expires in ${fmtDuration(cs.leftMs)}`)))
-    if (mode === 'tiles6' || mode === 'grid') {
-      if (all && poolView && all.parts.length) {
-        const parts = all.parts
-        tiles.push(tile('all', 'Accounts', all.left === null ? dim('—') : <Box>{pctText(all.left, all.stale)}{dim(' used')}</Box>,
-          cells => {
-            const each = Math.floor((cells - (parts.length - 1)) / parts.length)
-            return <Box gap={1}>{parts.map((p, i) => <Box key={`p-${i}`}>{p === null ? bar(0, each, C.track) : usedBar(p, each, sev(p))}</Box>)}</Box>
-          },
-          caption(nextUp(poolView, poolCurrent, now))))
-      } else {
-        tiles.push(tile('all', 'Accounts', dim('—'), cells => bar(0, cells, C.track), caption(sess.proxied ? 'no quota data' : 'direct login')))
-      }
-    }
-
-    return (
-      <Box flexDirection="column">
-        {top}
-        {mode === 'grid' ? (
-          <Box key="tiles" flexDirection="column">
-            <Box gap={1}>{tiles.slice(0, 3)}</Box>
-            <Box gap={1}>{tiles.slice(3)}</Box>
-          </Box>
-        ) : (
-          <Box key="tiles" gap={1}>{tiles}</Box>
-        )}
-        {below}
-      </Box>
-    )
+    working = e.props.isWorking
+    const input = await bandInput($, working)
+    const act = actsOf($)
+    const f = bandFacts(input, act)
+    const els = $.ui.resolve(e)
+    const site = { bodyColumns: e.props.bodyColumns, maxRows: e.props.maxRows, working, beneath }
+    if (e.surface === 'desktop' && 'Svg' in els) return desktopBand(els, input, f, act, site, below)
+    return terminalBand(els, input, f, act, site, below)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const els = $.ui.resolve(e)
+    const P = e.surface === 'desktop' ? DESK : C
+    const { Text } = els
     const [snap, bandError, now0, sess] = await Promise.all([read($, snapA), read($, bandErrorA), read($, nowA), read($, sessA)])
     const now = now0 || Date.now()
+    if (!sess.proxied) {
+      return <Text color={P.dim}>This session signs in to Claude directly, not through the proxy: the band shows this account's own limits.</Text>
+    }
     if (!snap) {
       return bandError
-        ? <Text color={C.orange}>{`No quota data: ${bandErrorText(bandError)}`}</Text>
-        : <Text color={C.dim}>No quota-pilot snapshot found. Is the proxy plugin running?</Text>
+        ? <Text color={P.orange}>{`No quota data: ${bandErrorText(bandError)}`}</Text>
+        : <Text color={P.dim}>No quota-pilot snapshot found. Is the proxy plugin running?</Text>
     }
-    const acct: SessionAccount | null = sessionAccount(snap, sess.id)
-    const cols = Math.max(36, e.props.bodyColumns - 1)
-    // label, percent, bar, time to reset: the bar takes what is left, up to 24 cells.
-    const LABEL = 14
-    const PCT = 5
-    const RESET = 8
-    const barCells = Math.max(6, Math.min(24, cols - LABEL - PCT - RESET - 2))
-    const title = (provider: string) => provider.charAt(0).toUpperCase() + provider.slice(1)
-    const rows: RenderChildren[] = []
-    for (const [provider, view] of Object.entries(snap.providers)) {
-      const health = view.health === 'healthy' ? ['ready', C.green] : view.health === 'exhausted' ? ['used up', C.red] : ['unknown', C.dim]
-      rows.push(
-        <Box key={`h-${provider}`} marginTop={rows.length ? 1 : 0} width={cols} justifyContent="space-between">
-          <Text bold color={C.fg}>{title(provider)}</Text>
-          <Text color={health[1]}>{health[0]}</Text>
-        </Box>,
-      )
-      // Every kind any account of the provider reports, or says it has not, so the accounts line up
-      // row by row.
-      const kinds = [...new Set(view.credentials.flatMap(c => [...c.windows.map(w => w.kind), ...(c.absent ?? [])]))]
-        .sort((a, b) => (a === '5h' ? -1 : b === '5h' ? 1 : a === '7d' ? -1 : b === '7d' ? 1 : a.localeCompare(b)))
-      for (const c of view.credentials) {
-        const mine = acct?.session.auth_id === c.id
-        const blocked = c.tier === 3
-        const same = c.same_as ? view.credentials.find(x => x.id === c.same_as)?.label : undefined
-        rows.push(
-          <Box key={`c-${c.id}`} marginTop={1} width={cols} justifyContent="space-between">
-            <Text bold color={mine ? C.accent : C.fg}>{c.label}</Text>
-            {mine ? <Text color={C.accent}>this session</Text> : null}
-          </Box>,
-          <Text key={`s-${c.id}`} color={blocked ? C.orange : C.dim} wrap="truncate-end">
-            {[c.plan, same ? `same account as ${same}` : '', blocked ? blockedOthers({ ...view, credentials: [c] }, '', now).replace(`${c.label} `, '') : '', !blocked && c.sessions ? `${c.sessions} ${c.sessions === 1 ? 'session' : 'sessions'}` : ''].filter(Boolean).join(' · ') || ' '}
-          </Text>,
-        )
-        for (const kind of kinds) {
-          const w = c.windows.find(x => x.kind === kind)
-          const left = w ? Math.round(w.remaining * 100) : 0
-          const tone = !w || w.stale ? C.dim : sev(left)
-          const fill = w ? barFill(1 - w.remaining, barCells) : 0
-          const label = w?.label ?? kindLabel(kind)
-          rows.push(
-            <Box key={`w-${c.id}-${kind}`} width={cols}>
-              <Box width={LABEL}><Text color={C.dim}>{label}</Text></Box>
-              <Box width={PCT} justifyContent="flex-end"><Text bold color={tone}>{w ? `${100 - left}%${w.stale ? '~' : ''}` : '—'}</Text></Box>
-              <Box width={barCells + 2} paddingX={1} flexShrink={0}>
-                <Text color={tone}>{'━'.repeat(fill)}</Text>
-                <Text color={C.track}>{'━'.repeat(barCells - fill)}</Text>
-              </Box>
-              <Text color={C.dim} wrap="truncate-end">{w ? untilIso(w.reset_at, now) : missingText(c, kind)}</Text>
-            </Box>,
-          )
-        }
-      }
-    }
-    // What the plugin is set to, in words, as a two-column list.
-    const fallbacks = Object.entries(snap.config.fallback_map)
-    // When the newest quota reading was taken, not when the snapshot was: a meter's own reading
-    // grown old shows "~".
-    const lastRead = Math.max(0, ...Object.values(snap.providers).flatMap(v => v.credentials.flatMap(c => c.windows.map(w => Date.parse(w.observed_at) || 0))))
-    const settings: [string, string][] = [
-      ...fallbacks.map(([from, to]): [string, string] => {
-        const [provider, model] = to.split(':')
-        return [`When ${title(from)} is used up`, model ? `use ${model} (${title(provider ?? '')})` : to]
-      }),
-      ['Switch automatically', snap.config.cross_provider === 'auto' ? 'on' : 'off'],
-      ['New sessions avoid', `accounts that have used over ${100 - snap.config.min_five_hour_left_percent}% of their 5-hour quota`],
-      ['Quota last read', lastRead ? (now - lastRead < 30_000 ? 'just now' : `${fmtDuration(now - lastRead)} ago`) : 'not yet'],
-    ]
-    const keyWidth = Math.max(...settings.map(([k]) => k.length)) + 2
-    rows.push(<Text key="rule" color={C.track}>{'─'.repeat(cols)}</Text>)
-    for (const [k, v] of settings) {
-      rows.push(
-        <Box key={`set-${k}`} width={cols}>
-          <Box width={keyWidth} flexShrink={0}><Text color={C.dim}>{k}</Text></Box>
-          <Text wrap="truncate-end">{v}</Text>
-        </Box>,
-      )
-    }
-    if (snap.last_error) rows.push(<Text key="err" color={C.orange} wrap="truncate-end">{`last plugin error: ${snap.last_error}`}</Text>)
-    return <Box flexDirection="column">{rows}</Box>
+    const bar = e.surface === 'desktop' && 'Svg' in els ? lengthBar(els) : cellBar(els)
+    return quotaPane(els, P, snap, sessionAccount(snap, sess.id), now, e.props.bodyColumns, settings, bar)
   })
 }

@@ -15,7 +15,14 @@ import {
   likelyAccount,
   nextUp,
   otherAccounts,
-  offerCacheActions,
+  coldTurn,
+  fmtUsd,
+  isAnthropicHost,
+  rewriteText,
+  sameModel,
+  settingsOf,
+  turnCost,
+  warmDueAt,
   parseSnap,
   pickAlert,
   pooled,
@@ -33,7 +40,7 @@ import {
   weeklyFor,
   currentModel,
 } from '../hooks/logic'
-import type { CacheInfo, Pending, SessionInfo, Snap } from '../types'
+import type { CacheInfo, Pending, Snap } from '../types'
 
 const NOW = Date.parse('2026-10-04T12:00:00Z')
 const iso = (ms: number) => new Date(NOW + ms).toISOString()
@@ -77,13 +84,7 @@ const SNAP: Snap = {
   context_lengths: { 'claude-opus-5-5': 1_000_000, 'gpt-6-sol': 272_000 },
 }
 
-const SESSION: SessionInfo = {
-  id: 's1', model: 'opus[1m]', effort: 'high', cwd: '/Users/me/Documents/developer/jesse',
-  contextTokens: 420_000, contextWindow: 1_000_000, rateLimits: [],
-  proxied: true, home: '/Users/me',
-}
-
-const WARM: CacheInfo = { lastAt: NOW - 8 * 60_000, prompt: 412_000, read: 400_000, creation: 12_000, input: 10, ttlMs: H, lastAnswer: '' }
+const WARM: CacheInfo = { lastAt: NOW - 8 * 60_000, prompt: 412_000, read: 400_000, creation: 12_000, input: 10, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
 
 const MODELS = [
   'claude-opus-5-5:anthropic', 'claude-opus-5:anthropic', 'claude-sonnet-5-5:anthropic', 'claude-fable-5-1:anthropic',
@@ -119,12 +120,68 @@ describe('cache', () => {
     expect(cacheState({ ...WARM, lastAt: 0 }, NOW).state).toBe('unknown')
   })
 
-  test('compact and handoff are offered only when a rewrite is coming', async () => {
+  test('a cold turn says why: the session moved, its model changed, or the cache ran out', async () => {
     const acct = sessionAccount(SNAP, 's1')
-    expect(offerCacheActions('warm', acct)).toBe(false)
-    expect(offerCacheActions('expiring', acct)).toBe(true)
-    const imminent = { ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, switch_imminent: true } } }
-    expect(offerCacheActions('warm', sessionAccount(imminent, 's1'))).toBe(true)
+    expect(coldTurn(WARM, acct, 'claude-opus-5-5', NOW)).toBeNull()
+    // An alias is the model it names.
+    expect(coldTurn(WARM, acct, 'opus', NOW)).toBeNull()
+    const moved = { ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, auth_id: 'claude-k', served_auth_id: 'claude-d' } } }
+    expect(coldTurn(WARM, sessionAccount(moved, 's1'), 'claude-opus-5-5', NOW)).toMatchObject({ reason: 'moved', why: 'moved to k•••', tokens: 412_000 })
+    expect(coldTurn(WARM, acct, 'sonnet', NOW)).toMatchObject({ reason: 'model', why: 'model changed to sonnet' })
+    const late = coldTurn({ ...WARM, lastAt: NOW - 2 * H }, acct, 'claude-opus-5-5', NOW)
+    expect(late).toMatchObject({ reason: 'expired', why: 'cache expired 1h ago' })
+    // One cold spell keeps its key until the next reply.
+    expect(coldTurn({ ...WARM, lastAt: NOW - 2 * H }, acct, 'claude-opus-5-5', NOW + 60_000)?.key).toBe(late?.key)
+    // Nothing to rewrite before the first reply.
+    expect(coldTurn({ ...WARM, prompt: 0, lastAt: 0 }, acct, 'sonnet', NOW)).toBeNull()
+  })
+
+  test('keeping warm comes shortly before the cache would expire', async () => {
+    expect(warmDueAt(WARM)).toBe(WARM.lastAt + 55 * 60_000)
+    expect(warmDueAt({ ...WARM, ttlMs: 5 * 60_000 })).toBe(WARM.lastAt + 4 * 60_000)
+    expect(warmDueAt({ ...WARM, lastAt: 0 })).toBe(0)
+  })
+})
+
+describe('prices', () => {
+  test('a cold turn costs the cache write of the TTL in use; a warm one the cache read', async () => {
+    // Opus 5.5: $8 a million for a 1-hour write, $5 for a 5-minute one, $0.20 to read.
+    expect(turnCost('claude-opus-5-5', 1_000_000, H)).toEqual({ cold: 8, warm: 0.2 })
+    expect(turnCost('claude-opus-5-5[1m]', 1_000_000, 5 * 60_000)).toEqual({ cold: 5, warm: 0.2 })
+    expect(turnCost('claude-sonnet-4-5-20250929', 1_000_000, H)?.cold).toBe(6)
+    // Haiku 5.5 and OpenAI's models cost more past a prompt size.
+    expect(Number(turnCost('claude-haiku-5-5', 100_000, H)?.cold.toFixed(6))).toBe(0.02)
+    expect(Number(turnCost('claude-haiku-5-5', 200_000, H)?.cold.toFixed(6))).toBe(0.2)
+    expect(turnCost('gpt-6.1-sol', 200_000, H)).toEqual({ cold: 0.5, warm: 0.02 })
+    expect(turnCost('gpt-6.1-sol', 300_000, H)).toEqual({ cold: 1.5, warm: 0.06 })
+    // A model without a known price, or an alias, shows tokens only.
+    expect(turnCost('opus', 1_000, H)).toBeNull()
+    expect(turnCost('claude-opus-5-9', 1_000, H)).toBeNull()
+    expect(fmtUsd(3.296)).toBe('$3.30')
+    expect(fmtUsd(12.6)).toBe('$13')
+    expect(fmtUsd(0.004)).toBe('<$0.01')
+    expect(rewriteText(412_000, turnCost('claude-opus-5-5', 412_000, H))).toBe('rewrites 412k tokens, ≈$3.30 at API prices ($0.08 warm)')
+    expect(rewriteText(412_000, null)).toBe('rewrites 412k tokens')
+  })
+
+  test('model names match by line, an alias included', async () => {
+    expect(sameModel('opus[1m]', 'claude-opus-5-5')).toBe(true)
+    expect(sameModel('claude-opus-5-5', 'claude-opus-5-5-20261001')).toBe(true)
+    expect(sameModel('sonnet', 'claude-opus-5-5')).toBe(false)
+    expect(sameModel('gpt-6.1-sol', 'gpt-6-sol')).toBe(false)
+  })
+})
+
+describe('settings', () => {
+  test("defaults, ranges, and Anthropic's own host", async () => {
+    expect(settingsOf({})).toEqual({ handoffAt: 60, confirmAbove: 100_000, keepWarm: 3 })
+    expect(settingsOf({ handoffAt: 140, confirmColdAbove: -5, keepWarm: 2.6 })).toEqual({ handoffAt: 100, confirmAbove: 0, keepWarm: 3 })
+    expect(settingsOf({ handoffAt: 'x' })).toMatchObject({ handoffAt: 60 })
+    expect(isAnthropicHost('https://api.anthropic.com')).toBe(true)
+    expect(isAnthropicHost('https://api.anthropic.com/v1/')).toBe(true)
+    expect(isAnthropicHost('http://127.0.0.1:8317')).toBe(false)
+    expect(isAnthropicHost('https://anthropic.com.example.net')).toBe(false)
+    expect(isAnthropicHost(undefined)).toBe(false)
   })
 })
 

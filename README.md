@@ -26,7 +26,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/band.png" alt="The quota band above the Claude Code prompt: account, 5-hour and weekly use, context, cache and every account">
+  <img src="docs/images/band.png" alt="The quota band above the Claude Code prompt: a warning that the next turn starts cold and what it costs, then the account, 5-hour and weekly use, context, cache and every account">
 </p>
 
 For people who run Claude Code and Codex on several subscription accounts through
@@ -38,8 +38,13 @@ page in the management panel, and a band in Claude Code (**quota-band**).
   cache. Codex sessions and reviews too.
 - 📊 **Where the quota went.** A page in the management panel splits each account's 5-hour window,
   week, or last 7 or 30 days by project and session.
-- 🎛️ **The quota where you work.** A band above the Claude Code prompt shows the account, its use,
-  the context and the prompt cache, with one-press switching.
+- 🎛️ **The quota where you work.** A band above the Claude Code prompt, in the terminal and the
+  desktop app, shows the account, its use, the context and the prompt cache, with one-press
+  switching.
+- 🧊 **No surprise cold turns.** Before a turn rewrites the prompt cache (it expired, or the session
+  moved to another account or model) the band says how much and what that costs at API prices,
+  holds a long message until you confirm, keeps the cache warm while you are away, and hands off to
+  a fresh session that starts from a summary.
 - 🔀 **A handover between providers.** When every Claude account is used up, a session moves to a
   Codex model by hand, or by itself if you turn that on.
 
@@ -89,14 +94,37 @@ its page is under **Plugins**.
 
 </details>
 
-**2. Connect Claude Code.** On the machine where you run it:
+**2. Install the band.** In Claude Code:
+
+```
+/plugin marketplace add kuan0808/cliproxy-kit
+/plugin install quota-band@cliproxy-kit
+/reload-plugins
+```
+
+<details>
+<summary>Or ask Claude, use the terminal, or run it from a clone</summary>
+
+- **Ask Claude:** "Install the quota-band plugin from the kuan0808/cliproxy-kit marketplace, then
+  reload plugins."
+- **Terminal:** `claude plugin marketplace add kuan0808/cliproxy-kit && claude plugin install quota-band@cliproxy-kit`
+- **From a clone:** `claude --plugin-dir ./cliproxy-kit/mod`, or list that folder in
+  `CLAUDE_CODE_PLUGIN_DIRS` under `env` in `~/.claude/settings.json`.
+
+</details>
+
+The band works without the proxy too, in the desktop app or with a plain claude.ai login: see
+[what each part does alone](#with-and-without-the-band).
+
+**3. Connect Claude Code to the proxy.** On the machine where you run it:
 
 ```sh
 bash <(curl -fsSL https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/scripts/connect-claude-code.sh)
 ```
 
 It asks for one of the proxy's client keys, checks the proxy accepts it, points Claude Code at the
-proxy and installs the band. Start a new session: the band shows above the prompt.
+proxy and installs the band if it is not there yet. Start a new session: the band shows the
+account the proxy gave it.
 
 <details>
 <summary>What it changes, to do it by hand</summary>
@@ -113,16 +141,11 @@ In `~/.claude/settings.json` (the old file is kept beside it as `settings.json.b
 ```
 
 A 1-hour cache keeps long sessions cheap, tool search keeps the prompt small through a proxy, and
-claude.ai connectors do not work through one. Then:
-
-```sh
-claude plugin marketplace add kuan0808/cliproxy-kit
-claude plugin install quota-band@cliproxy-kit
-```
+claude.ai connectors do not work through one.
 
 </details>
 
-**3. Send Codex through the proxy** (optional). quota-pilot sees only what goes through the proxy:
+**4. Send Codex through the proxy** (optional). quota-pilot sees only what goes through the proxy:
 set Codex up as CLIProxyAPI's [Codex guide](https://help.router-for.me/agent-client/codex) describes.
 
 <details>
@@ -149,7 +172,7 @@ requests.
 
 </details>
 
-**4. Show the quota in Codex** (optional). Codex has no status line of its own to fill, and through
+**5. Show the quota in Codex** (optional). Codex has no status line of its own to fill, and through
 a proxy its footer shows no limits; two hooks print a line instead: the account and its use when a
 session starts, and after a turn only when the session moved to another account, or its account
 passed 80% or ran out.
@@ -181,7 +204,7 @@ in a container, or on a server that runs no client at all.
 
 | Setup | What changes |
 | --- | --- |
-| **The same machine** | Nothing: steps 1 to 4 as above. |
+| **The same machine** | Nothing: steps 1 to 5 as above. |
 | **Docker** | Keep the proxy user's `~/.cache/cliproxy-kit/` on a volume (`/root/.cache/cliproxy-kit` in most images), or a restart loses the log and the state. |
 | **Another machine** | Reach the proxy over an encrypted address, such as one from [Tailscale Serve](https://tailscale.com/kb/1312/serve), and give that address to the connect command and to Codex. |
 
@@ -199,19 +222,27 @@ bash <(curl -fsSL https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/s
 
 ### With and without the band
 
-quota-pilot works on its own; the band adds what only Claude Code can show or do.
+quota-pilot works on its own; the band adds what only Claude Code can show or do, and works on its
+own too.
 
-| | quota-pilot alone | with the band |
-| --- | :---: | :---: |
-| An account for each session, kept with its prompt cache | ✅ | ✅ |
-| The usage page: accounts, projects, sessions | ✅ | ✅ |
-| A session's name on the usage page | its first message¹ | Claude Code's title, renames included, from any device |
-| One project per repository across devices | by folder | ✅ |
-| Account, quota, context and cache above the prompt | | ✅ |
-| Switch an account or a provider by hand | | ✅ |
-| `compact` and `handoff` before the cache expires | | ✅ |
+| | quota-pilot alone | with the band | the band alone² |
+| --- | :---: | :---: | :---: |
+| An account for each session, kept with its prompt cache | ✅ | ✅ | |
+| The usage page: accounts, projects, sessions | ✅ | ✅ | |
+| A session's name on the usage page | its first message¹ | Claude Code's title, renames included, from any device | |
+| One project per repository across devices | by folder | ✅ | |
+| Account, quota, context and cache above the prompt | | ✅ | the signed-in account's own quota |
+| Switch an account or a provider by hand | | ✅ | |
+| A warning before a cold turn, with its cost; keeping the cache warm; handoff | | ✅ | ✅ |
 
 ¹ Claude Code's title too when the proxy runs beside Claude Code, as the same user.
+
+² The desktop app, or Claude Code signed in to claude.ai without the proxy.
+
+The desktop app signs its sessions in to Claude itself, so they never go through the proxy: they get
+no account from it, are not on the usage page, and cannot be switched. When the app is signed in to
+an account the proxy also holds, its use still lowers that account's quota, and the usage page
+counts it as "Not matched to a request".
 
 The band reads the quota with the key Claude Code already sends, once the proxy has served a request
 with that key in the last week. So right after installing, and after a week away, it shows the quota
@@ -221,14 +252,31 @@ from the first reply on.
 
 ### In Claude Code
 
-The band shows tiles while Claude waits and one line while it works.
+Cards while Claude waits, one line while it works:
+
+| On the band | Means |
+| --- | --- |
+| **Account** | The account the proxy gave this session (`expected` before its first request), its plan and the model. |
+| **5-hour**, **Weekly** | That account's use of each window, and when it resets. |
+| **Context** | How full the conversation is. |
+| **Cache** | Time left before the prompt cache goes cold, `kept warm 1/3` once the band refreshed it; once cold, what the next turn rewrites and costs. |
+| **Accounts** | Every account's weekly use, and the one a switch or a new session gets next. |
+| **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy, a cold next turn, a session moved, a context filling up). |
 
 | Control | What it does |
 | --- | --- |
-| `switch` | Moves this session to another account, or to another provider's model and back. |
+| `switch` | Moves this session to another account, or to another provider's model and back. While the cache is warm it first says what the move costs, and can hand off first. |
+| `hand off` | In the row when the context passes 60%, the next turn would start cold, or a move would. Claude writes a note (goal, done, not done, changes, watch out, next step), the conversation clears, and a new one starts from it. `/handoff [message]` does it any time, with the message after the note. |
 | `quota` | Every account's windows; `/quota` opens the same. |
-| `more` / `less` | Tiles or one line, until the turn changes. |
-| `compact`, `handoff` | Offered when the prompt cache is about to expire or a switch is coming, so the next turn does not rewrite a long conversation. |
+| `more` / `less` | Cards or one line, until the turn changes. |
+
+**Before a cold turn.** When the next turn would rewrite more than 100k tokens of cache, a message
+you send waits in the prompt and the row asks: **Enter** again sends it, or hand off with it. While
+you are away the band refreshes the cache up to three times, each shortly before it would expire, at
+the cache-read price.
+
+In the desktop app the band draws cards in the app's own light or dark theme, with that account's
+own quota (see [without the proxy](#with-and-without-the-band)).
 
 ### In the management panel
 
@@ -264,37 +312,51 @@ On the panel's **Plugins** page, or under `plugins.configs.quota-pilot` in `conf
 | `idle_poll_minutes` | `10` | How often idle accounts' quota is read. |
 | `context_lengths` | built in | Context window per model, to tell whether a conversation fits another model. |
 
+The band's settings are in Claude Code's `/config`, and asked for when it is installed:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Suggest a handoff at | `60` | Context used, in percent, at which the row suggests a handoff. `0` never suggests it. |
+| Ask before a cold turn above | `100000` | Conversation size, in tokens, from which a message into a cold turn waits for you. `0` never holds one. |
+| Keep the cache warm | `3` | Refreshes of the cache while you are away. `0` turns it off. |
+
+Costs are Anthropic's and OpenAI's API list prices, for comparison: a subscription is not billed per
+token. A model without a known price shows tokens only.
+
 ## What it changes
 
 | Where | What | To undo |
 | --- | --- | --- |
 | CLIProxyAPI's `config.yaml` | `plugins:` turned on, the store, and quota-pilot's settings | Remove them. |
 | `~/.cache/cliproxy-kit/` of the proxy's user | State, the request log and what is known of each session (mode 0600; client keys as hashes only) | Delete the folder. |
-| `~/.claude/settings.json`, on each machine with Claude Code | The `env` keys of step 2; the file as it was is kept as `settings.json.bak-<time>` | Put the backup back. |
+| `~/.claude/settings.json`, on each machine with Claude Code | The `env` keys of step 3; the file as it was is kept as `settings.json.bak-<time>` | Put the backup back. |
 | Claude Code's plugins | The `cliproxy-kit` marketplace and `quota-band` | `claude plugin uninstall quota-band@cliproxy-kit` |
-| `~/.cache/cliproxy-kit/handoff/`, beside the band | Notes `handoff` wrote | Delete the folder. |
-| `~/.codex/config.toml` (optional) | The model provider of step 3 and the hooks of step 4 | Remove them. |
+| `~/.cache/cliproxy-kit/handoff/`, beside the band | The notes handoffs wrote | Delete the folder. |
+| `~/.codex/config.toml` (optional) | The model provider of step 4 and the hooks of step 5 | Remove them. |
 
 ## Update and uninstall
 
-- **Update:** the panel's Plugin Store offers new versions of quota-pilot;
-  `claude plugin update quota-band@cliproxy-kit` updates the band. Update both: they change
-  together.
+- **Update:** the panel's Plugin Store offers new versions of quota-pilot. The band updates with
+  `claude plugin update quota-band@cliproxy-kit`, or by itself once auto-update is on for the
+  marketplace under **Marketplaces** in `/plugin`; `/reload-plugins` loads it in a running session.
+  Update both: they change together.
 - **From 0.1.6:** the band reads everything over the network, with the key Claude Code already
   uses, so `band_tokens` is no longer read: remove it from `config.yaml`. Sessions, projects and
   remembered folders move into `usage/sessions.json` by themselves.
-- **Uninstall:** delete Quota Pilot on the panel's **Plugins** page, then undo the rest as the table
-  above says.
+- **Uninstall:** delete Quota Pilot on the panel's **Plugins** page,
+  `claude plugin uninstall quota-band@cliproxy-kit` removes the band, then undo the rest as the
+  table above says.
 
 ## Troubleshooting
 
 | You see | Do this |
 | --- | --- |
 | The store install fails | The panel waits 30 seconds for the 2 MB download from GitHub: install by hand (step 1). |
+| The band in the desktop app shows no quota yet | The app's session reports its limits with its first reply. |
 | No quota-pilot page under Plugins | Refresh the panel, and check `plugins.enabled: true`. |
 | The band says quota data comes once this key has sent a request | Send one prompt: the proxy has not accepted that key for a request in the last week. |
 | The band says quota data is old | The proxy, or the plugin in it, stopped: restart CLIProxyAPI. |
-| Codex sessions are missing from the page | Codex does not use the proxy yet (step 3). |
+| Codex sessions are missing from the page | Codex does not use the proxy yet (step 4). |
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
 | A Codex account has no 5-hour window | Its plan has none; the page and the band say so. |
 

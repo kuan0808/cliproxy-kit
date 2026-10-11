@@ -135,6 +135,13 @@ export type CacheInfo = {
   input: number
   ttlMs: number
   lastAnswer: string
+  /** The model that answered the last main-thread request: another one next finds nothing cached. */
+  model: string
+  /** The route the last reply went by ('' for none), as the snapshot said then; null when not known (a resumed conversation). */
+  route: string | null
+  /** Times the cache was kept warm since the reader's last prompt, and whether keeping it stopped: a refresh found it gone. */
+  warmed: number
+  warmStop: boolean
 }
 
 /** A command sent and not yet acknowledged: the proxy run (boot id) it was sent to, and when. */
@@ -151,10 +158,28 @@ export type BandError =
 
 export type ModelInfo = { id: string; owned_by: string; created: number }
 
+/** A switch or a route as the band sends it: the command, its fields, and how it is told. */
+export type Move = { action: string; fields: Record<string, string>; text: string }
+
 export type UiState = {
   /** '' for the first switch step, else the provider whose models are listed. */
   switchStep: string
-  confirm: '' | 'compact' | 'handoff' | 'switch'
+  /**
+   * The question above the band: a handoff, the switch menu, a move that would start the next
+   * turn cold (`move`), or a message held because it would (`send`).
+   */
+  confirm: '' | 'handoff' | 'switch' | 'move' | 'send'
+  /** The move `confirm: 'move'` asks about. */
+  move: Move | null
+  /** The message the send guard held, which a handoff carries on with. */
+  held: string
+  /** The cold spell (ColdTurn key) the reader chose to send into anyway, and the one whose notice they dismissed. */
+  coldOk: string
+  coldDismissed: string
+  /** The context share, in percent, at which the reader dismissed the handoff suggestion: it comes back 10 points on. */
+  handoffDismissedAt: number
+  /** A move a handoff leaves for its new session (`to`), sent once the proxy has seen that session, if within ten minutes (`at`). */
+  afterHandoff: (Move & { to: string; at: number }) | null
   pending: Pending[]
   notice: string
   noticeIsError: boolean

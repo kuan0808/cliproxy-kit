@@ -216,10 +216,16 @@ follows the panel's theme, language and width.
 
 ## quota-band
 
-The band draws above the Claude Code prompt: tiles while Claude waits, one line while it works or
-when the terminal is narrow, and one line also when another mod draws beneath it. Everything it
-shows of accounts comes from `/band`, read every 10 seconds at `ANTHROPIC_BASE_URL` with
-`ANTHROPIC_AUTH_TOKEN` (else `ANTHROPIC_API_KEY`, else no key, for a proxy without `api-keys`),
+The band draws above the Claude Code prompt, in a terminal and in the desktop app. What it shows is
+decided once (`view.ts`: the facts, and the one row above the band) and drawn per surface: in
+character cells in a terminal (`terminal.tsx`), and as cards in the desktop app (`desktop.tsx`),
+whose font is proportional, whose widths are CSS lengths and whose colours follow its light or dark
+theme. Both show cards while Claude waits and one line while it works (also when another mod draws
+beneath it), and the row says one thing at a time: a question, what came of an action, or an alert
+(the proxy's, a cold next turn, a session moved, a full context), in that order.
+
+Everything it shows of accounts comes from `/band`, read every 10 seconds at `ANTHROPIC_BASE_URL`
+with `ANTHROPIC_AUTH_TOKEN` (else `ANTHROPIC_API_KEY`, else no key, for a proxy without `api-keys`),
 the same wherever the proxy runs. Each read sends what only the band's device knows of the session
 in `X-Band-*` headers, kept out of the proxy's request log: its title, the folder it started in, its
 repository's root and remote, and the model it uses, for which the snapshot names the account a
@@ -230,8 +236,37 @@ Resources are read-only routes, so a switch, route or back goes with the next re
 minute, or across a proxy restart, says so. When `/band` gives nothing the band says why (a key the
 proxy has not accepted yet, no plugin there, no answer) and keeps the last snapshot, marked old.
 The switch list leaves out accounts that cannot serve the session's model and second credentials
-of an account. The cache meter starts only after a reply that read or wrote the cache. `compact`
-and `handoff` run in Claude Code itself.
+of an account.
+
+A session signed in to Claude directly reads no proxy. The desktop app's are: it points them at
+Anthropic's own API with the app's sign-in. The band then shows that account's own limits, as Claude
+Code reports them after a reply, and leaves out what only the proxy has: accounts, switching and its
+alerts.
+
+Context, cache and model come from Claude Code itself, so the rest works either way:
+
+- **Cold turns.** The next turn finds nothing cached when the session moved to another account or
+  provider since its last reply, its model changed, or the cache's time ran out (the TTL in use:
+  `CLAUDE_CODE_PROMPT_CACHE_TTL`, else an hour on a subscription and five minutes on a key). The row
+  says why and what the next turn rewrites, with an estimate at API list prices: the cache-write
+  price of that TTL, against the cache-read price warm. A model without a known price shows tokens
+  only. The cache meter starts only after a reply that read or wrote the cache.
+- **Holding a message.** Past `confirmColdAbove` tokens, a message typed into a cold turn is dropped
+  (Claude Code puts it back in the box) and the row asks; Enter again sends it. Never held: one with
+  images (a plugin can resend text only), a command, one typed during a turn, and a cold turn
+  already confirmed: Claude Code's own question on `/model`, or a move confirmed in the band.
+- **Moves.** A switch or route while the cache is warm asks first, with what it costs, and can hand
+  off first: the move then waits until the proxy has seen the new session, which it does after the
+  note's turn (it refuses a command for a session it has not seen).
+- **Handoff.** Claude writes a note over the conversation from its cache (`$.model.fork`), in fixed
+  sections: goal, done, not done, changes, watch out, next step. The note is saved under
+  `~/.cache/cliproxy-kit/handoff/` and read back, the conversation clears, and the new one starts
+  from the note, sent at once with any held message after it (put in the prompt if that fails).
+  Suggested at `handoffAt` percent of the context; `/handoff [message]` at any time.
+- **Keeping warm.** While idle, a fork shortly before the TTL ends (five minutes before, or a fifth
+  of a shorter TTL) reads the cached prefix at the cache-read price, which keeps it for another TTL:
+  up to `keepWarm` times each idle stretch, only while the cache is still there, and not for a
+  conversation under 20k tokens. Through the proxy it is a request of the same session.
 
 ## Codex hooks
 
@@ -245,7 +280,7 @@ quota through the proxy: CLIProxyAPI does not pass on the rate-limit events its 
 
 ## Upstream behaviour it relies on
 
-Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.289:
+Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296:
 
 - A scheduler plugin that handles a pick bypasses the native selector, session affinity included.
 - Pick requests carry `canonical_session_id` (`claude:<session>`, with `:agent:<id>` for a
@@ -256,6 +291,8 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.289:
 - A usage record names the client key the proxy accepted (`config-api-key`'s principal), and none
   when the proxy has no `api-keys`.
 - A plugin library replaced in place is loaded again only when the proxy restarts.
+- The desktop app points its Claude Code sessions at Anthropic's own API with its own sign-in, so
+  they bypass the proxy; a prompt a `prompt.submit` hook drops goes back into the prompt box.
 - Claude Code sends its session id in `X-Claude-Code-Session-Id`, and continues server-side message
   threads; an expired thread is answered `404 thread_not_found`, which CLIProxyAPI 8.0.14 and later
   pass through so Claude Code replays the conversation.
@@ -265,7 +302,10 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.289:
 - Crossing providers changes the model and rewrites the prompt cache; Claude Code does not know a
   non-Claude model's context size, so its auto-compact timing may be off.
 - Remote Control, voice dictation and claude.ai connectors do not work through a proxy.
-- The cache countdown is an estimate: the server's cache state cannot be observed.
+- The cache countdown, cold turns and keeping warm are estimates: the server's cache state cannot
+  be observed, and a change Claude Code makes to its own prompt (`/reload-plugins`, another tool
+  list) also starts the cache over.
+- Prices are API list prices, for comparison: a subscription is not billed per token.
 - Transcripts are read only on the machine that runs the proxy, as the same user as Claude Code.
   Elsewhere, and in a container, the band names a session, else its requests do; without the band a
   session there keeps the title of its first request, and its project is its folder's.

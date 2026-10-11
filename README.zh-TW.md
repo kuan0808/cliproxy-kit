@@ -26,14 +26,15 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/band.png" alt="Claude Code 輸入框上方的額度列：帳號、5 小時與每週用量、context、快取與所有帳號">
+  <img src="docs/images/band.png" alt="Claude Code 輸入框上方的額度列：下一輪會冷啟動的提醒和費用，以及帳號、5 小時與每週用量、context、快取與所有帳號">
 </p>
 
 給透過 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 使用多個訂閱帳號跑 Claude Code 和 Codex 的人：一個 proxy 插件（**quota-pilot**），附帶管理面板裡的用量頁，以及 Claude Code 裡的額度列（**quota-band**）。
 
 - 🧭 **每個 session 分到對的帳號。** 新的 session 分到每週額度最快重置的帳號，快過期的額度先用掉；之後就留在那個帳號，prompt 快取也跟著保留。Codex 的 session 和 review 也一樣。
 - 📊 **額度用到哪裡去。** 管理面板裡的頁面，把每個帳號的 5 小時視窗、這一週、近 7 或 30 天，依專案和 session 拆開。
-- 🎛️ **在工作的地方看額度。** Claude Code 輸入框上方的額度列，顯示帳號、用量、context 和 prompt 快取，一鍵就能切換。
+- 🎛️ **在工作的地方看額度。** Claude Code 輸入框上方的額度列，終端機和桌面版都有，顯示帳號、用量、context 和 prompt 快取，一鍵就能切換。
+- 🧊 **不再意外冷啟動。** 下一輪要重寫 prompt 快取之前（快取過期，或 session 換了帳號或模型），額度列會說要重寫多少、以 API 價格計算要花多少；長對話的訊息會先停下等你確認；你離開時保持快取；也能交接到從摘要開始的新 session。
 - 🔀 **供應商之間交接。** Claude 帳號全部用完時，session 可以手動換到 Codex 的模型，也可以設定成自動。
 
 <table>
@@ -73,13 +74,32 @@ plugins:
 
 </details>
 
-**2. 連接 Claude Code。** 在你執行 Claude Code 的機器上：
+**2. 安裝額度列。** 在 Claude Code 裡：
+
+```
+/plugin marketplace add kuan0808/cliproxy-kit
+/plugin install quota-band@cliproxy-kit
+/reload-plugins
+```
+
+<details>
+<summary>也可以請 Claude 裝、用終端機，或從 clone 下來的資料夾執行</summary>
+
+- **請 Claude 裝：**「從 kuan0808/cliproxy-kit marketplace 安裝 quota-band 插件，然後重新載入插件。」
+- **終端機：** `claude plugin marketplace add kuan0808/cliproxy-kit && claude plugin install quota-band@cliproxy-kit`
+- **從 clone：** `claude --plugin-dir ./cliproxy-kit/mod`，或把這個資料夾寫進 `~/.claude/settings.json` 的 `env` 底下的 `CLAUDE_CODE_PLUGIN_DIRS`。
+
+</details>
+
+額度列不經過 proxy 也能用，例如桌面版或直接登入 claude.ai：見[各部分單獨能做什麼](#有沒有裝額度列)。
+
+**3. 讓 Claude Code 改走 proxy。** 在你執行 Claude Code 的機器上：
 
 ```sh
 bash <(curl -fsSL https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/scripts/connect-claude-code.sh)
 ```
 
-它會詢問一把 proxy 的 client key，確認 proxy 接受它，讓 Claude Code 改走 proxy，並安裝額度列。開一個新的 session，額度列就會出現在輸入框上方。
+它會詢問一把 proxy 的 client key，確認 proxy 接受它，讓 Claude Code 改走 proxy；還沒裝額度列的話也會一起裝。開一個新的 session，額度列就會顯示 proxy 分給它的帳號。
 
 <details>
 <summary>它改了什麼（要手動設定時）</summary>
@@ -94,16 +114,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/s
 "ENABLE_CLAUDEAI_MCP_SERVERS": "false"
 ```
 
-1 小時的快取讓長 session 比較省；tool search 讓經過 proxy 的 prompt 保持精簡；claude.ai 的連接器無法經過 proxy 使用。接著：
-
-```sh
-claude plugin marketplace add kuan0808/cliproxy-kit
-claude plugin install quota-band@cliproxy-kit
-```
+1 小時的快取讓長 session 比較省；tool search 讓經過 proxy 的 prompt 保持精簡；claude.ai 的連接器無法經過 proxy 使用。
 
 </details>
 
-**3. 讓 Codex 經過 proxy**（選用）。quota-pilot 只看得到經過 proxy 的請求：照 CLIProxyAPI 的[Codex 指南](https://help.router-for.me/agent-client/codex)設定 Codex。
+**4. 讓 Codex 經過 proxy**（選用）。quota-pilot 只看得到經過 proxy 的請求：照 CLIProxyAPI 的[Codex 指南](https://help.router-for.me/agent-client/codex)設定 Codex。
 
 <details>
 <summary><code>~/.codex/config.toml</code></summary>
@@ -128,7 +143,7 @@ api_key_model_discovery = true   # Codex 0.156 起需要
 
 </details>
 
-**4. 在 Codex 裡顯示額度**（選用）。Codex 沒有可以自訂的狀態列，經過 proxy 時底部也不會顯示用量上限；加上兩個 hook 就會印出一行：session 開始時顯示帳號和用量，之後只在換了帳號、帳號用量超過 80% 或用完時才提醒。
+**5. 在 Codex 裡顯示額度**（選用）。Codex 沒有可以自訂的狀態列，經過 proxy 時底部也不會顯示用量上限；加上兩個 hook 就會印出一行：session 開始時顯示帳號和用量，之後只在換了帳號、帳號用量超過 80% 或用完時才提醒。
 
 <details>
 <summary>加進 <code>~/.codex/config.toml</code>，key 和位址與上面相同</summary>
@@ -155,7 +170,7 @@ command = '''id=$(sed -n 's/.*[{,]"session_id":"\([^"]*\)".*/\1/p'); printf 'Aut
 
 | 情況 | 要改什麼 |
 | --- | --- |
-| **同一台機器** | 不用改：照上面步驟 1 到 4。 |
+| **同一台機器** | 不用改：照上面步驟 1 到 5。 |
 | **Docker** | 把 proxy 使用者的 `~/.cache/cliproxy-kit/` 放在 volume 上（大多數映像檔是 `/root/.cache/cliproxy-kit`），否則重新啟動就會遺失記錄和狀態。 |
 | **另一台機器** | 透過加密的位址連到 proxy，例如 [Tailscale Serve](https://tailscale.com/kb/1312/serve) 提供的位址，再把這個位址交給連接指令和 Codex。 |
 
@@ -169,19 +184,23 @@ bash <(curl -fsSL https://raw.githubusercontent.com/kuan0808/cliproxy-kit/main/s
 
 ### 有沒有裝額度列
 
-quota-pilot 單獨就能運作；額度列補上只有 Claude Code 裡才能顯示或做到的事。
+quota-pilot 單獨就能運作；額度列補上只有 Claude Code 裡才能顯示或做到的事，單獨也能用。
 
-| | 只有 quota-pilot | 加上額度列 |
-| --- | :---: | :---: |
-| 每個 session 分到帳號，並保留 prompt 快取 | ✅ | ✅ |
-| 用量頁：帳號、專案、session | ✅ | ✅ |
-| 用量頁上 session 的名稱 | 第一則訊息¹ | Claude Code 取的標題，包含你改過的名稱，任何裝置都是 |
-| 同一個 repo 跨裝置算成一個專案 | 依資料夾 | ✅ |
-| 輸入框上方的帳號、額度、context 和快取 | | ✅ |
-| 手動切換帳號或供應商 | | ✅ |
-| 快取過期前的 `compact` 和 `handoff` | | ✅ |
+| | 只有 quota-pilot | 加上額度列 | 只有額度列² |
+| --- | :---: | :---: | :---: |
+| 每個 session 分到帳號，並保留 prompt 快取 | ✅ | ✅ | |
+| 用量頁：帳號、專案、session | ✅ | ✅ | |
+| 用量頁上 session 的名稱 | 第一則訊息¹ | Claude Code 取的標題，包含你改過的名稱，任何裝置都是 | |
+| 同一個 repo 跨裝置算成一個專案 | 依資料夾 | ✅ | |
+| 輸入框上方的帳號、額度、context 和快取 | | ✅ | 登入帳號自己的額度 |
+| 手動切換帳號或供應商 | | ✅ | |
+| 冷啟動前的提醒和費用、保持快取、交接 | | ✅ | ✅ |
 
 ¹ proxy 和 Claude Code 在同一台、用同一個使用者執行時，也會是 Claude Code 取的標題。
+
+² 桌面版，或不經過 proxy、直接登入 claude.ai 的 Claude Code。
+
+桌面版的 session 由 app 自己登入 Claude，完全不經過 proxy：proxy 不會替它們分配帳號，用量頁上看不到，也不能切換。桌面版登入的帳號如果也在 proxy 裡，它的用量仍會讓那個帳號的額度下降，用量頁會把這部分算成「未對應到請求」。
 
 額度列用 Claude Code 本來就送的 key 讀額度，但 proxy 最近一週內要處理過這把 key 的請求才會給。所以剛安裝好，或隔了一週以上沒用，額度列會在第一則回覆之後才顯示額度。
 
@@ -189,14 +208,27 @@ quota-pilot 單獨就能運作；額度列補上只有 Claude Code 裡才能顯�
 
 ### 在 Claude Code 裡
 
-額度列在 Claude 等待時顯示方塊，工作時縮成一行。
+Claude 等待時顯示方塊，工作時縮成一行：
+
+| 額度列上的 | 意思 |
+| --- | --- |
+| **Account** | proxy 分給這個 session 的帳號（第一個請求之前標成 `expected`）、方案和模型。 |
+| **5-hour**、**Weekly** | 那個帳號在各個額度週期的用量，以及何時重置。 |
+| **Context** | 對話用了多少 context。 |
+| **Cache** | prompt 快取還剩多久變冷；額度列刷新過時顯示 `kept warm 1/3`；變冷後顯示下一輪要重寫多少、花多少。 |
+| **Accounts** | 所有帳號的每週用量，以及下次切換或新 session 會分到的帳號。 |
+| **上方那一列** | 一次一件事：要你決定的問題、剛做完的結果，或提醒（proxy 的狀況、下一輪會冷啟動、session 換了帳號、context 快滿了）。 |
 
 | 按鈕 | 作用 |
 | --- | --- |
-| `switch` | 把這個 session 換到另一個帳號，或另一個供應商的模型，也能換回來。 |
+| `switch` | 把這個 session 換到另一個帳號，或另一個供應商的模型，也能換回來。快取還熱著時，會先說切換要花多少，也可以先交接。 |
+| `hand off` | context 超過 60%、下一輪會冷啟動，或切換會造成冷啟動時，出現在上方那一列。Claude 寫一份交接筆記（目標、已完成、未完成、修改內容、注意事項、下一步），清空對話，新的對話從筆記開始。輸入 `/handoff [訊息]` 隨時都能交接，訊息會接在筆記後面。 |
 | `quota` | 所有帳號的各個額度週期；輸入 `/quota` 也一樣。 |
 | `more` / `less` | 在換輪之前固定顯示方塊或一行。 |
-| `compact`、`handoff` | prompt 快取快過期或即將換帳號時出現，避免下一輪重寫一大段對話的快取。 |
+
+**冷啟動之前。** 下一輪要重寫超過 100k token 的快取時，你送出的訊息會先回到輸入框，上方那一列會問你：再按一次 **Enter** 就送出，也可以帶著它交接。你離開時，額度列最多刷新快取三次，每次在快到期前，用快取讀取的價格。
+
+在桌面版裡，額度列畫成卡片，跟著 app 的淺色或深色主題，顯示那個帳號自己的額度（見[不經過 proxy 時](#有沒有裝額度列)）。
 
 ### 在管理面板裡
 
@@ -226,32 +258,43 @@ quota-pilot 單獨就能運作；額度列補上只有 Claude Code 裡才能顯�
 | `idle_poll_minutes` | `10` | 多久讀一次閒置帳號的額度。 |
 | `context_lengths` | 內建表 | 各模型的 context 大小，用來判斷對話放不放得進另一個模型。 |
 
+額度列的設定在 Claude Code 的 `/config`，安裝時也會詢問：
+
+| 設定 | 預設 | 作用 |
+| --- | --- | --- |
+| 建議交接的 context 用量 | `60` | context 用到這個百分比時，上方那一列建議交接。`0` 表示不建議。 |
+| 冷啟動前先詢問的對話大小 | `100000` | 對話超過這麼多 token 時，會冷啟動的訊息先停下等你確認。`0` 表示不攔。 |
+| 保持快取的次數 | `3` | 你離開時刷新快取的次數。`0` 表示關閉。 |
+
+費用是 Anthropic 和 OpenAI 的 API 定價，僅供比較：訂閱方案不是按 token 計費。沒有已知價格的模型只顯示 token 數。
+
 ## 它改了什麼
 
 | 位置 | 內容 | 還原方式 |
 | --- | --- | --- |
 | CLIProxyAPI 的 `config.yaml` | 開啟 `plugins:`、加入商店，以及 quota-pilot 的設定 | 刪掉這些設定。 |
 | proxy 使用者的 `~/.cache/cliproxy-kit/` | 狀態、請求記錄，以及每個 session 的資料（權限 0600；client key 只存雜湊） | 刪掉這個資料夾。 |
-| 每台跑 Claude Code 的 `~/.claude/settings.json` | 步驟 2 的 `env` 設定；原本的檔案保留為 `settings.json.bak-<時間>` | 把備份放回去。 |
+| 每台跑 Claude Code 的 `~/.claude/settings.json` | 步驟 3 的 `env` 設定；原本的檔案保留為 `settings.json.bak-<時間>` | 把備份放回去。 |
 | Claude Code 的插件 | `cliproxy-kit` marketplace 和 `quota-band` | `claude plugin uninstall quota-band@cliproxy-kit` |
-| 額度列那台的 `~/.cache/cliproxy-kit/handoff/` | `handoff` 寫的交接筆記 | 刪掉這個資料夾。 |
-| `~/.codex/config.toml`（選用） | 步驟 3 的 model provider 和步驟 4 的 hook | 刪掉這些設定。 |
+| 額度列那台的 `~/.cache/cliproxy-kit/handoff/` | 交接寫的筆記 | 刪掉這個資料夾。 |
+| `~/.codex/config.toml`（選用） | 步驟 4 的 model provider 和步驟 5 的 hook | 刪掉這些設定。 |
 
 ## 更新與移除
 
-- **更新：** 面板的插件商店會提供 quota-pilot 的新版本；額度列用 `claude plugin update quota-band@cliproxy-kit` 更新。兩者一起改版，請一起更新。
+- **更新：** 面板的插件商店會提供 quota-pilot 的新版本。額度列用 `claude plugin update quota-band@cliproxy-kit` 更新，或在 `/plugin` 的 **Marketplaces** 開啟自動更新；執行中的 session 用 `/reload-plugins` 載入新版。兩者一起改版，請一起更新。
 - **從 0.1.6 升級：** 額度列改成全部走網路，用 Claude Code 本來就在用的 key，所以 `band_tokens` 不再讀取，可以從 `config.yaml` 刪掉。session、專案和記住的資料夾會自動移進 `usage/sessions.json`。
-- **移除：** 在面板的**插件**頁面刪除 Quota Pilot，其餘照上表還原。
+- **移除：** 在面板的**插件**頁面刪除 Quota Pilot，用 `claude plugin uninstall quota-band@cliproxy-kit` 移除額度列，其餘照上表還原。
 
 ## 疑難排解
 
 | 你看到 | 這樣處理 |
 | --- | --- |
 | 從商店安裝失敗 | 面板只等 30 秒，從 GitHub 下載 2 MB 太慢就會失敗：改用手動安裝（步驟 1）。 |
+| 桌面版的額度列還沒有額度 | 桌面版的 session 在第一則回覆時才回報額度。 |
 | 插件底下沒有 quota-pilot | 重新整理面板，並確認 `plugins.enabled: true`。 |
 | 額度列說這把 key 送出請求後才有額度資料 | 送出一個 prompt：proxy 最近一週還沒接受過這把 key 的請求。 |
 | 額度列說額度資料太舊 | proxy 或裡面的插件停了：重新啟動 CLIProxyAPI。 |
-| 用量頁看不到 Codex 的 session | Codex 還沒經過 proxy（步驟 3）。 |
+| 用量頁看不到 Codex 的 session | Codex 還沒經過 proxy（步驟 4）。 |
 | Codex 說 hook 以代碼 7 或 22 結束 | hook 的位址沒有 proxy 回應（7），或那個 proxy 上沒有 quota-pilot（22）。 |
 | Codex 帳號沒有 5 小時視窗 | 它的方案本來就沒有；頁面和額度列都會標明。 |
 

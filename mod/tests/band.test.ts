@@ -1,8 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { EngineInterface, On, OpEventResult, RenderElement, RenderInput } from 'claude-code'
-import type { FoundElement, MockClock } from 'claude-code/testing'
+import type { Engine, FoundElement, MockClock } from 'claude-code/testing'
 
-import type { CacheInfo, SessionInfo, Snap } from '../types'
+import type { SessionInfo, Snap } from '../types'
 
 const NOW = Date.parse('2026-10-04T12:00:00Z')
 const iso = (ms: number) => new Date(NOW + ms).toISOString()
@@ -52,8 +52,6 @@ const SESSION: SessionInfo = {
   proxied: true, home: '/Users/me',
 }
 
-const WARM: CacheInfo = { lastAt: NOW - 8 * 60_000, prompt: 412_000, read: 400_000, creation: 12_000, input: 10, ttlMs: H, lastAnswer: '' }
-
 const BAND = (bodyColumns: number, isWorking: boolean, maxRows = 20) => ({
   component: 'AbovePrompt' as const,
   props: { hasSurvey: false, isWorking, maxRows, bodyColumns, scroll: { offset: 0, bodyRows: maxRows }, view: {} },
@@ -79,6 +77,20 @@ let commands: Record<string, string>[] = []
 /** The session's root and repository, as Claude Code reports them. */
 let root: string
 let repo: unknown
+/** The session's id, which a `/clear` changes, and the rate limits Claude Code reports for a direct login. */
+let currentId = SESSION.id
+let limits: { kind: string; percentUsed: number; resetsAt?: string }[] = []
+/** What the band's own model calls answer, and what it asked them. */
+const FORK_OK = { value: { isAnswered: true, text: 'ok', usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 412_000, cache_creation_input_tokens: 0 } } } as OpEventResult<'model.fork'>
+let forkReply = FORK_OK
+let forks: string[] = []
+/** What else happens while the band's model call runs, or while a reply streams: the reader acting meanwhile. */
+let duringFork: (() => unknown) | undefined
+let duringStep: (() => unknown) | undefined
+/** The files the band wrote, the prompts it sent or put in the box. */
+let files: Record<string, string> = {}
+let submitted: string[] = []
+let filled: string[] = []
 
 /** How many of a one-line meter's cells are filled: the first run of its bar. */
 const filledCells = (meter: FoundElement | undefined): number => {
@@ -111,12 +123,46 @@ function stubSession(
   commands = []
   root = SESSION.cwd
   repo = null
-  on('session.id', () => ({ value: SESSION.id }))
+  currentId = SESSION.id
+  limits = []
+  forkReply = FORK_OK
+  forks = []
+  duringFork = undefined
+  duringStep = undefined
+  files = {}
+  submitted = []
+  filled = []
+  on('session.id', () => ({ value: currentId }))
   on('session.model', () => ({ value: SESSION.model }))
   on('session.cwd', () => ({ value: SESSION.cwd }))
   on('session.usage', () => ({
-    value: { startedAt: NOW - H, context: { tokens: contextTokens, window: 1_000_000, percent: contextTokens / 10_000 }, rateLimits: [], cost: { usd: 4.2 } },
-  }))
+    value: { startedAt: NOW - H, context: { tokens: contextTokens, window: 1_000_000, percent: contextTokens / 10_000 }, rateLimits: limits, cost: { usd: 4.2 } },
+  }) as never)
+  on('model.fork', async (_$, e) => {
+    forks.push(e.prompt)
+    await duringFork?.()
+    return forkReply
+  })
+  on('fs.write', (_$, e) => {
+    files[e.path] = e.text
+    return { value: undefined }
+  })
+  on('fs.read', (_$, e) => ({ value: files[e.path] ?? '' }))
+  on('command.run', (_$, e) => {
+    if (e.command === 'clear') currentId = 's2'
+    return {} as never
+  })
+  on('prompt.submit', (_$, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  on('prompt.fill', (_$, e) => {
+    filled.push(e.text)
+    return { isFilled: true } as never
+  })
+  on('prompt.read', () => ({ value: { text: filled[filled.length - 1] ?? '', cursor: 0 } }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('process.run', (_$, e) => ({
     value: {
       exitCode: 0,
@@ -143,7 +189,7 @@ function stubSession(
   return clock
 }
 
-test('band draws the four cards from the snapshot, then asks before compacting', async ($, on) => {
+test('band draws its cards from the snapshot, in cells or as cards in the desktop app, and opens the switch menu', async ($, on) => {
   stubSession(on, SNAP)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -151,10 +197,19 @@ test('band draws the four cards from the snapshot, then asks before compacting',
     expect(await ui.find({ text: /d•••/ })).toBeDefined()
     expect(await ui.find({ text: /Accounts/ })).toBeDefined()
     expect(await ui.find({ text: /next up: k••• 7% used/ })).toBeDefined()
-    expect(await ui.find({ text: /^Max 20x$/ })).toBeDefined() // the plan, not the routing reason
-    expect(await ui.find({ text: /^opus-5-5 1M$/ })).toBeDefined()
+    if (surface === 'terminal') {
+      expect(await ui.find({ text: /^Max 20x$/ })).toBeDefined() // the plan, not the routing reason
+      expect(await ui.find({ text: /^opus-5-5 1M$/ })).toBeDefined()
+    } else {
+      // The account card says the plan and the model under the account; meters are rings.
+      expect(await ui.find({ text: /^  Max 20x$/ })).toBeDefined()
+      expect(await ui.find({ text: /^opus-5-5 1M$/ })).toBeDefined()
+      expect(await ui.find({ text: /^420k of 1M$/ })).toBeDefined()
+      expect((await ui.findAll({ type: 'Svg' })).length).toBeGreaterThanOrEqual(6)
+      expect(await ui.find({ text: /━/ })).toBeUndefined() // no meter drawn in characters
+    }
     expect(await ui.find({ key: 'quota' })).toBeDefined()
-    expect(await ui.find({ key: 'compact' })).toBeUndefined() // cache unknown before a reply
+    expect(await ui.find({ key: 'compact' })).toBeUndefined() // a handoff replaced compacting
     await ui.press({ key: 'switch' })
     expect(await ui.find({ text: /Switch this session to:/ })).toBeDefined()
     expect(await ui.find({ key: 'to-claude-k' })).toBeDefined()
@@ -585,4 +640,321 @@ test('cards on request while Claude works, one line on request while it waits', 
   const narrow = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(60, true) })
   expect(await narrow.find({ key: 'view-cards' })).toBeUndefined()
   await narrow.unmount()
+})
+
+
+/** A reply that read 400k of the conversation from the cache and wrote 12k: the cache is warm. */
+const WARM_STEP = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 400_000, cache_creation_input_tokens: 12_000 }
+/** One turn of the reader's: it starts, Claude replies, it ends. */
+let turnNo = 0
+const reply = async ($: Engine) => {
+  const turnId = `t${++turnNo}`
+  await $.turn.start({ text: 'go on', turnId } as never)
+  for await (const chunk of $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5' } as never)) void chunk
+  await $.turn.complete({ turnId, answer: 'Done.', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+}
+const stepReplies = (on: On) => on('turn.step', async function* (_$, e) {
+  await duringStep?.()
+  return { turnId: e.turnId, index: e.index, answer: 'Done.', toolUses: [], stopReason: 'end_turn', usage: WARM_STEP } as never
+})
+/** Moves the clock on minute by minute, the proxy writing its snapshot as it does. */
+const minutes = async (clock: MockClock, n: number) => {
+  for (let m = 0; m < n; m++) {
+    snapshot = { ...snapshot, generated_at: new Date(clock.now()).toISOString() }
+    await clock.advance(60_000)
+  }
+}
+const rowText = async ($: Engine, key = 'alert') => {
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  const row = await ui.find({ key })
+  await ui.unmount()
+  return row?.text ?? ''
+}
+const composer = (text: string, extra: Record<string, unknown> = {}) => ({ text, origin: { kind: 'composer' }, wait: false, ...extra }) as never
+
+test("band in the desktop app, signed in to Claude directly, shows that account's own limits and asks no proxy", async ($, on) => {
+  stubSession(on, SNAP, { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'https://api.anthropic.com' })
+  limits = [{ kind: 'five_hour', percentUsed: 31, resetsAt: iso(2 * H) }, { kind: 'seven_day', percentUsed: 12, resetsAt: iso(50 * H) }]
+  await $.session.start({ cwd: SESSION.cwd, surface: 'desktop', isInteractive: true } as never)
+  expect(sentTo).toBe('') // no /band read: there is no proxy
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, false) })
+    expect(await ui.find({ text: /proxy|quota-pilot|404/ })).toBeUndefined()
+    expect(await ui.find({ text: /claude\.ai/ })).toBeDefined()
+    expect(await ui.find({ text: /^31%$/ })).toBeDefined() // the 5-hour limit, as Claude Code reports it
+    expect(await ui.find({ text: /^12%$/ })).toBeDefined()
+    expect(await ui.find({ key: 'switch' })).toBeUndefined() // no accounts to switch to
+    expect(await ui.find({ text: /^Accounts$/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+// Hours of the band's 10-second refreshes, simulated.
+test('a cold turn is told before it is sent: why, how much it rewrites, and what it costs', { timeoutMs: 30_000 }, async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  expect(await rowText($)).toBe('')
+  // Past the hour the cache keeps, kept warm or not: the next turn writes it all again.
+  forkReply = { value: { isAnswered: false, reason: 'api-error', status: 500, error: 'api_error', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } } as never
+  await minutes(clock, 70)
+  expect(await rowText($)).toMatch(/^! Next turn starts cold: cache expired 10m ago; it rewrites 412k tokens, ≈\$3\.30 at API prices \(\$0\.08 warm\)\s*hand off\s*ok$/)
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  await ui.press({ key: 'cold-ok' })
+  expect(await ui.find({ key: 'alert' })).toBeUndefined() // dismissed for this cold spell
+  await ui.unmount()
+})
+
+// Hours of the band's 10-second refreshes, simulated.
+test('a message that would start cold waits in the prompt; Enter again sends it', { timeoutMs: 30_000 }, async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  // Warm: it goes.
+  expect(await $.prompt.submit(composer('first'))).toMatchObject({ text: 'first' })
+  forkReply = { value: { isAnswered: false, reason: 'nothing-to-fork' } } as never
+  await minutes(clock, 61)
+  const held = await $.prompt.submit(composer('the login page next'))
+  expect(held).toMatchObject({ drop: expect.stringMatching(/held by quota-band: the next turn starts cold/) })
+  expect(filled).toEqual([]) // Claude Code puts a dropped prompt back in the box itself
+  expect(await rowText($, 'ask')).toMatch(/Message held: next turn starts cold \(cache expired\): rewrites 412k tokens/)
+  // Never held: images, a command, one typed while Claude works.
+  expect(await $.prompt.submit(composer('look', { attachments: [{ kind: 'image' }] }))).toMatchObject({ text: 'look' })
+  expect(await $.prompt.submit(composer('/model sonnet'))).toMatchObject({ text: '/model sonnet' })
+  expect(await $.prompt.submit(composer('also this', { turnId: 't9' }))).toMatchObject({ text: 'also this' })
+  // The second Enter sends it, and its turn settles the question.
+  expect(await $.prompt.submit(composer('the login page next'))).toMatchObject({ text: 'the login page next' })
+  await $.turn.start({ text: 'the login page next', turnId: 't9' } as never)
+  expect(await rowText($, 'ask')).toBe('')
+})
+
+test('a switch while the cache is warm says what it costs, and can hand off first', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  await ui.press({ key: 'switch' })
+  await ui.press({ key: 'to-claude-k' })
+  expect((await ui.find({ key: 'ask' }))?.text).toMatch(/Switch to k•••\?: The next turn then starts cold: it rewrites 412k tokens, ≈\$3\.30/)
+  expect(commands).toHaveLength(0) // nothing sent yet
+  await ui.press({ key: 'yes-move' })
+  expect(commands).toMatchObject([{ action: 'switch', auth_id: 'claude-k' }])
+  await ui.unmount()
+  // The proxy moves the session: its next turn is cold, which the reader chose, so neither the
+  // notice nor the guard asks again.
+  snapshot = { ...SNAP, sequence: 8, sessions: { s1: { ...SNAP.sessions.s1!, auth_id: 'claude-k', served_auth_id: 'claude-d' } } }
+  await clock.advance(10_000)
+  expect(await rowText($)).toBe('')
+  expect(await $.prompt.submit(composer('carry on'))).toMatchObject({ text: 'carry on' })
+})
+
+test('a move the reader did not choose is told, and its next message waits', { timeoutMs: 30_000 }, async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  // The proxy moved the session on its own: d••• stopped answering.
+  snapshot = { ...SNAP, sequence: 8, sessions: { s1: { ...SNAP.sessions.s1!, auth_id: 'claude-k', served_auth_id: 'claude-d' } } }
+  await clock.advance(10_000)
+  expect(await rowText($)).toMatch(/Next turn starts cold: moved to k•••; it rewrites 412k tokens/)
+  expect(await $.prompt.submit(composer('carry on'))).toMatchObject({ drop: expect.any(String) })
+})
+
+test('the cache is kept warm shortly before it expires, as many times as set, until the next prompt', { timeoutMs: 30_000 }, async ($, on) => {
+  // A 5-minute cache, so its refreshes come every few minutes.
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  const caption = async () => {
+    const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+    const t = (await ui.findAll({ text: /^(expires in|kept warm)/ })).map(x => x.text)
+    await ui.unmount()
+    return t[0] ?? ''
+  }
+  await minutes(clock, 3)
+  expect(forks).toHaveLength(0)
+  await minutes(clock, 1) // a minute before it would expire
+  expect(forks).toHaveLength(1)
+  expect(forks[0]).toMatch(/automatic prompt-cache refresh/)
+  expect(await caption()).toMatch(/^kept warm 1\/3 · 5m$/)
+  await minutes(clock, 8)
+  expect(forks).toHaveLength(3) // three times, then it lapses
+  await minutes(clock, 10)
+  expect(forks).toHaveLength(3)
+  // A prompt from the reader starts a new stretch, and its reply keeps the cache warm again.
+  await reply($)
+  await minutes(clock, 4)
+  expect(forks).toHaveLength(4)
+  // Never while a turn runs: its own requests keep the cache.
+  await $.turn.start({ text: 'a long task', turnId: 't-long' } as never)
+  await minutes(clock, 10)
+  expect(forks).toHaveLength(4)
+})
+
+test('a refresh that finds the cache gone stops keeping it warm', { timeoutMs: 30_000 }, async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  // It wrote nearly all of the cache instead of reading it: paid in full once, not again.
+  forkReply = { value: { isAnswered: true, text: 'ok', usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 1_000, cache_creation_input_tokens: 411_000 } } } as never
+  await minutes(clock, 15)
+  expect(forks).toHaveLength(1)
+})
+
+test('a session on an API key straight to Anthropic counts a 5-minute cache', async ($, on) => {
+  stubSession(on, SNAP, { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_API_KEY: 'sk-ant-test' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  expect(await ui.find({ text: /^expires in 5m$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a routed session is not taken for one whose model changed', async ($, on) => {
+  const routed: Snap = {
+    ...SNAP,
+    providers: { ...SNAP.providers, codex: { health: 'healthy', credentials: [{ id: 'codex-a', auth_index: '9', label: 'a•••', order: 1, tier: 1, reason: '', sessions: 1, windows: [] }] } },
+    sessions: { s1: { ...SNAP.sessions.s1!, provider: 'codex', model: 'gpt-6.1-sol', requested_model: 'claude-opus-5-5', auth_id: 'codex-a', served_auth_id: 'codex-a', route: { provider: 'codex', model: 'gpt-6.1-sol', auto: false, at: iso(-60_000) } } },
+  }
+  stubSession(on, routed)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  expect(await rowText($)).toBe('')
+})
+
+test('a handoff runs once however often it is asked, and leaves a conversation that changed meanwhile', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  // While the note is written the reader resumes another conversation.
+  forkReply = { value: { isAnswered: true, text: '## Goal\nShip it.', usage: { input_tokens: 5, output_tokens: 9, cache_read_input_tokens: 412_000, cache_creation_input_tokens: 0 } } } as never
+  duringFork = () => { currentId = 's-other' }
+  const ask = () => $.command.run({ command: 'handoff', args: 'and then the tests', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await Promise.all([ask(), ask()])
+  for (let k = 0; k < 20 && !filled.length; k++) await clock.settle()
+  expect(forks).toHaveLength(1)
+  expect(currentId).toBe('s-other') // not cleared
+  expect(submitted).toEqual([])
+  expect(filled).toEqual(['and then the tests']) // the message is back in the prompt
+  expect(await rowText($, 'notice')).toMatch(/Note saved at ~\/.*; the conversation changed or went on while it was written, so it was not cleared/)
+})
+
+test('a handoff whose message names a file puts it all in the prompt, for Enter to send', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  forkReply = { value: { isAnswered: true, text: '## Goal\nShip it.', usage: { input_tokens: 5, output_tokens: 9, cache_read_input_tokens: 412_000, cache_creation_input_tokens: 0 } } } as never
+  await $.command.run({ command: 'handoff', args: 'fix @src/auth.ts', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  for (let k = 0; k < 20 && !filled.length; k++) await clock.settle()
+  expect(currentId).toBe('s2')
+  expect(submitted).toEqual([])
+  expect(filled.at(-1)).toMatch(/## Goal\nShip it\.\n\n---\n\nfix @src\/auth\.ts$/)
+})
+
+test('handoff writes the note, saves it, clears, and starts the new session from it with the held message', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  forkReply = { value: { isAnswered: true, text: '## Goal\nShip the login page.', usage: { input_tokens: 5, output_tokens: 90, cache_read_input_tokens: 412_000, cache_creation_input_tokens: 0 } } } as never
+  await $.command.run({ command: 'handoff', args: 'then the signup page', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  // The command answers at once; the handoff goes on after it.
+  for (let k = 0; k < 20 && !submitted.length; k++) await clock.settle()
+  expect(forks[0]).toMatch(/Goal \(what the user wants, and why\); Done/)
+  expect(forks[0]).toMatch(/then the signup page/)
+  const path = Object.keys(files)[0] ?? ''
+  expect(path).toMatch(/^\/Users\/me\/\.cache\/cliproxy-kit\/handoff\/s1-\d{8}-\d{6}\.md$/)
+  expect(files[path]).toBe('## Goal\nShip the login page.')
+  expect(currentId).toBe('s2') // cleared
+  expect(submitted.at(-1)).toBe(`Continue from this handoff note (saved at ${path}):\n\n## Goal\nShip the login page.\n\n---\n\nthen the signup page`)
+  expect(await rowText($, 'notice')).toMatch(/Handed off: the new session starts from ~\/\.cache\/cliproxy-kit\/handoff\/s1-/)
+})
+
+test('hand off first: the switch waits for the new session, then moves it', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  forkReply = { value: { isAnswered: true, text: '## Goal\nShip it.', usage: { input_tokens: 5, output_tokens: 9, cache_read_input_tokens: 412_000, cache_creation_input_tokens: 0 } } } as never
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  await ui.press({ key: 'switch' })
+  await ui.press({ key: 'to-claude-k' })
+  await ui.press({ key: 'handoff-move' })
+  await ui.unmount()
+  for (let k = 0; k < 20 && !submitted.length; k++) await clock.settle()
+  expect(currentId).toBe('s2')
+  // The proxy refuses a command for a session it has not seen: nothing goes yet.
+  await clock.advance(10_000)
+  expect(commands).toHaveLength(0)
+  // The note's turn ran through the proxy: the new session moves.
+  snapshot = { ...SNAP, sequence: 9, sessions: { ...SNAP.sessions, s2: { ...SNAP.sessions.s1! } } }
+  await clock.advance(10_000)
+  expect(commands).toMatchObject([{ action: 'switch', auth_id: 'claude-k', session: 's2' }])
+  await clock.advance(10_000)
+  expect(commands).toHaveLength(1) // once
+})
+
+test('a reply of the conversation a resume left is not taken for the new one', async ($, on) => {
+  stubSession(on, SNAP)
+  stepReplies(on)
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  // While the reply streams the reader resumes another conversation.
+  duringStep = () => $.session.end({ reason: 'resume', sessionId: SESSION.id } as never)
+  await reply($)
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  expect(await ui.find({ text: /^waiting$/ })).toBeDefined() // nothing known of the new one's cache
+  await ui.unmount()
+  // Nor its end: the new conversation has had no turn.
+  const after = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  await after.press({ key: 'view-line' })
+  await after.unmount()
+  const viewed = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  expect(await viewed.find({ text: /^Accounts$/ })).toBeUndefined() // still the view chosen for this turn
+  await viewed.unmount()
+})
+
+test('a resumed conversation whose cache expired is held on its first message', async ($, on) => {
+  stubSession(on, SNAP)
+  on('classic.SessionStart', () => ({}))
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await $.classic.SessionStart({ session_id: SESSION.id, source: 'resume', model: 'claude-opus-5-5', context_tokens: 412_000, seconds_since_last_response: 2 * 3600, prompt_cache_likely_expired: true } as never)
+  expect(await $.prompt.submit(composer('continue'))).toMatchObject({ drop: expect.stringMatching(/rewrites 412k tokens/) })
+})
+
+test('a handoff leaves a conversation that went on while its note was written', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  forkReply = { value: { isAnswered: true, text: '## Goal\nShip it.', usage: { input_tokens: 5, output_tokens: 9, cache_read_input_tokens: 412_000, cache_creation_input_tokens: 0 } } } as never
+  // The reader sends another message meanwhile: the note does not cover its turn.
+  duringFork = () => $.turn.start({ text: 'one more thing', turnId: 't-more' } as never)
+  await $.command.run({ command: 'handoff', args: '', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  for (let k = 0; k < 20 && !(await rowText($, 'notice')); k++) await clock.settle()
+  expect(currentId).toBe(SESSION.id)
+  expect(await rowText($, 'notice')).toMatch(/went on while it was written, so it was not cleared/)
+})
+
+test('send sends the held message, also from a box that reads empty', { timeoutMs: 30_000 }, async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  forkReply = { value: { isAnswered: false, reason: 'nothing-to-fork' } } as never
+  await minutes(clock, 61)
+  expect(await $.prompt.submit(composer('the login page next'))).toMatchObject({ drop: expect.any(String) })
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  await ui.press({ key: 'send-held' })
+  await ui.unmount()
+  expect(submitted.at(-1)).toBe('the login page next')
 })

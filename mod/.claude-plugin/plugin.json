@@ -1,7 +1,7 @@
 {
   "name": "quota-band",
-  "version": "0.1.8",
-  "description": "Account, quota, context and cache tiles above the Claude Code prompt, for sessions that run through CLIProxyAPI with the quota-pilot plugin",
+  "version": "0.1.9",
+  "description": "Account, quota, context and cache cards above the Claude Code prompt, with handoffs and a warning before a turn rewrites the prompt cache; quota and routing come from CLIProxyAPI with the quota-pilot plugin",
   "author": {
     "name": "kuan0808",
     "url": "https://github.com/kuan0808"
@@ -9,6 +9,32 @@
   "homepage": "https://github.com/kuan0808/cliproxy-kit",
   "repository": "https://github.com/kuan0808/cliproxy-kit",
   "license": "MIT",
-  "keywords": ["cliproxyapi", "quota", "status", "claude-code", "mod"],
-  "types": "./types/index.d.ts"
+  "keywords": [
+    "cliproxyapi",
+    "quota",
+    "status",
+    "claude-code",
+    "mod"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "handoffAt": {
+      "type": "number",
+      "title": "Suggest a handoff at (% of context)",
+      "description": "How full the context is, in percent, when the band suggests handing off to a new session that starts from a summary. 0 never suggests it; /handoff works either way.",
+      "default": 60
+    },
+    "confirmColdAbove": {
+      "type": "number",
+      "title": "Ask before a cold turn above (tokens)",
+      "description": "Conversation size from which a message that would start a cold turn (the prompt cache expired, or the session moved to another account, provider or model) waits for you to confirm it, with what it costs. 0 never asks.",
+      "default": 100000
+    },
+    "keepWarm": {
+      "type": "number",
+      "title": "Keep the cache warm (times)",
+      "description": "How many times the band refreshes the prompt cache while you are away, each shortly before it would expire, at about a tenth of the input price. 0 turns it off.",
+      "default": 3
+    }
+  }
 }

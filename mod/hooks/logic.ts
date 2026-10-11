@@ -17,9 +17,33 @@ export const C = {
   askBg: '#3c3836',
 }
 
+/** The colors a drawing uses, by role: the terminal's own, or the desktop app's theme names (DESK). */
+export type Palette = { [K in keyof typeof C]: string }
+
+/**
+ * The desktop app's theme colors, which follow its light or dark theme: text, its secondary and
+ * muted shades, and the fills and tracks of its own usage meters.
+ */
+export const DESK: Palette = {
+  fg: 'text',
+  dim: 'inactive',
+  track: 'rate_limit_empty',
+  tile: 'userMessageBackground',
+  red: 'error',
+  orange: 'warning',
+  yellow: 'warning',
+  green: 'success',
+  aqua: 'permission',
+  accent: 'claude',
+  warnBg: 'userMessageBackground',
+  infoBg: 'userMessageBackground',
+  askBg: 'userMessageBackground',
+}
+
 /** Color for a remaining percentage: green when plenty, red when nearly gone. */
-export const sev = (remainingPct: number): string =>
-  remainingPct < 10 ? C.red : remainingPct < 25 ? C.orange : remainingPct < 50 ? C.yellow : C.green
+export const sevIn = (p: Palette, remainingPct: number): string =>
+  remainingPct < 10 ? p.red : remainingPct < 25 ? p.orange : remainingPct < 50 ? p.yellow : p.green
+export const sev = (remainingPct: number): string => sevIn(C, remainingPct)
 
 const MIN = 60_000
 const HOUR = 60 * MIN
@@ -317,11 +341,6 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
   return null
 }
 
-/** Whether the compact and handoff buttons are offered: a cache rewrite is coming and still avoidable. */
-export function offerCacheActions(state: CacheState, acct: SessionAccount | null): boolean {
-  return state === 'expiring' || state === 'cold' || Boolean(acct?.session.switch_imminent)
-}
-
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 /** Parse the snapshot; null when missing, unreadable, of another schema or missing a part the band reads. */
@@ -405,19 +424,178 @@ export function settlePending(pending: readonly Pending[], snap: Snap | null, no
   return { left, notice }
 }
 
-/** TTL the main conversation's cache uses: the override, else 1 hour on a subscription, 5 minutes on a key. */
-export function cacheTtlMs(override: string | undefined, proxied: boolean): number {
+/**
+ * TTL the main conversation's cache uses: the override, else 5 minutes for a session that sends a
+ * key (a proxy's client key, an API key) and an hour for one signed in to a subscription, as the
+ * desktop app's sessions are.
+ */
+export function cacheTtlMs(override: string | undefined, keyed: boolean): number {
   if (override === '1h') return HOUR
   if (override === '5m') return 5 * MIN
-  return proxied ? 5 * MIN : HOUR
+  return keyed ? 5 * MIN : HOUR
 }
 
 export const HANDOFF_PROMPT = [
-  'Write a handoff note so a new session can continue this work without the transcript.',
-  'Cover: the goal, decisions made and why, current state of the code and files touched,',
-  'what was verified and how, open problems, and the exact next step.',
-  'Be specific with paths, commands and names. Plain markdown, no preamble.',
+  'Write a handoff note so a new session can carry on this work without this conversation.',
+  'Use these sections, in this order, each as a markdown heading:',
+  'Goal (what the user wants, and why);',
+  'Done (what was finished, and how it was verified);',
+  'Not done (what is left, and what was tried that failed);',
+  'Changes (each file touched, and what changed in it);',
+  'Watch out (decisions made and why, and the limits and preferences the user stated, in their words where it matters);',
+  'Next step (the one exact next action).',
+  'Be specific: paths, commands, names, numbers. Write in the language the user writes in. No preamble.',
 ].join(' ')
+
+/** Whether a base URL is Anthropic's own API, as the desktop app's sessions sign in to directly: no proxy is there. */
+export function isAnthropicHost(base: string | undefined): boolean {
+  const host = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]*@)?([^/:?#]+)/i.exec(base?.trim() ?? '')?.[1]?.toLowerCase() ?? ''
+  return /(^|\.)(anthropic\.com|claude\.ai|claude\.com)$/.test(host)
+}
+
+/**
+ * What the band's settings are, from the plugin's `userConfig` values, each kept in its range:
+ * the context share at which it suggests a handoff, the conversation size from which a message
+ * that would start cold waits to be confirmed, and how many times the cache is kept warm while
+ * idle. 0 turns each off.
+ */
+export type Settings = { handoffAt: number; confirmAbove: number; keepWarm: number }
+
+export function settingsOf(options: Readonly<Record<string, unknown>>): Settings {
+  const num = (key: string, fallback: number, max: number) => {
+    const v = Number(options[key] ?? fallback)
+    return Number.isFinite(v) ? Math.min(max, Math.max(0, Math.round(v))) : fallback
+  }
+  return { handoffAt: num('handoffAt', 60, 100), confirmAbove: num('confirmColdAbove', 100_000, 10_000_000), keepWarm: num('keepWarm', 3, 10) }
+}
+
+/**
+ * What a million tokens cost at API prices: written to the cache for five minutes or an hour, and
+ * read from it. `over` names the prompt size above which `long` applies. Checked on 2026-10-11
+ * against platform.claude.com/docs/en/about-claude/pricing and
+ * developers.openai.com/api/docs/pricing (Standard); a model not listed shows tokens only.
+ */
+type Price = { write5m: number; write1h: number; read: number }
+type PriceRow = { price: Price; over?: number; long?: Price }
+const claude = (write5m: number, write1h: number, read: number): Price => ({ write5m, write1h, read })
+// OpenAI's cache has one write price; its long context is a prompt over 272k tokens.
+const openai = (write: number, read: number): PriceRow => ({
+  price: { write5m: write, write1h: write, read },
+  over: 272_000,
+  long: { write5m: write * 2, write1h: write * 2, read: read * 2 },
+})
+const PRICES: [RegExp, PriceRow][] = [
+  [/^claude-(fable|mythos)-5-1$/, { price: claude(12.5, 20, 0.25) }],
+  [/^claude-(fable|mythos)-5$/, { price: claude(12.5, 20, 1) }],
+  [/^claude-opus-5-5$/, { price: claude(5, 8, 0.2) }],
+  [/^claude-opus-(5|4-[5-8])$/, { price: claude(6.25, 10, 0.5) }],
+  [/^claude-opus-4(-1)?$/, { price: claude(18.75, 30, 1.5) }],
+  [/^claude-sonnet-5-5$/, { price: claude(2.5, 4, 0.1) }],
+  [/^claude-sonnet-5$/, { price: claude(2.5, 4, 0.2) }],
+  [/^claude-sonnet-4(-[56])?$/, { price: claude(3.75, 6, 0.3) }],
+  [/^claude-haiku-5-5$/, { price: claude(0.125, 0.2, 0.01), over: 100_000, long: claude(0.625, 1, 0.05) }],
+  [/^claude-haiku-4-5$/, { price: claude(1.25, 2, 0.1) }],
+  [/^gpt-6-astra$/, openai(12.5, 1)],
+  [/^gpt-6\.1-sol$/, openai(2.5, 0.1)],
+  [/^gpt-6-sol$/, openai(2.5, 0.2)],
+  [/^gpt-6-luna$/, openai(0.125, 0.01)],
+  [/^gpt-5\.6-sol$/, openai(5, 0.4)],
+  [/^gpt-5\.6-terra$/, openai(2.5, 0.2)],
+  [/^gpt-5\.6-luna$/, openai(0.25, 0.02)],
+  // Older models charge nothing extra for a cache write: a miss costs the input price.
+  [/^gpt-5\.5$/, openai(5, 0.5)],
+  [/^gpt-5\.4$/, openai(2.5, 0.25)],
+]
+
+/**
+ * What resending `tokens` of conversation to `model` costs at API prices: cold, all written to
+ * the cache again (at the price of the TTL in use), or warm, all read from it. Null for a model
+ * without a known price.
+ */
+export function turnCost(model: string, tokens: number, ttlMs: number): { cold: number; warm: number } | null {
+  const id = model.trim().toLowerCase().replace(/\[[^\]]*\]$/, '').replace(/-\d{8}$/, '')
+  const row = PRICES.find(([re]) => re.test(id))?.[1]
+  if (!row || tokens <= 0) return null
+  const p = row.over && row.long && tokens > row.over ? row.long : row.price
+  const write = ttlMs > 5 * MIN ? p.write1h : p.write5m
+  return { cold: (tokens * write) / 1e6, warm: (tokens * p.read) / 1e6 }
+}
+
+/** "$3.30", "$12", "<$0.01". */
+export function fmtUsd(n: number): string {
+  if (n < 0.01) return '<$0.01'
+  return n < 10 ? `$${n.toFixed(2)}` : `$${Math.round(n)}`
+}
+
+/** "rewrites 412k tokens, ≈$3.30 at API prices ($0.08 warm)", or the tokens alone without a price. */
+export function rewriteText(tokens: number, cost: { cold: number; warm: number } | null): string {
+  const base = `rewrites ${fmtTokens(tokens)} tokens`
+  return cost ? `${base}, ≈${fmtUsd(cost.cold)} at API prices (${fmtUsd(cost.warm)} warm)` : base
+}
+
+/** Whether two names are one model: an alias (`opus`, `sonnet[1m]`) is the line of the full id it is part of. */
+export function sameModel(a: string, b: string): boolean {
+  const clean = (m: string) => m.trim().toLowerCase().replace(/\[[^\]]*\]$/, '').replace(/-\d{8}$/, '')
+  const x = clean(a)
+  const y = clean(b)
+  return x === y || (!/^(claude|gpt)-/.test(x) && y.includes(x)) || (!/^(claude|gpt)-/.test(y) && x.includes(y))
+}
+
+/**
+ * Why the session's next turn finds nothing cached, when it will: its account or provider
+ * changed since the last reply (a switch, a move, a route), its model did (`/model`), or the
+ * cache's time ran out. `key` names this cold spell, so a dismissal or a confirmation holds
+ * until the next one; `tokens` is what the next turn resends.
+ */
+export type ColdTurn = { reason: 'moved' | 'model' | 'expired'; why: string; key: string; tokens: number }
+
+/**
+ * The key of the cold spell a move to account `to` makes, known before the move, so a move the
+ * reader chose is not asked about again; `*` for a route or going back from one, whichever account
+ * the proxy then picks.
+ */
+export const movedKey = (cache: CacheInfo, to: string) => `moved:${cache.lastAt}:${to}`
+
+/** Whether a cold spell is the one the reader confirmed (or dismissed) by `key`. */
+export function coldConfirmed(cold: ColdTurn, key: string): boolean {
+  return cold.key === key || (key.endsWith(':*') && cold.key.startsWith(key.slice(0, -1)))
+}
+
+/**
+ * `asked` is the model Claude Code asks for, as `/model` set it: a route serves another, which
+ * the move to its account already tells.
+ */
+export function coldTurn(cache: CacheInfo, acct: SessionAccount | null, asked: string, now: number): ColdTurn | null {
+  const tokens = cache.prompt
+  if (tokens <= 0) return null
+  const s = acct?.session
+  // A route to another model of the same account moves nothing the proxy tells, but what the
+  // last reply's route was, as the band saw it then.
+  const rerouted = s && cache.route !== null && (s.route?.model ?? '') !== cache.route
+  if (s && (nextTurnMoves(acct) || rerouted)) {
+    const label = acct?.view.credentials.find(c => c.id === s.auth_id)?.label ?? 'another account'
+    return { reason: 'moved', why: s.route ? `routed to ${s.route.model}` : `moved to ${label}`, key: movedKey(cache, s.auth_id), tokens }
+  }
+  if (cache.model && asked && !sameModel(asked, cache.model)) {
+    const name = asked.replace(/^claude-/, '').replace(/\[[^\]]*\]$/, '')
+    return { reason: 'model', why: `model changed to ${name}`, key: `model:${asked}:${cache.lastAt}`, tokens }
+  }
+  const cs = cacheState(cache, now)
+  if (cs.state === 'cold') {
+    const ago = now - cache.lastAt - cache.ttlMs
+    return { reason: 'expired', why: `cache expired${ago > MIN ? ` ${fmtDuration(ago)} ago` : ''}`, key: `expired:${cache.lastAt}`, tokens }
+  }
+  return null
+}
+
+/**
+ * When the cache is next kept warm, while idle: shortly before it would expire (five minutes, or a
+ * fifth of a shorter TTL), so a refresh reads it while it is still there.
+ */
+export function warmDueAt(cache: CacheInfo): number {
+  if (!cache.lastAt || !cache.ttlMs) return 0
+  return cache.lastAt + cache.ttlMs - Math.min(5 * MIN, cache.ttlMs / 5)
+}
 
 /**
  * The account a new session of `provider` would get: the one the plugin ranks first for the model
