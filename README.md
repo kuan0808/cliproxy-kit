@@ -360,6 +360,7 @@ token. A model without a known price shows tokens only.
 | No quota-pilot page under Plugins | Refresh the panel, and check `plugins.enabled: true`. |
 | The band says quota data comes once this key has sent a request | Send one prompt: the proxy has not accepted that key for a request in the last week. |
 | The band says quota data is old | The proxy, or the plugin in it, stopped: restart CLIProxyAPI. |
+| The page or the band is slow while the Mac is busy | Homebrew runs the proxy as a low-priority service. Add `ProcessType` `Interactive` to `~/Library/LaunchAgents/sh.brew.cliproxyapi.plist` (`plutil -replace ProcessType -string Interactive <file>`), then load it again with `launchctl bootout gui/$(id -u)/sh.brew.cliproxyapi` and `launchctl bootstrap gui/$(id -u) <file>`. `brew services restart` writes the file anew. |
 | Codex sessions are missing from the page | Codex does not use the proxy yet (step 4). |
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
 | A Codex account has no 5-hour window | Its plan has none; the page and the band say so. |
