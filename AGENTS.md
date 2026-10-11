@@ -4,7 +4,7 @@ Rules for anyone, human or agent, changing this repo. Build and test commands: R
 
 ## Shipping a change
 - A finished user-facing change ships as a release: bump `version` in `mod/.claude-plugin/plugin.json`, then tag `v<version>` on that commit. The tag must match the file; it triggers `.github/workflows/release.yml`.
-- The release page shows the tag's message (`--notes-from-tag`): tag with `git tag -a v<version> -F <notes>` carrying what users now get, what changed by default and how to undo it. A plain tag publishes the tagged commit's message instead.
+- The release page shows the tag's message, which the release workflow reads with `git tag -l --format='%(contents)'`: tag with `git tag -a v<version> -F <notes>` carrying what users now get, what changed by default and how to undo it. A plain tag publishes the tagged commit's message instead.
 - Update README.md, README.zh-TW.md and docs/architecture.md in the same change whenever user-facing behaviour changes.
 - Commits are in English. A release subject is `<version>: <what users now get>`; a docs-only one starts with `README:` or `Docs:` (see `git log`).
 - Restarting the CLIProxyAPI service interrupts every request in flight through it; ask before restarting or reloading it.

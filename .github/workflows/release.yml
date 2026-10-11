@@ -115,4 +115,9 @@ jobs:
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-from-tag dist/*
+        # The release's notes are the tag's message: an annotated tag's own, else its commit's. Read
+        # with git, as gh's --notes-from-tag cannot be used with --repo.
+        run: |
+          git fetch --force --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          git tag -l --format='%(contents)' "$TAG" > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" dist/*
