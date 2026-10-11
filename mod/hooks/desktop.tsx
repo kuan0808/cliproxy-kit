@@ -163,45 +163,53 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     : <Text bold color={MUTED}>—</Text>
   const meterRing = (m: Meter | undefined) => ring(40, [{ fill: m ? 1 - m.remaining / 100 : 0, color: m?.stale ? RING.ink : ringTone(m?.remaining ?? 100) }])
 
-  const cards: RenderChildren[] = []
-  const subtitle = f.route ? `→ ${f.route}` : [f.modelName, f.effort].filter(Boolean).join(' · ')
-  cards.push(
-    <Box key="account" borderStyle="round" flexGrow={1} width={0} minWidth={0} flexDirection="column" gap={1} justifyContent="space-between">
-      <Box gap={1} alignItems="center">
-        <Svg source={avatar(28, f.account)} alt={`Account ${f.account}`} width={28} height={28} />
+  const model = f.route ? `→ ${f.route}` : [f.modelName, f.effort].filter(Boolean).join(' · ')
+  const controls = f.controls.unroute || f.controls.switch || f.controls.quota
+  // Read as the gauges are: a mark as large as their rings, then three lines, the account, its plan
+  // (or how it signs in) and the model. Beside two rows of gauges it stands tall, centred.
+  const accountCard = () => (
+    <Box key="account" borderStyle="round" flexGrow={1} width={0} minWidth={0} flexDirection="column" gap={1} justifyContent={controls ? 'space-between' : 'center'}>
+      <Box gap={2} alignItems="center">
+        <Svg source={avatar(40, f.account)} alt={`Account ${f.account}`} width={40} height={40} />
         <Box flexDirection="column" minWidth={0} flexGrow={1}>
           <Box justifyContent="space-between" alignItems="center" gap={1}>
-            <Text wrap="truncate-end"><Text bold>{f.account}</Text>{f.note ? <Text color={MUTED}>{`  ${f.note}`}</Text> : null}</Text>
+            <Text bold wrap="truncate-end">{f.account}</Text>
             {link({ key: 'view-line', label: 'less', run: () => setView('line') })}
           </Box>
-          <Text color={f.route ? DESK.aqua : MUTED} wrap="truncate-end">{subtitle}</Text>
+          <Text color={MUTED} wrap="truncate-end">{f.note || ' '}</Text>
+          <Text color={f.route ? DESK.aqua : MUTED} wrap="truncate-end">{model}</Text>
         </Box>
       </Box>
-      <Box columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center">
-        {f.controls.unroute ? button(f.controls.unroute, false) : null}
-        {f.controls.switch ? button(f.controls.switch, false) : null}
-        {link(f.controls.quota)}
-      </Box>
-    </Box>,
+      {controls
+        ? (
+          <Box columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center">
+            {f.controls.unroute ? button(f.controls.unroute, false) : null}
+            {f.controls.switch ? button(f.controls.switch, false) : null}
+            {f.controls.quota ? link(f.controls.quota) : null}
+          </Box>
+        )
+        : null}
+    </Box>
   )
-  cards.push(gauge('five', '5-hour', meterRing(f.five), `5-hour quota: ${f.five ? `${usedPct(f.five)} used` : 'no reading'}`,
+  const gauges: RenderChildren[] = []
+  gauges.push(gauge('five', '5-hour', meterRing(f.five), `5-hour quota: ${f.five ? `${usedPct(f.five)} used` : 'no reading'}`,
     usedText(f.five), f.five ? resetText(f.five.reset) : f.fiveMissing))
-  cards.push(gauge('week', f.week?.label ?? 'Weekly', meterRing(f.week), `${f.week?.label ?? 'Weekly'} quota: ${f.week ? `${usedPct(f.week)} used` : 'no reading'}`,
+  gauges.push(gauge('week', f.week?.label ?? 'Weekly', meterRing(f.week), `${f.week?.label ?? 'Weekly'} quota: ${f.week ? `${usedPct(f.week)} used` : 'no reading'}`,
     usedText(f.week), f.week ? resetText(f.week.reset) : f.weekMissing))
   const ctx = f.ctx
-  cards.push(gauge('ctx', 'Context',
+  gauges.push(gauge('ctx', 'Context',
     ring(40, [{ fill: ctx ? 1 - ctx.left / 100 : 0, color: ringTone(ctx?.left ?? 100) }]),
     `Context: ${ctx ? `${Math.round(100 - ctx.left)}% used` : 'not known yet'}`,
     ctx
       ? <Text wrap="truncate-end"><Text bold color={textTone(ctx.left)}>{`${Math.round(100 - ctx.left)}%`}</Text><Text color={MUTED}> used</Text></Text>
       : <Text bold color={MUTED}>—</Text>,
     ctx ? `${fmtTokens(ctx.used)} of ${fmtTokens(ctx.window)}` : 'after the first reply'))
-  cards.push(gauge('cache', 'Cache', ring(40, [cacheRing]), `Prompt cache: ${cacheWord}`,
+  gauges.push(gauge('cache', 'Cache', ring(40, [cacheRing]), `Prompt cache: ${cacheWord}`,
     <Text bold color={cacheText} wrap="truncate-end">{cacheWord}</Text>,
     cacheCaption(f, true)))
   // The proxy's accounts, which a direct login has none of.
   const pool = f.pool
-  if (f.proxied) cards.push(gauge('all', 'Accounts',
+  if (f.proxied) gauges.push(gauge('all', 'Accounts',
     ring(40, pool && pool.parts.length ? pool.parts.map(p => ({ fill: p === null ? 0 : 1 - p / 100, color: p === null ? RING.ink : ringTone(p) })) : [{ fill: 0, color: RING.green }]),
     `All accounts: ${pool?.left == null ? 'no reading' : `${100 - pool.left}% used`}`,
     pool?.left != null
@@ -209,20 +217,36 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
       : <Text bold color={MUTED}>—</Text>,
     pool?.caption ?? 'no quota data'))
 
-  // All in a row where they fit, else rows of three or two; a short last row keeps the columns
-  // of the rows above it.
+  // Every card sits in a slot of one width, so the columns of every row line up: all in one row
+  // where they fit, else rows of three or two. With a card too many for full rows (a direct login
+  // has five), the account card takes the odd space: tall beside two rows of gauges, or a row of
+  // its own above them. No slot is left empty.
   const MIN = 26
-  const perRow = [cards.length, 3, 2, 1].find(n => site.bodyColumns >= n * MIN + n - 1) ?? 1
-  const rows: RenderChildren[][] = []
-  for (let k = 0; k < cards.length; k += perRow) rows.push(cards.slice(k, k + perRow))
-  const last = rows[rows.length - 1]!
-  for (let k = last.length; k < perRow; k++) last.push(<Box key={`spare-${k}`} flexGrow={1} width={0} />)
+  const count = gauges.length + 1
+  const per = [count, 3, 2, 1].find(n => site.bodyColumns >= n * MIN + n - 1) ?? 1
+  const odd = count % per !== 0
+  const slot = (key: string, card: RenderChildren, grow = 1) => <Box key={key} flexGrow={grow} width={0} minWidth={0}>{card}</Box>
+  const rows = (cards: RenderChildren[], size: number) => {
+    const out: RenderChildren[] = []
+    for (let k = 0; k < cards.length; k += size) {
+      out.push(<Box key={`row-${k}`} gap={1}>{cards.slice(k, k + size).map((c, j) => slot(`slot-${k + j}`, c))}</Box>)
+    }
+    return out
+  }
+  const grid = !odd
+    ? rows([accountCard(), ...gauges], per)
+    : per === 3
+      ? [
+        <Box key="bento" gap={1}>
+          {slot('slot-account', accountCard())}
+          <Box key="gauges" flexGrow={2} width={0} minWidth={0} flexDirection="column" gap={1}>{rows(gauges, 2)}</Box>
+        </Box>,
+      ]
+      : [<Box key="row-account" gap={1}>{slot('slot-account', accountCard())}</Box>, ...rows(gauges, per)]
   return (
     <Box flexDirection="column" gap={1}>
       {top}
-      <Box key="cards" flexDirection="column" gap={1}>
-        {rows.map((r, k) => <Box key={`cards-${k}`} gap={1}>{r}</Box>)}
-      </Box>
+      <Box key="cards" flexDirection="column" gap={1}>{grid}</Box>
       {below}
     </Box>
   )

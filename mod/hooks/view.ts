@@ -119,7 +119,8 @@ export type Facts = {
     keepWarm: number
   }
   pool: { left: number | null; parts: (number | null)[]; stale: boolean; caption: string } | null
-  controls: { switch?: Act; unroute?: Act; quota: Act }
+  /** `quota` lists the proxy's accounts: a direct login has none to list. */
+  controls: { switch?: Act; unroute?: Act; quota?: Act }
   top: Row | null
 }
 
@@ -232,7 +233,7 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     controls: {
       switch: canSwitch ? { key: 'switch', label: 'switch', run: () => act.ui({ confirm: ui.confirm === 'switch' ? '' : 'switch', switchStep: '' }) } : undefined,
       unroute: route && canSend ? { key: 'unroute', label: 'back', run: () => pick(unroute) } : undefined,
-      quota: { key: 'quota', label: 'quota', run: act.quota },
+      quota: sess.proxied ? { key: 'quota', label: 'quota', run: act.quota } : undefined,
     },
     top: null,
   }

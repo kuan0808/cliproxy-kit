@@ -1,6 +1,6 @@
 {
   "name": "quota-band",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Account, quota, context and cache cards above the Claude Code prompt, with handoffs and a warning before a turn rewrites the prompt cache; quota and routing come from CLIProxyAPI with the quota-pilot plugin",
   "author": {
     "name": "kuan0808",

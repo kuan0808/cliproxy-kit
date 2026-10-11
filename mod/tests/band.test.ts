@@ -202,7 +202,7 @@ test('band draws its cards from the snapshot, in cells or as cards in the deskto
       expect(await ui.find({ text: /^opus-5-5 1M$/ })).toBeDefined()
     } else {
       // The account card says the plan and the model under the account; meters are rings.
-      expect(await ui.find({ text: /^  Max 20x$/ })).toBeDefined()
+      expect(await ui.find({ text: /^Max 20x$/ })).toBeDefined()
       expect(await ui.find({ text: /^opus-5-5 1M$/ })).toBeDefined()
       expect(await ui.find({ text: /^420k of 1M$/ })).toBeDefined()
       expect((await ui.findAll({ type: 'Svg' })).length).toBeGreaterThanOrEqual(6)
@@ -683,7 +683,8 @@ test("band in the desktop app, signed in to Claude directly, shows that account'
     expect(await ui.find({ text: /claude\.ai/ })).toBeDefined()
     expect(await ui.find({ text: /^31%$/ })).toBeDefined() // the 5-hour limit, as Claude Code reports it
     expect(await ui.find({ text: /^12%$/ })).toBeDefined()
-    expect(await ui.find({ key: 'switch' })).toBeUndefined() // no accounts to switch to
+    expect(await ui.find({ key: 'switch' })).toBeUndefined() // no accounts to switch to, or to list
+    expect(await ui.find({ key: 'quota' })).toBeUndefined()
     expect(await ui.find({ text: /^Accounts$/ })).toBeUndefined()
     await ui.unmount()
   }

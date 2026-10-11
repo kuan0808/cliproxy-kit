@@ -179,7 +179,7 @@ export function terminalBand(els: Els, i: BandInput, f: Facts, act: Do, site: Ba
         : <Text color={C.dim} wrap="truncate-end">{f.note}</Text>}
       <Box gap={2}>
         {f.controls.switch ? link(f.controls.switch, false) : null}
-        {link(f.controls.quota, false)}
+        {f.controls.quota ? link(f.controls.quota, false) : null}
         {link({ key: 'view-line', label: 'less', run: () => setView('line') }, false)}
       </Box>
     </Box>,
