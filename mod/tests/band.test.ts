@@ -1,6 +1,10 @@
-import { expect, mock, test } from 'claude-code/testing'
+import { expect, mock, test as kitTest } from 'claude-code/testing'
 import type { EngineInterface, On, OpEventResult, RenderElement, RenderInput } from 'claude-code'
-import type { Engine, FoundElement, MockClock } from 'claude-code/testing'
+import type { Engine, FoundElement, MockClock, TestBody, TestOptions } from 'claude-code/testing'
+
+/** Every test may take a while on a loaded machine: the band refreshes on a 10-second clock, which some tests run for hours. */
+const test = (name: string, a: TestOptions | TestBody, b?: TestBody) =>
+  typeof a === 'function' ? kitTest(name, { timeoutMs: 30_000 }, a) : kitTest(name, { timeoutMs: 30_000, ...a }, b!)
 
 import type { SessionInfo, Snap } from '../types'
 
@@ -690,8 +694,7 @@ test("band in the desktop app, signed in to Claude directly, shows that account'
   }
 })
 
-// Hours of the band's 10-second refreshes, simulated.
-test('a cold turn is told before it is sent: why, how much it rewrites, and what it costs', { timeoutMs: 30_000 }, async ($, on) => {
+test('a cold turn is told before it is sent: why, how much it rewrites, and what it costs', async ($, on) => {
   const clock = stubSession(on, SNAP)
   stepReplies(on)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -701,14 +704,17 @@ test('a cold turn is told before it is sent: why, how much it rewrites, and what
   forkReply = { value: { isAnswered: false, reason: 'api-error', status: 500, error: 'api_error', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } } as never
   await minutes(clock, 70)
   expect(await rowText($)).toMatch(/^! Next turn starts cold: cache expired 10m ago; it rewrites 412k tokens, ≈\$3\.30 at API prices \(\$0\.08 warm\)\s*hand off\s*ok$/)
+  // A narrower terminal gets the same in fewer words, on one line.
+  const narrow = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(120, false) })
+  expect((await narrow.find({ key: 'alert' }))?.text).toMatch(/^! Next turn starts cold: cache expired 10m ago; rewrites 412k ≈\$3\.30 \(\$0\.08 warm\)\s*hand off\s*ok$/)
+  await narrow.unmount()
   const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
   await ui.press({ key: 'cold-ok' })
   expect(await ui.find({ key: 'alert' })).toBeUndefined() // dismissed for this cold spell
   await ui.unmount()
 })
 
-// Hours of the band's 10-second refreshes, simulated.
-test('a message that would start cold waits in the prompt; Enter again sends it', { timeoutMs: 30_000 }, async ($, on) => {
+test('a message that would start cold waits in the prompt; Enter again sends it', async ($, on) => {
   const clock = stubSession(on, SNAP)
   stepReplies(on)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -752,7 +758,7 @@ test('a switch while the cache is warm says what it costs, and can hand off firs
   expect(await $.prompt.submit(composer('carry on'))).toMatchObject({ text: 'carry on' })
 })
 
-test('a move the reader did not choose is told, and its next message waits', { timeoutMs: 30_000 }, async ($, on) => {
+test('a move the reader did not choose is told, and its next message waits', async ($, on) => {
   const clock = stubSession(on, SNAP)
   stepReplies(on)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -764,7 +770,7 @@ test('a move the reader did not choose is told, and its next message waits', { t
   expect(await $.prompt.submit(composer('carry on'))).toMatchObject({ drop: expect.any(String) })
 })
 
-test('the cache is kept warm shortly before it expires, as many times as set, until the next prompt', { timeoutMs: 30_000 }, async ($, on) => {
+test('the cache is kept warm shortly before it expires, as many times as set, until the next prompt', async ($, on) => {
   // A 5-minute cache, so its refreshes come every few minutes.
   const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
   stepReplies(on)
@@ -796,7 +802,7 @@ test('the cache is kept warm shortly before it expires, as many times as set, un
   expect(forks).toHaveLength(4)
 })
 
-test('a refresh that finds the cache gone stops keeping it warm', { timeoutMs: 30_000 }, async ($, on) => {
+test('a refresh that finds the cache gone stops keeping it warm', async ($, on) => {
   const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
   stepReplies(on)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -946,7 +952,7 @@ test('a handoff leaves a conversation that went on while its note was written', 
   expect(await rowText($, 'notice')).toMatch(/went on while it was written, so it was not cleared/)
 })
 
-test('send sends the held message, also from a box that reads empty', { timeoutMs: 30_000 }, async ($, on) => {
+test('send sends the held message, also from a box that reads empty', async ($, on) => {
   const clock = stubSession(on, SNAP)
   stepReplies(on)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)

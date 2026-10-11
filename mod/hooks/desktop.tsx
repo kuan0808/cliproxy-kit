@@ -82,8 +82,12 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
   const button = (a: Act, main = a.main) => a.run
     ? <Button key={a.key} label={labelOf(a)} variant={main ? 'primary' : undefined} onPress={a.run} />
     : <Text key={a.key} color={MUTED}>{a.label}</Text>
-  // A lesser control: the app's borderless button, dim until the pointer is on it.
-  const link = (a: Act) => <Button key={a.key} label={labelOf(a)} plain dimColor onPress={a.run ?? (() => undefined)} />
+  // Folding to one line and back, as the band's own control: worded for the desktop.
+  const collapse: Act = { key: 'view-line', label: 'collapse', run: () => setView('line') }
+  const expand: Act = { key: 'view-cards', label: 'expand', run: () => setView('cards') }
+  // What the engine draws beneath, when it draws anything: an empty slot would add the column's
+  // gap under the band and set its content off centre.
+  const tail = below.type === 'engine' && below.ref === 0 ? null : below
   const c = f.cache
   const cold = c.state === 'cold'
   // What a meter reads as: used, with the colour of what is left.
@@ -133,11 +137,11 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
             {meters}
           </Box>
           <Box key="controls" columnGap={1} alignItems="center" flexShrink={0}>
-            {f.controls.switch ? link(f.controls.switch) : null}
-            {link({ key: 'view-cards', label: 'more', run: () => setView('cards') })}
+            {f.controls.switch ? button(f.controls.switch, false) : null}
+            {button(expand, false)}
           </Box>
         </Box>
-        {below}
+        {tail}
       </Box>
     )
   }
@@ -164,31 +168,27 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
   const meterRing = (m: Meter | undefined) => ring(40, [{ fill: m ? 1 - m.remaining / 100 : 0, color: m?.stale ? RING.ink : ringTone(m?.remaining ?? 100) }])
 
   const model = f.route ? `→ ${f.route}` : [f.modelName, f.effort].filter(Boolean).join(' · ')
-  const controls = f.controls.unroute || f.controls.switch || f.controls.quota
   // Read as the gauges are: a mark as large as their rings, then three lines, the account, its plan
   // (or how it signs in) and the model. Beside two rows of gauges it stands tall, centred.
   const accountCard = () => (
-    <Box key="account" borderStyle="round" flexGrow={1} width={0} minWidth={0} flexDirection="column" gap={1} justifyContent={controls ? 'space-between' : 'center'}>
+    <Box key="account" borderStyle="round" flexGrow={1} width={0} minWidth={0} flexDirection="column" gap={1} justifyContent="space-between">
       <Box gap={2} alignItems="center">
         <Svg source={avatar(40, f.account)} alt={`Account ${f.account}`} width={40} height={40} />
         <Box flexDirection="column" minWidth={0} flexGrow={1}>
-          <Box justifyContent="space-between" alignItems="center" gap={1}>
-            <Text bold wrap="truncate-end">{f.account}</Text>
-            {link({ key: 'view-line', label: 'less', run: () => setView('line') })}
-          </Box>
+          <Text bold wrap="truncate-end">{f.account}</Text>
           <Text color={MUTED} wrap="truncate-end">{f.note || ' '}</Text>
           <Text color={f.route ? DESK.aqua : MUTED} wrap="truncate-end">{model}</Text>
         </Box>
       </Box>
-      {controls
-        ? (
-          <Box columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center">
-            {f.controls.unroute ? button(f.controls.unroute, false) : null}
-            {f.controls.switch ? button(f.controls.switch, false) : null}
-            {f.controls.quota ? link(f.controls.quota) : null}
-          </Box>
-        )
-        : null}
+      {/* The session's controls on one row, folding the band at its end. */}
+      <Box columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center" justifyContent="space-between">
+        <Box key="session" columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center">
+          {f.controls.unroute ? button(f.controls.unroute, false) : null}
+          {f.controls.switch ? button(f.controls.switch, false) : null}
+          {f.controls.quota ? button(f.controls.quota, false) : null}
+        </Box>
+        {button(collapse, false)}
+      </Box>
     </Box>
   )
   const gauges: RenderChildren[] = []
@@ -247,7 +247,7 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     <Box flexDirection="column" gap={1}>
       {top}
       <Box key="cards" flexDirection="column" gap={1}>{grid}</Box>
-      {below}
+      {tail}
     </Box>
   )
 }

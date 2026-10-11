@@ -20,6 +20,7 @@ import {
   pooled,
   providerOfModel,
   providerTitle,
+  rewriteBrief,
   rewriteText,
   sessionAccount,
   switchTargets,
@@ -52,6 +53,8 @@ export type Row = {
   tone: 'ask' | 'warn' | 'info'
   title: string
   detail: string
+  /** The detail in fewer words, for a row too narrow for it. */
+  brief?: string
   acts: Act[]
   /** Something runs meanwhile: the row has no way to close it. */
   busy?: boolean
@@ -248,7 +251,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
   const { ui, snap, now, settings, working, cache, bandError } = i
   const { acct, cache: c } = f
   const cancel = (patch: Partial<UiState> = {}): Act => ({ key: 'no', label: 'cancel', run: () => act.ui({ confirm: '', switchStep: '', move: null, ...patch }) })
-  const ask = (title: string, detail: string, acts: Act[], close = cancel()): Row => ({ key: 'ask', tone: 'ask', title, detail, acts, close })
+  const ask = (title: string, detail: string, acts: Act[], close = cancel(), brief?: string): Row => ({ key: 'ask', tone: 'ask', title, detail, brief, acts, close })
 
   if (ui.confirm === 'handoff') {
     return ask('Hand off to a new session?',
@@ -265,17 +268,21 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
         { key: 'send-held', label: 'send', main: true, run: act.sendHeld },
         { key: 'handoff-held', label: 'hand off with it', run: () => act.handoff({ held: ui.held, fromBox: true }) },
       ],
-      cancel({ coldOk: cold.key, held: '' }))
+      cancel({ coldOk: cold.key, held: '' }),
+      `next turn starts cold: ${rewriteBrief(cold.tokens, c.cost)}`)
   }
   if (ui.confirm === 'move' && ui.move) {
     const move = ui.move
     const target = move.action === 'route' ? move.fields.model ?? f.model : f.model
+    const cost = turnCost(target, cache.prompt, cache.ttlMs)
     return ask(`${move.text}?`,
-      `The next turn then starts cold: it ${rewriteText(cache.prompt, turnCost(target, cache.prompt, cache.ttlMs))}.`,
+      `The next turn then starts cold: it ${rewriteText(cache.prompt, cost)}.`,
       [
         { key: 'yes-move', label: move.action === 'switch' ? 'switch' : move.action === 'route' ? 'route' : 'go back', main: true, run: () => act.send(move) },
         { key: 'handoff-move', label: 'hand off first', run: () => act.handoff({ move }) },
-      ])
+      ],
+      cancel(),
+      `then starts cold: ${rewriteBrief(cache.prompt, cost)}`)
   }
   if (ui.confirm === 'switch' && acct) {
     // Two steps: accounts of this provider and the providers to route to, then that provider's models.
@@ -321,6 +328,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
   if (cold && !working && cold.tokens >= COLD_NOTICE_FLOOR && !coldConfirmed(cold, ui.coldDismissed)) {
     return {
       key: 'alert', tone: 'warn', title: 'Next turn starts cold', detail: `${cold.why}; it ${rewriteText(cold.tokens, c.cost)}`,
+      brief: `${cold.why}; ${rewriteBrief(cold.tokens, c.cost)}`,
       acts: [handoff], close: { key: 'cold-ok', label: 'ok', run: () => act.ui({ coldDismissed: cold.key }) },
     }
   }

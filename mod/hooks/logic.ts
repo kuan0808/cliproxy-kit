@@ -533,6 +533,12 @@ export function rewriteText(tokens: number, cost: { cold: number; warm: number }
   return cost ? `${base}, ≈${fmtUsd(cost.cold)} at API prices (${fmtUsd(cost.warm)} warm)` : base
 }
 
+/** The same, short: "rewrites 412k ≈$3.30 ($0.08 warm)". */
+export function rewriteBrief(tokens: number, cost: { cold: number; warm: number } | null): string {
+  const base = `rewrites ${fmtTokens(tokens)}`
+  return cost ? `${base} ≈${fmtUsd(cost.cold)} (${fmtUsd(cost.warm)} warm)` : base
+}
+
 /** Whether two names are one model: an alias (`opus`, `sonnet[1m]`) is the line of the full id it is part of. */
 export function sameModel(a: string, b: string): boolean {
   const clean = (m: string) => m.trim().toLowerCase().replace(/\[[^\]]*\]$/, '').replace(/-\d{8}$/, '')
