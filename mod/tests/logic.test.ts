@@ -193,7 +193,7 @@ describe('settings', () => {
 
 describe('the automatic features', () => {
   test('a session runs unattended for any value but an empty one, 0, false, no or off', () => {
-    for (const v of ['1', 'true', 'yes', 'firstmate', ' On ']) expect(unattendedOf(v)).toBe(true)
+    for (const v of ['1', 'true', 'yes', 'agent', ' On ']) expect(unattendedOf(v)).toBe(true)
     for (const v of [undefined, '', '  ', '0', 'false', 'FALSE', 'no', 'off', ' Off ']) expect(unattendedOf(v)).toBe(false)
   })
 

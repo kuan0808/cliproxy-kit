@@ -1102,7 +1102,7 @@ test('a session its launcher marks unattended never holds a typed message or kee
   await minutes(clock, 20)
   expect(forks).toHaveLength(0)
   // What an orchestrator types at an idle worker goes in, cold or not.
-  const doorbell = ": Firstmate instruction waiting: list '/tmp/inbox'/*.msg and act on each"
+  const doorbell = ": orchestrator instruction waiting: list '/tmp/inbox'/*.msg and act on each"
   expect(await $.prompt.submit(composer(doorbell))).toMatchObject({ text: doorbell })
 })
 
