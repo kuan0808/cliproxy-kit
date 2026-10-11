@@ -172,35 +172,26 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
 
   const model = f.route ? `→ ${f.route}` : [f.modelName, f.effort].filter(Boolean).join(' · ')
   // Read as the gauges are: a mark as large as their rings, centred beside three lines, the account,
-  // its plan (or how it signs in) and the model. The session's controls go on a row under them,
-  // folding the band at its end; with none (a direct login), the fold ends the first row instead,
-  // where the card is wide enough (`roomy`). All of it is centred in the card, which stands tall
-  // beside two rows of gauges.
+  // its plan (or how it signs in) and the model, all of which show whole. The session's controls go
+  // on a row along the card's foot, folding the band at its end; what is above the row takes the
+  // rest of the card, centred, as when the card stands tall beside two rows of gauges.
   const session = [f.controls.unroute, f.controls.switch, f.controls.quota].filter((a): a is Act => Boolean(a))
-  const accountCard = (roomy: boolean) => {
-    const trailing = roomy && !session.length
-    return (
-    <Box key="account" borderStyle="round" flexGrow={1} width={0} minWidth={0} flexDirection="column" gap={1} justifyContent="center">
-      <Box gap={2} alignItems="center">
+  const accountCard = () => (
+    <Box key="account" borderStyle="round" flexGrow={1} width={0} minWidth={0} flexDirection="column" gap={1}>
+      <Box key="who" flexGrow={1} gap={2} alignItems="center">
         <Svg source={avatar(40, f.account)} alt={`Account ${f.account}`} width={40} height={40} />
         <Box flexDirection="column" minWidth={0} flexGrow={1}>
           <Text bold wrap="truncate-end">{f.account}</Text>
           <Text color={MUTED} wrap="truncate-end">{f.note || ' '}</Text>
           <Text color={f.route ? DESK.aqua : MUTED} wrap="truncate-end">{model}</Text>
         </Box>
-        {trailing ? button(collapse, false) : null}
       </Box>
-      {trailing
-        ? null
-        : (
-          <Box columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center" justifyContent="space-between">
-            <Box key="session" columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center">{session.map(a => button(a, false))}</Box>
-            {button(collapse, false)}
-          </Box>
-        )}
+      <Box key="controls" columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center" justifyContent="space-between">
+        <Box key="session" columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center">{session.map(a => button(a, false))}</Box>
+        {button(collapse, false)}
+      </Box>
     </Box>
-    )
-  }
+  )
   const gauges: RenderChildren[] = []
   gauges.push(gauge('five', '5-hour', meterRing(f.five), `5-hour quota: ${f.five ? `${usedPct(f.five)} used` : 'no reading'}`,
     usedText(f.five), f.five ? resetText(f.five.reset) : f.fiveMissing))
@@ -244,15 +235,15 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     return out
   }
   const grid = !odd
-    ? rows([accountCard(per < count), ...gauges], per)
+    ? rows([accountCard(), ...gauges], per)
     : per === 3
       ? [
         <Box key="bento" gap={1}>
-          {slot('slot-account', accountCard(true))}
+          {slot('slot-account', accountCard())}
           <Box key="gauges" flexGrow={2} width={0} minWidth={0} flexDirection="column" gap={1}>{rows(gauges, 2)}</Box>
         </Box>,
       ]
-      : [<Box key="row-account" gap={1}>{slot('slot-account', accountCard(true))}</Box>, ...rows(gauges, per)]
+      : [<Box key="row-account" gap={1}>{slot('slot-account', accountCard())}</Box>, ...rows(gauges, per)]
   return frame('band', [top, <Box key="cards" flexDirection="column" gap={1}>{grid}</Box>])
 }
 
