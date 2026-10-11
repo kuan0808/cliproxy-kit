@@ -1,17 +1,43 @@
 // The quota pane: every account of every provider with each window it reports, then what the
-// plugin and the band are set to. Both surfaces draw it, each meter in its own way.
+// plugin and the band are set to. Both surfaces draw it, each meter in its own way. Without
+// accounts to list (a direct login, no quota data) the band's own settings still show.
 import type { Elements, RenderChildren, RenderElement } from 'claude-code'
 
 import type { Snap } from '../types'
-import { blockedOthers, fmtDuration, fmtTokens, kindLabel, missingText, sevIn, untilIso, type Palette, type SessionAccount, type Settings } from './logic'
+import { blockedOthers, fmtDuration, kindLabel, missingText, sevIn, untilIso, type Palette, type SessionAccount } from './logic'
+import type { SettingRow } from './view'
 
 /** What both surfaces' tables have, which is all the pane draws with. */
-type Els = Pick<Elements['terminal'], 'Box' | 'Text'>
+type Els = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button'>
 
 /** A meter as the surface draws it: `fill` of it (0 to 1) in `color`, `cells` wide; `rule` draws a divider instead. */
 export type BarOf = (fill: number, cells: number, color: string, rule?: boolean) => RenderChildren
 
-export function quotaPane(els: Els, P: Palette, snap: Snap, acct: SessionAccount | null, now: number, bodyColumns: number, settings: Settings, bar: BarOf): RenderElement {
+/**
+ * The pane: what heads it (every account, or why there are none), then what the plugin and the
+ * band are set to, as a two-column list whose rows may carry a control.
+ */
+export function quotaPane(els: Els, P: Palette, head: RenderChildren[], items: SettingRow[], bodyColumns: number, bar: BarOf, lastError?: string): RenderElement {
+  const { Box, Text, Button } = els
+  const cols = Math.max(36, bodyColumns - 1)
+  const rows = [...head]
+  const keyWidth = Math.max(...items.map(r => r.label.length)) + 2
+  rows.push(<Box key="rule" width={cols}>{bar(0, cols, P.track, true)}</Box>)
+  for (const { label, value, act } of items) {
+    rows.push(
+      <Box key={`set-${label}`} width={cols}>
+        <Box width={keyWidth} flexShrink={0}><Text color={P.dim}>{label}</Text></Box>
+        <Text wrap="truncate-end">{value}</Text>
+        {act?.run ? <Box paddingLeft={2} flexShrink={0}><Button key={act.key} label={act.label} plain onPress={act.run} /></Box> : null}
+      </Box>,
+    )
+  }
+  if (lastError) rows.push(<Text key="err" color={P.orange} wrap="truncate-end">{`last plugin error: ${lastError}`}</Text>)
+  return <Box flexDirection="column">{rows}</Box>
+}
+
+/** Every account of every provider with each window it reports, and what the plugin is set to. */
+export function accountsPart(els: Els, P: Palette, snap: Snap, acct: SessionAccount | null, now: number, bodyColumns: number, bar: BarOf): { rows: RenderChildren[]; items: SettingRow[] } {
   const { Box, Text } = els
   const cols = Math.max(36, bodyColumns - 1)
   // label, percent, bar, time to reset: the bar takes what is left, up to 24 cells.
@@ -62,12 +88,11 @@ export function quotaPane(els: Els, P: Palette, snap: Snap, acct: SessionAccount
       }
     }
   }
-  // What the plugin and the band are set to, in words, as a two-column list.
+  // What the plugin is set to, in words.
   const fallbacks = Object.entries(snap.config.fallback_map)
   // When the newest quota reading was taken, not when the snapshot was: a meter's own reading
   // grown old shows "~".
   const lastRead = Math.max(0, ...Object.values(snap.providers).flatMap(v => v.credentials.flatMap(c => c.windows.map(w => Date.parse(w.observed_at) || 0))))
-  const off = (n: number, words: string) => (n > 0 ? words : 'off')
   const items: [string, string][] = [
     ...fallbacks.map(([from, to]): [string, string] => {
       const [provider, model] = to.split(':')
@@ -76,20 +101,6 @@ export function quotaPane(els: Els, P: Palette, snap: Snap, acct: SessionAccount
     ['Switch automatically', snap.config.cross_provider === 'auto' ? 'on' : 'off'],
     ['New sessions avoid', `accounts that have used over ${100 - snap.config.min_five_hour_left_percent}% of their 5-hour quota`],
     ['Quota last read', lastRead ? (now - lastRead < 30_000 ? 'just now' : `${fmtDuration(now - lastRead)} ago`) : 'not yet'],
-    ['Handoff suggested', off(settings.handoffAt, `from ${settings.handoffAt}% of the context`)],
-    ['Cold messages wait', off(settings.confirmAbove, `from ${fmtTokens(settings.confirmAbove)} tokens`)],
-    ['Cache kept warm', off(settings.keepWarm, `up to ${settings.keepWarm} ${settings.keepWarm === 1 ? 'time' : 'times'} while idle`)],
   ]
-  const keyWidth = Math.max(...items.map(([k]) => k.length)) + 2
-  rows.push(<Box key="rule" width={cols}>{bar(0, cols, P.track, true)}</Box>)
-  for (const [k, v] of items) {
-    rows.push(
-      <Box key={`set-${k}`} width={cols}>
-        <Box width={keyWidth} flexShrink={0}><Text color={P.dim}>{k}</Text></Box>
-        <Text wrap="truncate-end">{v}</Text>
-      </Box>,
-    )
-  }
-  if (snap.last_error) rows.push(<Text key="err" color={P.orange} wrap="truncate-end">{`last plugin error: ${snap.last_error}`}</Text>)
-  return <Box flexDirection="column">{rows}</Box>
+  return { rows, items: items.map(([label, value]) => ({ label, value })) }
 }

@@ -1,5 +1,5 @@
 // Pure helpers for the band: no `$`, so the tests call them directly.
-import type { BandError, CacheInfo, ModelInfo, Pending, Snap, SnapCred, SnapProvider, SnapSession, SnapWindow } from '../types'
+import type { Auto, BandError, CacheInfo, ModelInfo, Pending, Snap, SnapCred, SnapProvider, SnapSession, SnapWindow } from '../types'
 
 export const C = {
   fg: '#ebdbb2',
@@ -455,18 +455,47 @@ export function isAnthropicHost(base: string | undefined): boolean {
 
 /**
  * What the band's settings are, from the plugin's `userConfig` values, each kept in its range:
- * the context share at which it suggests a handoff, the conversation size from which a message
- * that would start cold waits to be confirmed, and how many times the cache is kept warm while
- * idle. 0 turns each off.
+ * the context share at which it suggests a handoff (0 never), the conversation size from which a
+ * message into a cold turn is held (0 any size), how many times the cache is kept warm each idle
+ * stretch, and whether a new session starts with holding and keeping warm on. The size and the
+ * count tune a feature; only the two defaults and a session's own choice turn one on or off.
  */
-export type Settings = { handoffAt: number; confirmAbove: number; keepWarm: number }
+export type Settings = { handoffAt: number; confirmAbove: number; keepWarm: number; holdColdDefault: boolean; keepWarmDefault: boolean }
 
 export function settingsOf(options: Readonly<Record<string, unknown>>): Settings {
-  const num = (key: string, fallback: number, max: number) => {
+  const num = (key: string, fallback: number, min: number, max: number) => {
     const v = Number(options[key] ?? fallback)
-    return Number.isFinite(v) ? Math.min(max, Math.max(0, Math.round(v))) : fallback
+    return Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fallback
   }
-  return { handoffAt: num('handoffAt', 60, 100), confirmAbove: num('confirmColdAbove', 100_000, 10_000_000), keepWarm: num('keepWarm', 3, 10) }
+  return {
+    handoffAt: num('handoffAt', 60, 0, 100),
+    confirmAbove: num('confirmColdAbove', 100_000, 0, 10_000_000),
+    // 0.1.14 turned keeping warm off with 0; on/off is its own setting now, so 0 reads as once.
+    keepWarm: num('keepWarm', 3, 1, 10),
+    holdColdDefault: options.holdColdDefault === true,
+    keepWarmDefault: options.keepWarmDefault === true,
+  }
+}
+
+/**
+ * Whether `QUOTA_BAND_UNATTENDED` says nobody sits at the session: any value but an empty one,
+ * `0`, `false`, `no` or `off`.
+ */
+export function unattendedOf(value: string | undefined): boolean {
+  const v = value?.trim().toLowerCase() ?? ''
+  return v !== '' && !['0', 'false', 'no', 'off'].includes(v)
+}
+
+/**
+ * Whether a feature runs in this session, and why: never when nobody attends it (the launcher
+ * said so, and a held message there would stall whatever sent it), else this session's own
+ * choice, else the `/config` default.
+ */
+export function autoState(feature: keyof Auto, s: Settings, mine: Auto, unattended: boolean): { on: boolean; why: 'unattended' | 'session' | 'default' } {
+  if (unattended) return { on: false, why: 'unattended' }
+  const own = mine[feature]
+  if (own !== null) return { on: own, why: 'session' }
+  return { on: feature === 'holdCold' ? s.holdColdDefault : s.keepWarmDefault, why: 'default' }
 }
 
 /**

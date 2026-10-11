@@ -241,7 +241,8 @@ of an account.
 A session signed in to Claude directly reads no proxy. The desktop app's are: it points them at
 Anthropic's own API with the app's sign-in. The band then shows that account's own limits, as Claude
 Code reports them after a reply, and leaves out what only the proxy has: accounts, switching and its
-alerts.
+alerts. In place of `quota` it has `settings`, which opens the same pane with the band's settings
+alone, as the pane does when the proxy gives no snapshot.
 
 Context, cache and model come from Claude Code itself, so the rest works either way:
 
@@ -251,12 +252,14 @@ Context, cache and model come from Claude Code itself, so the rest works either 
   says why and what the next turn rewrites, with an estimate at API list prices: the cache-write
   price of that TTL, against the cache-read price warm. A model without a known price shows tokens
   only. The cache meter starts only after a reply that read or wrote the cache.
-- **Holding a message.** Past `confirmColdAbove` tokens, a message typed into a cold turn is dropped
-  (Claude Code puts it back in the box) and the row asks; Enter again sends it. Never held: one with
-  images (a plugin can resend text only), a command, one typed during a turn, and a cold turn
-  already confirmed: Claude Code's own question on `/model`, or a move confirmed in the band.
-- **Moves.** A switch or route while the cache is warm asks first, with what it costs, and can hand
-  off first: the move then waits until the proxy has seen the new session, which it does after the
+- **Holding a message.** While holding runs, from `confirmColdAbove` tokens (0: any size) a message
+  typed into a cold turn is dropped (Claude Code puts it back in the box) and the row asks; Enter
+  again sends it. Never held: one with images (a plugin can resend text only), a command, one typed
+  during a turn, and a cold turn already confirmed: Claude Code's own question on `/model`, or a
+  move confirmed in the band. Holding turned off while a message is held, or while the hold is
+  deciding, lets the message go and drops the question.
+- **Moves.** A switch or route while the cache is warm asks first, from `confirmColdAbove` tokens
+  whether holding runs or not (it follows a press), with what it costs, and can hand off first: the move then waits until the proxy has seen the new session, which it does after the
   note's turn (it refuses a command for a session it has not seen).
 - **Handoff.** Claude writes a note over the conversation from its cache (`$.model.fork`), in fixed
   sections: goal, done, not done, changes, watch out, next step; or as the reader's own prompt in
@@ -265,10 +268,22 @@ Context, cache and model come from Claude Code itself, so the rest works either 
   `~/.cache/cliproxy-kit/handoff/` and read back, the conversation clears, and the new one starts
   from the note, sent at once with any held message after it (put in the prompt if that fails).
   Suggested at `handoffAt` percent of the context; `/handoff [message]` at any time.
-- **Keeping warm.** While idle, a fork shortly before the TTL ends (five minutes before, or a fifth
-  of a shorter TTL) reads the cached prefix at the cache-read price, which keeps it for another TTL:
-  up to `keepWarm` times each idle stretch, only while the cache is still there, and not for a
-  conversation under 20k tokens. Through the proxy it is a request of the same session.
+- **Keeping warm.** While keeping warm runs and the session is idle, a fork shortly before the TTL
+  ends (five minutes before, or a fifth of a shorter TTL) reads the cached prefix at the cache-read
+  price, which keeps it for another TTL: up to `keepWarm` times (1 to 10) each idle stretch, only
+  while the cache is still there, and not for a conversation under 20k tokens. A refresh checks
+  again right before its fork, so one turned off meanwhile makes no call; one that finds another
+  band action running tries again a few seconds later. Through the proxy it is a request of the same
+  session.
+- **Which runs.** Holding and keeping warm each run by the first rule that applies: never in a
+  session whose launcher set `QUOTA_BAND_UNATTENDED` (any value but empty, `0`, `false`, `no`,
+  `off`), since a held message there stalls whatever typed it; else this session's choice
+  (`/hold-cold`, `/keep-warm`, or the pane's buttons: `on`, `off`, `default`); else the `/config`
+  default (`holdColdDefault`, `keepWarmDefault`), off unless turned on. The size and the count only
+  tune them. A session's choice lasts for the Claude Code window: the module keeps it, as the host
+  wipes the band's state at every `session.end`, and mirrors it in `$.state` for drawing and across
+  a reload; `/clear` and a handoff keep it, a resumed conversation or a new process starts from the
+  defaults.
 
 ### Desktop preview
 
@@ -312,6 +327,10 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296:
 - The desktop app lays a plugin's tree out as CSS: widths in `ch`, heights and vertical spacing in
   half lines, colour names from its theme, an SVG as an image that sees none of the theme. Beneath
   the band it draws a slot for the engine's own drawing, as an element even when that is empty.
+- A plugin's `$.state` survives a module reload but is wiped at the end of every `session.end`, a
+  `/clear` included, which no `session.start` follows; `classic.SessionStart` with `source: 'clear'`
+  does. Every `$.state` read within one dispatch sees one moment, so a change made meanwhile by
+  another hook is not seen there.
 - Claude Code sends its session id in `X-Claude-Code-Session-Id`, and continues server-side message
   threads; an expired thread is answered `404 thread_not_found`, which CLIProxyAPI 8.0.14 and later
   pass through so Claude Code replays the conversation.

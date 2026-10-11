@@ -20,7 +20,9 @@ import {
   isAnthropicHost,
   rewriteText,
   sameModel,
+  autoState,
   settingsOf,
+  unattendedOf,
   turnCost,
   warmDueAt,
   parseSnap,
@@ -174,14 +176,38 @@ describe('prices', () => {
 
 describe('settings', () => {
   test("defaults, ranges, and Anthropic's own host", async () => {
-    expect(settingsOf({})).toEqual({ handoffAt: 60, confirmAbove: 100_000, keepWarm: 3 })
-    expect(settingsOf({ handoffAt: 140, confirmColdAbove: -5, keepWarm: 2.6 })).toEqual({ handoffAt: 100, confirmAbove: 0, keepWarm: 3 })
+    expect(settingsOf({})).toEqual({ handoffAt: 60, confirmAbove: 100_000, keepWarm: 3, holdColdDefault: false, keepWarmDefault: false })
+    expect(settingsOf({ handoffAt: 140, confirmColdAbove: -5, keepWarm: 2.6 })).toMatchObject({ handoffAt: 100, confirmAbove: 0, keepWarm: 3 })
+    // A count is tuning, never a switch: 0.1.14's 0 (off) reads as one refresh, and at most ten.
+    expect(settingsOf({ keepWarm: 0 })).toMatchObject({ keepWarm: 1 })
+    expect(settingsOf({ keepWarm: 40 })).toMatchObject({ keepWarm: 10 })
+    expect(settingsOf({ holdColdDefault: true, keepWarmDefault: true })).toMatchObject({ holdColdDefault: true, keepWarmDefault: true })
     expect(settingsOf({ handoffAt: 'x' })).toMatchObject({ handoffAt: 60 })
     expect(isAnthropicHost('https://api.anthropic.com')).toBe(true)
     expect(isAnthropicHost('https://api.anthropic.com/v1/')).toBe(true)
     expect(isAnthropicHost('http://127.0.0.1:8317')).toBe(false)
     expect(isAnthropicHost('https://anthropic.com.example.net')).toBe(false)
     expect(isAnthropicHost(undefined)).toBe(false)
+  })
+})
+
+describe('the automatic features', () => {
+  test('a session runs unattended for any value but an empty one, 0, false, no or off', () => {
+    for (const v of ['1', 'true', 'yes', 'firstmate', ' On ']) expect(unattendedOf(v)).toBe(true)
+    for (const v of [undefined, '', '  ', '0', 'false', 'FALSE', 'no', 'off', ' Off ']) expect(unattendedOf(v)).toBe(false)
+  })
+
+  test('unattended wins, then this window, then the /config default', () => {
+    const off = settingsOf({})
+    const on = settingsOf({ holdColdDefault: true, keepWarmDefault: true })
+    const none = { holdCold: null, keepWarm: null }
+    expect(autoState('holdCold', off, none, false)).toEqual({ on: false, why: 'default' })
+    expect(autoState('keepWarm', on, none, false)).toEqual({ on: true, why: 'default' })
+    expect(autoState('holdCold', off, { holdCold: true, keepWarm: null }, false)).toEqual({ on: true, why: 'session' })
+    expect(autoState('keepWarm', on, { holdCold: null, keepWarm: false }, false)).toEqual({ on: false, why: 'session' })
+    expect(autoState('holdCold', on, { holdCold: true, keepWarm: true }, true)).toEqual({ on: false, why: 'unattended' })
+    // A size or count of 0 decides nothing: a window's choice still holds.
+    expect(autoState('holdCold', settingsOf({ confirmColdAbove: 0 }), { holdCold: true, keepWarm: null }, false)).toEqual({ on: true, why: 'session' })
   })
 })
 

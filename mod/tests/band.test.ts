@@ -2,11 +2,16 @@ import { expect, mock, test as kitTest } from 'claude-code/testing'
 import type { EngineInterface, On, OpEventResult, RenderElement, RenderInput } from 'claude-code'
 import type { Engine, FoundElement, MockClock, TestBody, TestOptions } from 'claude-code/testing'
 
-/** Every test may take a while on a loaded machine: the band refreshes on a 10-second clock, which some tests run for hours. */
+/**
+ * Every test may take a while on a loaded machine: the band refreshes on a 10-second clock, which
+ * some tests run for hours. One that runs 6 seconds idle took 25 under a load average near 600.
+ */
 const test = (name: string, a: TestOptions | TestBody, b?: TestBody) =>
-  typeof a === 'function' ? kitTest(name, { timeoutMs: 30_000 }, a) : kitTest(name, { timeoutMs: 30_000, ...a }, b!)
+  typeof a === 'function' ? kitTest(name, { timeoutMs: 120_000 }, a) : kitTest(name, { timeoutMs: 120_000, ...a }, b!)
 
-import type { SessionInfo, Snap } from '../types'
+import type { SessionInfo, Snap, UiState } from '../types'
+import { settingsOf } from '../hooks/logic'
+import { bandFacts } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-04T12:00:00Z')
 const iso = (ms: number) => new Date(NOW + ms).toISOString()
@@ -91,6 +96,9 @@ let forks: string[] = []
 /** What else happens while the band's model call runs, or while a reply streams: the reader acting meanwhile. */
 let duringFork: (() => unknown) | undefined
 let duringStep: (() => unknown) | undefined
+/** What else happens while the band asks the session's id or the surfaces it draws on, at the test clock's time. */
+let duringId: ((now: number) => unknown) | undefined
+let duringSurfaces: (() => unknown) | undefined
 /** The files the band wrote, the prompts it sent or put in the box. */
 let files: Record<string, string> = {}
 let submitted: string[] = []
@@ -133,10 +141,19 @@ function stubSession(
   forks = []
   duringFork = undefined
   duringStep = undefined
+  duringId = undefined
+  duringSurfaces = undefined
   files = {}
   submitted = []
   filled = []
-  on('session.id', () => ({ value: currentId }))
+  on('session.id', async () => {
+    await duringId?.(clock.now())
+    return { value: currentId }
+  })
+  on('session.surfaces', async () => {
+    await duringSurfaces?.()
+    return { value: ['desktop'] }
+  })
   on('session.model', () => ({ value: SESSION.model }))
   on('session.cwd', () => ({ value: SESSION.cwd }))
   on('session.usage', () => ({
@@ -714,7 +731,7 @@ test('a cold turn is told before it is sent: why, how much it rewrites, and what
   await ui.unmount()
 })
 
-test('a message that would start cold waits in the prompt; Enter again sends it', async ($, on) => {
+test('a message that would start cold waits in the prompt; Enter again sends it', { options: { holdColdDefault: true } }, async ($, on) => {
   const clock = stubSession(on, SNAP)
   stepReplies(on)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -758,7 +775,7 @@ test('a switch while the cache is warm says what it costs, and can hand off firs
   expect(await $.prompt.submit(composer('carry on'))).toMatchObject({ text: 'carry on' })
 })
 
-test('a move the reader did not choose is told, and its next message waits', async ($, on) => {
+test('a move the reader did not choose is told, and its next message waits', { options: { holdColdDefault: true } }, async ($, on) => {
   const clock = stubSession(on, SNAP)
   stepReplies(on)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -770,7 +787,7 @@ test('a move the reader did not choose is told, and its next message waits', asy
   expect(await $.prompt.submit(composer('carry on'))).toMatchObject({ drop: expect.any(String) })
 })
 
-test('the cache is kept warm shortly before it expires, as many times as set, until the next prompt', async ($, on) => {
+test('the cache is kept warm shortly before it expires, as many times as set, until the next prompt', { options: { keepWarmDefault: true } }, async ($, on) => {
   // A 5-minute cache, so its refreshes come every few minutes.
   const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
   stepReplies(on)
@@ -802,7 +819,7 @@ test('the cache is kept warm shortly before it expires, as many times as set, un
   expect(forks).toHaveLength(4)
 })
 
-test('a refresh that finds the cache gone stops keeping it warm', async ($, on) => {
+test('a refresh that finds the cache gone stops keeping it warm', { options: { keepWarmDefault: true } }, async ($, on) => {
   const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
   stepReplies(on)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -930,7 +947,7 @@ test('a reply of the conversation a resume left is not taken for the new one', a
   await viewed.unmount()
 })
 
-test('a resumed conversation whose cache expired is held on its first message', async ($, on) => {
+test('a resumed conversation whose cache expired is held on its first message', { options: { holdColdDefault: true } }, async ($, on) => {
   stubSession(on, SNAP)
   on('classic.SessionStart', () => ({}))
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -952,7 +969,7 @@ test('a handoff leaves a conversation that went on while its note was written', 
   expect(await rowText($, 'notice')).toMatch(/went on while it was written, so it was not cleared/)
 })
 
-test('send sends the held message, also from a box that reads empty', async ($, on) => {
+test('send sends the held message, also from a box that reads empty', { options: { holdColdDefault: true } }, async ($, on) => {
   const clock = stubSession(on, SNAP)
   stepReplies(on)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -990,4 +1007,287 @@ test("a handoff note follows the reader's own prompt when there is one, and the 
   await $.command.run({ command: 'handoff', args: 'then the tests', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   for (let k = 0; k < 20 && !submitted.length; k++) await clock.settle()
   expect(forks[1]).toMatch(/^Three bullet points: what is done, what is next, what to avoid\.\n\nYour latest reply, which may be missing from this request, was:\nDone\.\n\nThe new session gets this message from the user right after the note:\nthen the tests$/)
+})
+
+test('by default nothing is held and an idle session makes no model call', async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  await minutes(clock, 20)
+  expect(forks).toHaveLength(0)
+  expect(await $.prompt.submit(composer('the login page next'))).toMatchObject({ text: 'the login page next' })
+})
+
+/** A slash command typed at the prompt. */
+const slash = ($: Engine, command: string, args = '') =>
+  $.command.run({ command, args, origin: { kind: 'composer' }, presentation: 'inline' } as never) as Promise<{ text?: string }>
+
+test('/keep-warm and /hold-cold say where each stands, and turn it on or off for this window', async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  expect((await slash($, 'keep-warm')).text).toBe('Keep-warm: off by default (set in /config). /keep-warm on turns it on here.')
+  expect((await slash($, 'keep-warm', 'on')).text).toBe('Keep-warm: on in this session (default off, set in /config).')
+  expect((await slash($, 'hold-cold', 'maybe')).text).toBe('Use /hold-cold on, off or default.')
+  await reply($)
+  await minutes(clock, 4)
+  expect(forks).toHaveLength(1) // kept warm a minute before it would expire
+  expect((await slash($, 'keep-warm', 'off')).text).toBe('Keep-warm: off in this session (default off, set in /config).')
+  await minutes(clock, 10)
+  expect(forks).toHaveLength(1)
+})
+
+test("a window's own choice wins over the /config default, and default follows it again", { options: { holdColdDefault: true } }, async ($, on) => {
+  // A 5-minute cache, so it goes cold in a few minutes of the test's clock.
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  await minutes(clock, 6)
+  expect((await slash($, 'hold-cold')).text).toBe('Hold: on by default (set in /config). /hold-cold off turns it off here.')
+  expect((await slash($, 'hold-cold', 'off')).text).toBe('Hold: off in this session (default on, set in /config).')
+  expect(await $.prompt.submit(composer('the login page next'))).toMatchObject({ text: 'the login page next' })
+  await reply($)
+  await minutes(clock, 6)
+  expect((await slash($, 'hold-cold', 'default')).text).toBe('Hold: on by default (set in /config). /hold-cold off turns it off here.')
+  expect(await $.prompt.submit(composer('and the signup page'))).toMatchObject({ drop: expect.stringMatching(/held by quota-band/) })
+})
+
+/**
+ * Claude Code wipes a plugin's `$.state` at the end of every `session.end`, a `/clear` included:
+ * from `wipe()` on, quota-band's values read as never written (at the version they stand at, so
+ * a write still lands) until the band writes each again.
+ */
+const hostWipe = (on: On) => {
+  const wiped = new Set<string>()
+  on('state.get', async (_$, e, next) => {
+    const r = await next(e)
+    return e.plugin === 'quota-band' && wiped.has(e.key) && 'value' in r ? { value: { value: undefined, version: r.value?.version ?? 0 } } : r
+  })
+  on('state.set', (_$, e, next) => {
+    if (e.plugin === 'quota-band') wiped.delete(e.key)
+    return next(e)
+  })
+  return () => ['snap', 'bandError', 'now', 'session', 'about', 'cache', 'ui', 'models', 'auto'].forEach(k => wiped.add(k))
+}
+
+test("a window's choice outlasts a /clear, though the host wipes the band's state, and a resume forgets it", async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  const wipe = hostWipe(on)
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  on('classic.SessionStart', () => ({}))
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await slash($, 'hold-cold', 'on')
+  await $.session.end({ reason: 'clear', sessionId: SESSION.id } as never)
+  wipe()
+  await $.classic.SessionStart({ session_id: 's2', source: 'clear' })
+  await reply($)
+  await minutes(clock, 6)
+  expect((await slash($, 'hold-cold')).text).toBe('Hold: on in this session (default off, set in /config).')
+  expect(await $.prompt.submit(composer('the login page next'))).toMatchObject({ drop: expect.stringMatching(/held by quota-band/) })
+  // Another conversation taken up in this window starts from the default again.
+  await $.session.end({ reason: 'resume', sessionId: 's2' } as never)
+  wipe()
+  expect((await slash($, 'hold-cold')).text).toBe('Hold: off by default (set in /config). /hold-cold on turns it on here.')
+})
+
+test('a session its launcher marks unattended never holds a typed message or keeps warm, whatever the defaults or a command say', { options: { holdColdDefault: true, keepWarmDefault: true } }, async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m', QUOTA_BAND_UNATTENDED: '1' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  expect((await slash($, 'hold-cold', 'on')).text).toBe('Hold: off, this session runs unattended (QUOTA_BAND_UNATTENDED). Not changed.')
+  await reply($)
+  await minutes(clock, 20)
+  expect(forks).toHaveLength(0)
+  // What an orchestrator types at an idle worker goes in, cold or not.
+  const doorbell = ": Firstmate instruction waiting: list '/tmp/inbox'/*.msg and act on each"
+  expect(await $.prompt.submit(composer(doorbell))).toMatchObject({ text: doorbell })
+})
+
+test('QUOTA_BAND_UNATTENDED=0 is an attended session', { options: { holdColdDefault: true } }, async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m', QUOTA_BAND_UNATTENDED: '0' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  await minutes(clock, 6)
+  expect(await $.prompt.submit(composer('the login page next'))).toMatchObject({ drop: expect.stringMatching(/held by quota-band/) })
+})
+
+test('Hold above 0 holds a cold message of any size', { options: { holdColdDefault: true, confirmColdAbove: 0 } }, async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  // A small conversation: 8k tokens, read from the cache.
+  on('turn.step', async function* (_$, e) {
+    return { turnId: e.turnId, index: e.index, answer: 'Done.', toolUses: [], stopReason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 8_000, cache_creation_input_tokens: 0 } } as never
+  })
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  await minutes(clock, 6)
+  expect(await $.prompt.submit(composer('the login page next'))).toMatchObject({ drop: expect.stringMatching(/held by quota-band: the next turn starts cold and rewrites 8k tokens/) })
+})
+
+test('a stored keep-warm count of 0, which turned it off before, refreshes once now that it is on', { options: { keepWarmDefault: true, keepWarm: 0 } }, async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  await minutes(clock, 20)
+  expect(forks).toHaveLength(1)
+})
+
+test('with Hold above 0 a switch while the cache is warm asks first, holding on or not', { options: { confirmColdAbove: 0 } }, async ($, on) => {
+  stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(200, false) })
+    await ui.press({ key: 'switch' })
+    await ui.press({ key: 'to-claude-k' })
+    expect(await ui.find({ key: 'yes-move' })).toBeDefined()
+    expect(commands).toHaveLength(0) // nothing sent before the reader says so
+    await ui.press({ key: 'no' })
+    await ui.unmount()
+  }
+})
+
+test('hold turned off while it is deciding lets that message through and leaves no question', { options: { holdColdDefault: true } }, async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'desktop', isInteractive: true } as never)
+  await reply($)
+  await minutes(clock, 6)
+  // The desktop app's own prompt: the hold asks which surfaces draw before it decides.
+  duringSurfaces = async () => {
+    duringSurfaces = undefined
+    await slash($, 'hold-cold', 'off')
+  }
+  const typed = { text: 'the login page next', origin: { kind: 'sdk' }, wait: false } as never
+  expect(await $.prompt.submit(typed)).toMatchObject({ text: 'the login page next' })
+  expect(await rowText($, 'ask')).toBe('')
+})
+
+/** One reply 5 seconds after the start, so a 5-minute cache's refresh falls between the band's 10-second reads. */
+const replyOffBeat = async ($: Engine, clock: MockClock) => {
+  await clock.advance(5_000)
+  await reply($)
+}
+
+test('keep-warm turned off while a due refresh is reading starts no model call', { options: { keepWarmDefault: true } }, async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await replyOffBeat($, clock)
+  const due = NOW + 5_000 + 4 * 60_000
+  duringId = async now => {
+    if (now < due || now >= due + 5_000) return
+    duringId = undefined
+    await slash($, 'keep-warm', 'off')
+  }
+  await minutes(clock, 10)
+  expect(forks).toHaveLength(0)
+})
+
+test('keep-warm turned off and on again while a due refresh is reading still refreshes, once', { options: { keepWarmDefault: true, keepWarm: 1 } }, async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await replyOffBeat($, clock)
+  const due = NOW + 5_000 + 4 * 60_000
+  duringId = async now => {
+    if (now < due || now >= due + 5_000) return
+    duringId = undefined
+    await slash($, 'keep-warm', 'off')
+    await slash($, 'keep-warm', 'on')
+  }
+  await minutes(clock, 10)
+  expect(forks).toHaveLength(1)
+})
+
+test("turning holding off settles a held message's question; the message waits in the box for Enter", { options: { holdColdDefault: true } }, async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  await minutes(clock, 6)
+  expect(await $.prompt.submit(composer('the login page next'))).toMatchObject({ drop: expect.any(String) })
+  expect(await rowText($, 'ask')).toMatch(/^\? Message held/)
+  await slash($, 'hold-cold', 'off')
+  expect(await rowText($, 'ask')).toBe('')
+  expect(await $.prompt.submit(composer('the login page next'))).toMatchObject({ text: 'the login page next' })
+})
+
+test('a held question left in the band draws only while holding is on', () => {
+  const cache = { lastAt: NOW - 2 * H, prompt: 412_000, read: 400_000, creation: 12_000, input: 10, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
+  const ui: UiState = {
+    switchStep: '', confirm: 'send', move: null, held: 'the login page next', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
+    pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: '',
+  }
+  const input = (holdColdDefault: boolean) => ({
+    snap: SNAP, bandError: null, now: NOW, sess: SESSION, cache, ui, models: [], working: false,
+    settings: settingsOf({ holdColdDefault }), auto: { holdCold: null, keepWarm: null }, unattended: false,
+  })
+  const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined }
+  expect(bandFacts(input(true), act).top?.title).toBe('Message held')
+  expect(bandFacts(input(false), act).top?.title).not.toBe('Message held')
+})
+
+test('the cache card counts refreshes from the start while keeping warm runs, on both surfaces', { options: { keepWarmDefault: true } }, async ($, on) => {
+  stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  const caption = async (surface: 'terminal' | 'desktop') => {
+    const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(200, false) })
+    const found = await ui.find({ text: /^(expires in|kept warm)/ })
+    await ui.unmount()
+    return found?.text ?? ''
+  }
+  expect(await caption('terminal')).toBe('kept warm 0/3 · 1h')
+  expect(await caption('desktop')).toBe('expires in 1h · kept warm 0 of 3')
+  await slash($, 'keep-warm', 'off')
+  expect(await caption('terminal')).toBe('expires in 1h')
+})
+
+const PANE_MOUNT = { component: 'Pane', requestId: 'quota', props: { title: 'Accounts and quota', isFocused: true, bodyColumns: 72, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} } }
+
+test('the pane says where each feature stands and flips it for this window, on both surfaces', async ($, on) => {
+  stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const pane = await $.ui.mount({ plugin: 'quota-band', surface, ...PANE_MOUNT } as never)
+    expect(await pane.find({ text: /^off by default · from 100k tokens$/ })).toBeDefined()
+    expect(await pane.find({ text: /^off by default · up to 3 times$/ })).toBeDefined()
+    await pane.press({ key: 'auto-holdCold' })
+    expect(await pane.find({ text: /^on in this session · from 100k tokens$/ })).toBeDefined()
+    await pane.unmount()
+    expect((await slash($, 'hold-cold')).text).toBe('Hold: on in this session (default off, set in /config).')
+    await slash($, 'hold-cold', 'default')
+  }
+})
+
+test("a session signed in directly gets a settings control, and its pane shows the band's settings", async ($, on) => {
+  stubSession(on, SNAP, { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'https://api.anthropic.com' })
+  await $.session.start({ cwd: SESSION.cwd, surface: 'desktop', isInteractive: true } as never)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, false) })
+    expect(await ui.find({ key: 'settings' })).toBeDefined()
+    await ui.unmount()
+    const pane = await $.ui.mount({ plugin: 'quota-band', surface, ...PANE_MOUNT } as never)
+    expect(await pane.find({ text: /signs in to Claude directly/ })).toBeDefined()
+    expect(await pane.find({ text: /^Cold messages wait$/ })).toBeDefined()
+    expect(await pane.find({ key: 'auto-keepWarm' })).toBeDefined()
+    await pane.unmount()
+  }
+})
+
+test("without quota data from the proxy the pane still shows the band's settings", async ($, on) => {
+  stubSession(on, SNAP)
+  failure = { value: { status: 404, ok: false, headers: {}, text: '' } }
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const pane = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...PANE_MOUNT } as never)
+  expect(await pane.find({ text: /no quota-pilot band route/ })).toBeDefined()
+  expect(await pane.find({ key: 'auto-holdCold' })).toBeDefined()
+  await pane.unmount()
 })

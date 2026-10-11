@@ -34,7 +34,7 @@
 - 🧭 **每個 session 分到對的帳號。** 新的 session 分到每週額度最快重置的帳號，快過期的額度先用掉；之後就留在那個帳號，prompt 快取也跟著保留。Codex 的 session 和 review 也一樣。
 - 📊 **額度用到哪裡去。** 管理面板裡的頁面，把每個帳號的 5 小時視窗、這一週、近 7 或 30 天，依專案和 session 拆開。
 - 🎛️ **在工作的地方看額度。** Claude Code 輸入框上方的額度列，終端機和桌面版都有，顯示帳號、用量、context 和 prompt 快取，一鍵就能切換。
-- 🧊 **不再意外冷啟動。** 下一輪要重寫 prompt 快取之前（快取過期，或 session 換了帳號或模型），額度列會說要重寫多少、以 API 價格計算要花多少；長對話的訊息會先停下等你確認；你離開時保持快取；也能交接到從摘要開始的新 session。
+- 🧊 **不再意外冷啟動。** 下一輪要重寫 prompt 快取之前（快取過期，或 session 換了帳號或模型），額度列會說要重寫多少、以 API 價格計算要花多少，也能交接到從摘要開始的新 session。還可以打開「長對話的訊息先停下等你確認」和「你離開時保持快取」，只對一個 session 或對全部。
 - 🔀 **供應商之間交接。** Claude 帳號全部用完時，session 可以手動換到 Codex 的模型，也可以設定成自動。
 
 <table>
@@ -215,7 +215,7 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | **Account** | proxy 分給這個 session 的帳號（第一個請求之前標成 `expected`）、方案和模型。 |
 | **5-hour**、**Weekly** | 那個帳號在各個額度週期的用量，以及何時重置。 |
 | **Context** | 對話用了多少 context。 |
-| **Cache** | prompt 快取還剩多久變冷；額度列刷新過時顯示 `kept warm 1/3`；變冷後顯示下一輪要重寫多少、花多少。 |
+| **Cache** | prompt 快取還剩多久變冷；保持快取打開時，用 `kept warm 0/3` 計算刷新次數；變冷後顯示下一輪要重寫多少、花多少。 |
 | **Accounts** | 所有帳號的每週用量，以及下次切換或新 session 會分到的帳號。 |
 | **上方那一列** | 一次一件事：要你決定的問題、剛做完的結果，或提醒（proxy 的狀況、下一輪會冷啟動、session 換了帳號、context 快滿了）。 |
 
@@ -223,10 +223,17 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | --- | --- |
 | `switch` | 把這個 session 換到另一個帳號，或另一個供應商的模型，也能換回來。快取還熱著時，會先說切換要花多少，也可以先交接。 |
 | `hand off` | context 超過 60%、下一輪會冷啟動，或切換會造成冷啟動時，出現在上方那一列。Claude 寫一份交接筆記（目標、已完成、未完成、修改內容、注意事項、下一步，或[你自己定的段落](#自訂交接筆記)），清空對話，新的對話從筆記開始。輸入 `/handoff [訊息]` 隨時都能交接，訊息會接在筆記後面。 |
-| `quota` | 所有帳號的各個額度週期；輸入 `/quota` 也一樣。 |
+| `quota` | 所有帳號的各個額度週期，以及額度列的設定；輸入 `/quota` 也一樣。直接登入 Claude 的 session 在同一個位置是 `settings`。 |
 | `more` / `less` | 在換輪之前固定顯示方塊或一行（桌面版是 **Expand** / **Collapse**）。 |
 
-**冷啟動之前。** 下一輪要重寫超過 100k token 的快取時，你送出的訊息會先回到輸入框，上方那一列會問你：再按一次 **Enter** 就送出，也可以帶著它交接。你離開時，額度列最多刷新快取三次，每次在快到期前，用快取讀取的價格。
+**冷啟動之前。** 下一輪會冷啟動時，上方那一列會說要重寫多少。另外有兩個自動功能，預設都關閉，要你自己打開：
+
+- `/hold-cold on`：對話超過 100k token 時，你送進冷啟動的訊息會先回到輸入框，上方那一列會問你：再按一次 **Enter** 就送出，也可以帶著它交接。
+- `/keep-warm on`：你離開時，額度列最多刷新快取三次，每次在快到期前，用快取讀取的價格。
+
+`off` 關閉，`default` 回到 `/config` 的預設，只打指令會說目前的狀態。選擇在這個視窗開著時一直有效，包括 `/clear` 和交接之後；開新視窗、重開或接續另一段對話，就回到 `/config` 的預設。`quota` 面板會列出這兩項，各附一個切換按鈕。
+
+**沒有人在看的 session。** 由 agent、排程或協調工具啟動 Claude Code 時，在環境變數設定 `QUOTA_BAND_UNATTENDED=1`：額度列在那裡一律不攔訊息、不保持快取，不管預設或指令怎麼設，它送進來的內容都會直接進去。
 
 在桌面版裡，額度列畫成卡片，跟著 app 的淺色或深色主題，顯示那個帳號自己的額度（見[不經過 proxy 時](#有沒有裝額度列)）：
 
@@ -267,8 +274,10 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | 設定 | 預設 | 作用 |
 | --- | --- | --- |
 | 建議交接的 context 用量 | `60` | context 用到這個百分比時，上方那一列建議交接。`0` 表示不建議。 |
-| 冷啟動前先詢問的對話大小 | `100000` | 對話超過這麼多 token 時，會冷啟動的訊息先停下等你確認。`0` 表示不攔。 |
-| 保持快取的次數 | `3` | 你離開時刷新快取的次數。`0` 表示關閉。 |
+| 冷啟動前攔下訊息 | 關閉 | 新的 session 是否攔下送進冷啟動的訊息；`/hold-cold` 只改一個 session。 |
+| 攔下訊息的對話大小 | `100000` | 對話超過這麼多 token 時才攔下訊息；快取還熱著時切換帳號，也從這個大小起先說要花多少。`0` 表示任何大小。 |
+| 你離開時保持快取 | 關閉 | 新的 session 是否保持快取；`/keep-warm` 只改一個 session。 |
+| 保持快取的次數 | `3` | 每次你離開時最多刷新幾次，1 到 10。 |
 
 費用是 Anthropic 和 OpenAI 的 API 定價，僅供比較：訂閱方案不是按 token 計費。沒有已知價格的模型只顯示 token 數。
 
@@ -307,6 +316,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 ## 更新與移除
 
 - **更新：** 面板的插件商店會提供 quota-pilot 的新版本。額度列用 `claude plugin update quota-band@cliproxy-kit` 更新，或在 `/plugin` 的 **Marketplaces** 開啟自動更新；執行中的 session 用 `/reload-plugins` 載入新版。兩者一起改版，請一起更新。
+- **從 0.1.14 升級：** 冷啟動前攔下訊息和保持快取都改成預設關閉，要用時在 `/config` 對所有 session 打開，或用 `/hold-cold on`、`/keep-warm on` 只對一個打開。**攔下訊息的對話大小**或**保持快取的次數**設為 `0` 不再代表關閉：分別代表任何大小和刷新一次；攔下訊息的對話大小為 `0` 時，快取還熱著的每次切換都會先問。
 - **從 0.1.6 升級：** 額度列改成全部走網路，用 Claude Code 本來就在用的 key，所以 `band_tokens` 不再讀取，可以從 `config.yaml` 刪掉。session、專案和記住的資料夾會自動移進 `usage/sessions.json`。
 - **移除：** 在面板的**插件**頁面刪除 Quota Pilot，用 `claude plugin uninstall quota-band@cliproxy-kit` 移除額度列，其餘照上表還原。
 
@@ -319,6 +329,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | 插件底下沒有 quota-pilot | 重新整理面板，並確認 `plugins.enabled: true`。 |
 | 額度列說這把 key 送出請求後才有額度資料 | 送出一個 prompt：proxy 最近一週還沒接受過這把 key 的請求。 |
 | 額度列說額度資料太舊 | proxy 或裡面的插件停了：重新啟動 CLIProxyAPI。 |
+| Claude Code 把訊息退回輸入框，寫著「held by quota-band」 | 攔下訊息已打開，而且下一輪會冷啟動：按 **Enter** 送出，或用 `/hold-cold off` 不再攔。會自動輸入內容到 Claude Code 的程式，啟動時設定 `QUOTA_BAND_UNATTENDED=1`。 |
 | Mac 很忙時，頁面或額度列變慢 | Homebrew 把 proxy 當成低優先的服務執行。在 `~/Library/LaunchAgents/sh.brew.cliproxyapi.plist` 加上 `ProcessType` `Interactive`（`plutil -replace ProcessType -string Interactive <檔案>`），再用 `launchctl bootout gui/$(id -u)/sh.brew.cliproxyapi` 和 `launchctl bootstrap gui/$(id -u) <檔案>` 重新載入。`brew services restart` 會重寫這個檔案。 |
 | 用量頁看不到 Codex 的 session | Codex 還沒經過 proxy（步驟 4）。 |
 | Codex 說 hook 以代碼 7 或 22 結束 | hook 的位址沒有 proxy 回應（7），或那個 proxy 上沒有 quota-pilot（22）。 |
@@ -339,7 +350,7 @@ cd ui && bun install && bun run verify                       # 頁面：測試�
 cd mod && claude plugin test . && claude plugin validate .   # 額度列
 ```
 
-`scripts/install-plugin.sh` 會安裝本機建置的版本。`git config core.hooksPath scripts/git-hooks` 會開啟 commit 前的憑證檢查（需要 PyYAML；讀 Codex 的設定需要 Python 3.11 以上）。打上 `v<版本>` tag 會發布商店安裝用的 release，版本必須和 `mod/.claude-plugin/plugin.json` 一致。各部分怎麼決定、存了什麼：[docs/architecture.md](docs/architecture.md)。
+`scripts/install-plugin.sh` 會安裝本機建置的版本。`git config core.hooksPath scripts/git-hooks` 會開啟 commit 前的憑證檢查（需要 PyYAML；讀 Codex 的設定需要 Python 3.11 以上）。打上 `v<版本>` tag 會發布商店安裝用的 release，版本必須和 `mod/.claude-plugin/plugin.json` 一致；release 說明是 tag 的訊息（`git tag -a`），一般 tag 則用那個 commit 的訊息。各部分怎麼決定、存了什麼：[docs/architecture.md](docs/architecture.md)。
 
 ## 授權
 

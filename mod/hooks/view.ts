@@ -1,7 +1,8 @@
 // What the band shows, whichever surface draws it: the terminal's cells and the desktop app's
 // cards read the same facts and the same row above them, with the same actions behind them.
-import type { BandError, CacheInfo, ModelInfo, Move, SessionInfo, Snap, UiState } from '../types'
+import type { Auto, BandError, CacheInfo, ModelInfo, Move, SessionInfo, Snap, UiState } from '../types'
 import {
+  autoState,
   bandErrorText,
   cacheState,
   cannotTake,
@@ -76,6 +77,10 @@ export type Do = {
   handoff: (then: Handoff) => unknown
   sendHeld: () => unknown
   quota: () => unknown
+  /** This session's choice of a feature; null follows `/config`. */
+  auto: (feature: keyof Auto, value: boolean | null) => unknown
+  /** The band's settings, for a session with no proxy accounts to list. */
+  settings: () => unknown
 }
 
 export type BandInput = {
@@ -88,6 +93,9 @@ export type BandInput = {
   models: ModelInfo[]
   settings: Settings
   working: boolean
+  /** This session's own choice of the automatic features, and whether nobody attends it. */
+  auto: Auto
+  unattended: boolean
 }
 
 export type Facts = {
@@ -120,9 +128,13 @@ export type Facts = {
     tokens: number
     warmed: number
     keepWarm: number
+    /** Keeping warm runs in this session. */
+    keepWarmOn: boolean
   }
+  /** Holding a message into a cold turn runs in this session. */
+  holdOn: boolean
   pool: { left: number | null; parts: (number | null)[]; stale: boolean; caption: string } | null
-  /** `quota` lists the proxy's accounts: a direct login has none to list. */
+  /** `quota` lists the proxy's accounts; a direct login, with none to list, opens the band's settings in its place. */
   controls: { switch?: Act; unroute?: Act; quota?: Act }
   top: Row | null
 }
@@ -208,9 +220,10 @@ export function bandFacts(i: BandInput, act: Do): Facts {
   const canSend = !bandError
   const canSwitch = Boolean(acct && canSend && (acct.view.credentials.length > 1 || switchProviders.length || route))
 
-  // A move ends what is cached: past the reader's threshold, the band says what it costs first.
+  // A move ends what is cached: from the reader's size (Hold above; 0 any), the band says what it
+  // costs first, whether holding is on or not, as the reader pressed for it.
   const pick = (move: Move) => {
-    const asks = settings.confirmAbove > 0 && cache.prompt >= settings.confirmAbove && !cold && cs.state !== 'unknown'
+    const asks = cache.prompt >= settings.confirmAbove && !cold && cs.state !== 'unknown'
     if (asks) act.ui({ confirm: 'move', move, switchStep: '' })
     else act.send(move)
   }
@@ -231,12 +244,13 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     fiveMissing: missingText(shownCred, '5h'),
     weekMissing: missingText(shownCred, '7d'),
     ctx,
-    cache: { ...cs, rate: hitRate(cache), cold, cost, tokens: cache.prompt, warmed: cache.warmed, keepWarm: settings.keepWarm },
+    cache: { ...cs, rate: hitRate(cache), cold, cost, tokens: cache.prompt, warmed: cache.warmed, keepWarm: settings.keepWarm, keepWarmOn: autoState('keepWarm', settings, i.auto, i.unattended).on },
+    holdOn: autoState('holdCold', settings, i.auto, i.unattended).on,
     pool: all && poolView ? { ...all, caption: nextUp(poolView, poolCurrent, now) } : null,
     controls: {
       switch: canSwitch ? { key: 'switch', label: 'switch', run: () => act.ui({ confirm: ui.confirm === 'switch' ? '' : 'switch', switchStep: '' }) } : undefined,
       unroute: route && canSend ? { key: 'unroute', label: 'back', run: () => pick(unroute) } : undefined,
-      quota: sess.proxied ? { key: 'quota', label: 'quota', run: act.quota } : undefined,
+      quota: sess.proxied ? { key: 'quota', label: 'quota', run: act.quota } : { key: 'settings', label: 'settings', run: act.settings },
     },
     top: null,
   }
@@ -259,7 +273,8 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
       [{ key: 'yes-handoff', label: 'hand off', main: true, run: () => act.handoff({ held: ui.held || undefined }) }],
       cancel({ held: '' }))
   }
-  if (ui.confirm === 'send' && c.cold) {
+  // A question left from before holding was turned off (an upgrade, /config) is not asked.
+  if (ui.confirm === 'send' && c.cold && f.holdOn) {
     const cold = c.cold
     return ask('Message held',
       // Enter sends it: the line Claude Code prints for the held message says so.
@@ -354,6 +369,33 @@ export function cacheCaption(f: Facts, wide: boolean): string {
   if (f.isCodex) return 'last request'
   if (c.state === 'unknown') return 'after the first reply'
   if (c.state === 'cold') return `rewrites ${fmtTokens(c.tokens)}${c.cost ? ` ≈${fmtUsd(c.cost.cold)}` : ''}`
-  if (!c.warmed) return `expires in ${fmtDuration(c.leftMs)}`
+  // While keeping warm runs, its count shows from the start of the idle stretch.
+  if (!c.keepWarmOn) return `expires in ${fmtDuration(c.leftMs)}`
   return wide ? `expires in ${fmtDuration(c.leftMs)} · kept warm ${c.warmed} of ${c.keepWarm}` : `kept warm ${c.warmed}/${c.keepWarm} · ${fmtDuration(c.leftMs)}`
+}
+
+/** A row of the band's settings in the pane: what it is, where it stands, and a control to flip it. */
+export type SettingRow = { label: string; value: string; act?: Act }
+
+/**
+ * The band's settings as the pane lists them: the handoff suggestion, then holding and keeping
+ * warm, each with where it stands in this session and why, and a control that flips it here
+ * (none in a session nobody attends).
+ */
+export function settingsRows(i: Pick<BandInput, 'settings' | 'auto' | 'unattended'>, act: Pick<Do, 'auto'>): SettingRow[] {
+  const { settings } = i
+  const row = (feature: keyof Auto, label: string, tuning: string): SettingRow => {
+    const { on, why } = autoState(feature, settings, i.auto, i.unattended)
+    const where = why === 'unattended' ? 'off: unattended' : `${on ? 'on' : 'off'} ${why === 'session' ? 'in this session' : 'by default'}`
+    return {
+      label,
+      value: `${where} · ${tuning}`,
+      act: why === 'unattended' ? undefined : { key: `auto-${feature}`, label: on ? 'turn off here' : 'turn on here', run: () => act.auto(feature, !on) },
+    }
+  }
+  return [
+    { label: 'Handoff suggested', value: settings.handoffAt > 0 ? `from ${settings.handoffAt}% of the context` : 'off' },
+    row('holdCold', 'Cold messages wait', settings.confirmAbove > 0 ? `from ${fmtTokens(settings.confirmAbove)} tokens` : 'at any size'),
+    row('keepWarm', 'Cache kept warm', `up to ${settings.keepWarm} ${settings.keepWarm === 1 ? 'time' : 'times'}`),
+  ]
 }

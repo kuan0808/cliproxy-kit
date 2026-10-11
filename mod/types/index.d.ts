@@ -158,6 +158,12 @@ export type BandError =
 
 export type ModelInfo = { id: string; owned_by: string; created: number }
 
+/**
+ * A session's own choice of the band's two automatic features, holding a message into a cold turn
+ * and keeping the cache warm; null follows the `/config` default.
+ */
+export type Auto = { holdCold: boolean | null; keepWarm: boolean | null }
+
 /** A switch or a route as the band sends it: the command, its fields, and how it is told. */
 export type Move = { action: string; fields: Record<string, string>; text: string }
 
@@ -208,6 +214,8 @@ declare module 'claude-code' {
       cache: CacheInfo
       ui: UiState
       models: ModelInfo[]
+      /** A mirror of the module's own record of the session's choice, for drawing and across a reload. */
+      auto: Auto
     }
   }
 }

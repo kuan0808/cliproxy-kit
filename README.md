@@ -42,9 +42,9 @@ page in the management panel, and a band in Claude Code (**quota-band**).
   desktop app, shows the account, its use, the context and the prompt cache, with one-press
   switching.
 - 🧊 **No surprise cold turns.** Before a turn rewrites the prompt cache (it expired, or the session
-  moved to another account or model) the band says how much and what that costs at API prices,
-  holds a long message until you confirm, keeps the cache warm while you are away, and hands off to
-  a fresh session that starts from a summary.
+  moved to another account or model) the band says how much and what that costs at API prices, and
+  hands off to a fresh session that starts from a summary. Turn on holding a long message until you
+  confirm, or keeping the cache warm while you are away, for one session or for all.
 - 🔀 **A handover between providers.** When every Claude account is used up, a session moves to a
   Codex model by hand, or by itself if you turn that on.
 
@@ -259,7 +259,7 @@ Cards while Claude waits, one line while it works:
 | **Account** | The account the proxy gave this session (`expected` before its first request), its plan and the model. |
 | **5-hour**, **Weekly** | That account's use of each window, and when it resets. |
 | **Context** | How full the conversation is. |
-| **Cache** | Time left before the prompt cache goes cold, `kept warm 1/3` once the band refreshed it; once cold, what the next turn rewrites and costs. |
+| **Cache** | Time left before the prompt cache goes cold, with `kept warm 0/3` counting refreshes while keeping it warm is on; once cold, what the next turn rewrites and costs. |
 | **Accounts** | Every account's weekly use, and the one a switch or a new session gets next. |
 | **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy, a cold next turn, a session moved, a context filling up). |
 
@@ -267,13 +267,25 @@ Cards while Claude waits, one line while it works:
 | --- | --- |
 | `switch` | Moves this session to another account, or to another provider's model and back. While the cache is warm it first says what the move costs, and can hand off first. |
 | `hand off` | In the row when the context passes 60%, the next turn would start cold, or a move would. Claude writes a note (goal, done, not done, changes, watch out, next step, or [your own sections](#your-own-handoff-note)), the conversation clears, and a new one starts from it. `/handoff [message]` does it any time, with the message after the note. |
-| `quota` | Every account's windows; `/quota` opens the same. |
+| `quota` | Every account's windows and the band's settings; `/quota` opens the same. A session signed in to Claude directly has `settings` in its place. |
 | `more` / `less` | Cards or one line, until the turn changes (**Expand** / **Collapse** in the desktop app). |
 
-**Before a cold turn.** When the next turn would rewrite more than 100k tokens of cache, a message
-you send waits in the prompt and the row asks: **Enter** again sends it, or hand off with it. While
-you are away the band refreshes the cache up to three times, each shortly before it would expire, at
-the cache-read price.
+**Before a cold turn.** The row says when the next turn would start cold and what it rewrites. Two
+automatic features go further, both off until you turn them on:
+
+- `/hold-cold on`: a message you send into a cold turn above 100k tokens waits in the prompt and the
+  row asks: **Enter** again sends it, or hand off with it.
+- `/keep-warm on`: while you are away the band refreshes the cache up to three times, each shortly
+  before it would expire, at the cache-read price.
+
+`off` turns one off, `default` goes back to `/config`, and the command alone says where it stands.
+A choice lasts while the window is open, `/clear` and handoffs included; a new window, a restart or
+a resumed conversation starts from the defaults in `/config`. The `quota` pane shows both, with a
+button to flip each.
+
+**Sessions nobody watches.** An agent, a scheduler or an orchestrator that starts Claude Code sets
+`QUOTA_BAND_UNATTENDED=1` in its environment: there the band never holds a message or keeps the
+cache warm, whatever the defaults or a command say, so what it types always goes in.
 
 In the desktop app the band draws cards in the app's own light or dark theme, with that account's
 own quota (see [without the proxy](#with-and-without-the-band)):
@@ -321,8 +333,10 @@ The band's settings are in Claude Code's `/config`, and asked for when it is ins
 | Setting | Default | What it does |
 | --- | --- | --- |
 | Suggest a handoff at | `60` | Context used, in percent, at which the row suggests a handoff. `0` never suggests it. |
-| Ask before a cold turn above | `100000` | Conversation size, in tokens, from which a message into a cold turn waits for you. `0` never holds one. |
-| Keep the cache warm | `3` | Refreshes of the cache while you are away. `0` turns it off. |
+| Hold a message before a cold turn | off | Whether a new session holds a message into a cold turn; `/hold-cold` changes one session. |
+| Hold above | `100000` | Conversation size, in tokens, from which a held message waits, and from which a switch while the cache is warm says what it costs first. `0`: any size. |
+| Keep the cache warm while away | off | Whether a new session keeps the cache warm; `/keep-warm` changes one session. |
+| Keep warm up to | `3` | Refreshes each time you are away, 1 to 10. |
 
 Costs are Anthropic's and OpenAI's API list prices, for comparison: a subscription is not billed per
 token. A model without a known price shows tokens only.
@@ -368,6 +382,10 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   `claude plugin update quota-band@cliproxy-kit`, or by itself once auto-update is on for the
   marketplace under **Marketplaces** in `/plugin`; `/reload-plugins` loads it in a running session.
   Update both: they change together.
+- **From 0.1.14:** holding a message before a cold turn and keeping the cache warm are off until you
+  turn them on, in `/config` for every session or with `/hold-cold on` and `/keep-warm on` for one.
+  `0` in **Hold above** or **Keep warm up to** no longer turns a feature off: it means any size, and
+  one refresh; with **Hold above** at `0`, a switch while the cache is warm asks first at any size.
 - **From 0.1.6:** the band reads everything over the network, with the key Claude Code already
   uses, so `band_tokens` is no longer read: remove it from `config.yaml`. Sessions, projects and
   remembered folders move into `usage/sessions.json` by themselves.
@@ -384,6 +402,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | No quota-pilot page under Plugins | Refresh the panel, and check `plugins.enabled: true`. |
 | The band says quota data comes once this key has sent a request | Send one prompt: the proxy has not accepted that key for a request in the last week. |
 | The band says quota data is old | The proxy, or the plugin in it, stopped: restart CLIProxyAPI. |
+| Claude Code gives a message back with "held by quota-band" | Holding is on and the next turn would start cold: **Enter** sends it, `/hold-cold off` stops holding. A program that types into Claude Code starts it with `QUOTA_BAND_UNATTENDED=1`. |
 | The page or the band is slow while the Mac is busy | Homebrew runs the proxy as a low-priority service. Add `ProcessType` `Interactive` to `~/Library/LaunchAgents/sh.brew.cliproxyapi.plist` (`plutil -replace ProcessType -string Interactive <file>`), then load it again with `launchctl bootout gui/$(id -u)/sh.brew.cliproxyapi` and `launchctl bootstrap gui/$(id -u) <file>`. `brew services restart` writes the file anew. |
 | Codex sessions are missing from the page | Codex does not use the proxy yet (step 4). |
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
@@ -413,7 +432,8 @@ cd mod && claude plugin test . && claude plugin validate .   # the band
 `scripts/install-plugin.sh` installs a local build. `git config core.hooksPath scripts/git-hooks`
 turns on a pre-commit check for credentials (PyYAML; Python 3.11+ to read Codex's config). A
 `v<version>` tag publishes the release the store installs, and must match
-`mod/.claude-plugin/plugin.json`. How the parts decide and what they store:
+`mod/.claude-plugin/plugin.json`; the release's notes are the tag's message (`git tag -a`), or the
+tagged commit's for a plain tag. How the parts decide and what they store:
 [docs/architecture.md](docs/architecture.md).
 
 ## License

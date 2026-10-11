@@ -5,12 +5,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { BandError, CacheInfo, ModelInfo, Move, SessionAbout, SessionInfo, Snap, UiState } from '../types'
+import type { Auto, BandError, CacheInfo, ModelInfo, Move, SessionAbout, SessionInfo, Snap, UiState } from '../types'
 import { desktopBand, lengthBar } from './desktop'
 import {
   C,
   DESK,
   HANDOFF_PROMPT,
+  autoState,
   bandErrorText,
   cacheTtlMs,
   coldConfirmed,
@@ -23,12 +24,13 @@ import {
   sessionAccount,
   settingsOf,
   settlePending,
+  unattendedOf,
   warmDueAt,
   type Settings,
 } from './logic'
-import { quotaPane } from './pane'
+import { accountsPart, quotaPane } from './pane'
 import { cellBar, terminalBand } from './terminal'
-import { bandFacts, nextTurn, type BandInput, type Do, type Handoff } from './view'
+import { bandFacts, nextTurn, settingsRows, type BandInput, type Do, type Handoff, type SettingRow } from './view'
 
 const PANE = 'quota'
 
@@ -52,11 +54,27 @@ const aboutA = atom({ plugin: 'quota-band', key: 'about' } as const, EMPTY_ABOUT
 const cacheA = atom({ plugin: 'quota-band', key: 'cache' } as const, EMPTY_CACHE)
 const uiA = atom({ plugin: 'quota-band', key: 'ui' } as const, EMPTY_UI)
 const modelsA = atom({ plugin: 'quota-band', key: 'models' } as const, [] as ModelInfo[])
+const autoA = atom({ plugin: 'quota-band', key: 'auto' } as const, { holdCold: null, keepWarm: null } as Auto)
 
 type $T = EngineInterface
 
 /** The plugin's settings (its `userConfig`), as the module last loaded with them. */
 let settings: Settings = settingsOf({})
+
+// This session's own choice of the automatic features, and whether its launcher said nobody
+// attends it. Kept here, not in `$.state`: the host wipes the plugin's state at the end of every
+// `session.end`, a `/clear` included, and every read of one dispatch sees one moment, so a choice
+// made meanwhile would go unseen. A module reload starts this over: `session.start` takes it back
+// from the `auto` atom, which mirrors it for drawing.
+const NO_CHOICE: Auto = { holdCold: null, keepWarm: null }
+let mine: Auto = NO_CHOICE
+let unattended = false
+// Counts the changes of the session's choice to hold, so a hold that was deciding meanwhile lets
+// its message go instead.
+let holdGen = 0
+
+/** Whether a feature runs in this session now. */
+const isOn = (feature: keyof Auto) => autoState(feature, settings, mine, unattended).on
 
 /** Patch the band's UI state; typed so literal fields keep their union types. */
 const setUi = ($: $T, patch: Partial<UiState>) => update($, uiA, (u: UiState): UiState => ({ ...u, ...patch }))
@@ -68,11 +86,13 @@ const kitPath = (home: string, rest: string) => `${home}/.cache/cliproxy-kit/${r
  * (`fresh`) for a decision that cannot wait for one.
  */
 async function bandInput($: $T, working: boolean, fresh = false): Promise<BandInput> {
-  const [snap, bandError, polled, sess, cache, ui, models] = await Promise.all([
-    read($, snapA), read($, bandErrorA), read($, nowA), read($, sessA), read($, cacheA), read($, uiA), read($, modelsA),
+  const [snap, bandError, polled, sess, cache, ui, models, auto] = await Promise.all([
+    read($, snapA), read($, bandErrorA), read($, nowA), read($, sessA), read($, cacheA), read($, uiA), read($, modelsA), read($, autoA),
   ])
   const now = fresh ? await $.clock.now() : polled || Date.now()
-  return { snap, bandError, now, sess, cache, ui, models, settings, working }
+  // A decision takes the session's choice from the module; a drawing, from its mirror, which it
+  // subscribes to.
+  return { snap, bandError, now, sess, cache, ui, models, settings, working, auto: fresh ? mine : auto, unattended }
 }
 
 // ---- data refresh ----
@@ -181,6 +201,9 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
     await update($, bandErrorA, () => null)
   }
   await update($, nowA, () => now)
+  // The mirror of the session's choice, should a /clear have wiped it unannounced.
+  const shown = await read($, autoA)
+  if (shown.holdCold !== mine.holdCold || shown.keepWarm !== mine.keepWarm) await update($, autoA, () => mine)
 }
 
 /**
@@ -564,7 +587,7 @@ function stopWarm(): void {
 async function scheduleWarm($: $T): Promise<void> {
   stopWarm()
   const seq = warmSeq
-  if (!settings.keepWarm || mainTurn) return
+  if (mainTurn || !isOn('keepWarm')) return
   const [cache, sess, now] = await Promise.all([read($, cacheA), read($, sessA), $.clock.now()])
   const due = warmDueAt(cache)
   if (seq !== warmSeq || !due || cache.warmStop || cache.warmed >= settings.keepWarm || cache.prompt < KEEP_WARM_FLOOR) return
@@ -582,13 +605,14 @@ async function scheduleWarm($: $T): Promise<void> {
 async function warmNow($: $T, id: string, at: number, seq: number): Promise<void> {
   if (seq !== warmSeq) return
   let refreshed = false
-  await exclusive(async () => {
+  const ran = await exclusive(async () => {
     const [cache, now] = await Promise.all([read($, cacheA), $.clock.now()])
     if (cache.lastAt !== at || mainTurn || working || (await $.session.id()) !== id) return
     if (now >= cache.lastAt + cache.ttlMs - 30_000) return
     const next = nextTurn(await bandInput($, false, true))
-    // Again after the reads: a turn the reader started meanwhile keeps the cache itself.
-    if (next.isCodex || next.cold || mainTurn || working) return
+    // Again after the reads: a turn the reader started meanwhile keeps the cache itself, and one
+    // turned off or timed anew meanwhile is not this refresh's to make.
+    if (next.isCodex || next.cold || mainTurn || working || seq !== warmSeq || !isOn('keepWarm')) return
     forking = true
     const r = await $.model.fork({ prompt: KEEP_WARM_PROMPT }).catch(() => null).finally(() => { forking = false })
     if (!r || !('usage' in r)) return
@@ -599,7 +623,52 @@ async function warmNow($: $T, id: string, at: number, seq: number): Promise<void
     // The next one only after this one kept it; else the reader's next turn times it again.
     if (kept) refreshed = true
   })
+  // Another band action held the lock (a handoff, or a refresh this one replaced): try again soon,
+  // unless keeping warm was timed anew or stopped meanwhile.
+  if (!ran && seq === warmSeq) {
+    warmTimer = $.clock.after(5_000, () => {
+      void warmNow($, id, at, seq).catch(() => undefined)
+    })
+    return
+  }
   if (refreshed) await scheduleWarm($)
+}
+
+// ---- the session's own choice: /hold-cold and /keep-warm ----
+
+const AUTO_COMMANDS = { holdCold: { name: 'hold-cold', words: 'Hold' }, keepWarm: { name: 'keep-warm', words: 'Keep-warm' } } as const
+
+/** Where a feature stands in this session and why, as its command answers; `asked` when it was told to change. */
+function autoText(feature: keyof Auto, asked: boolean): string {
+  const { name, words } = AUTO_COMMANDS[feature]
+  const state = autoState(feature, settings, mine, unattended)
+  const byDefault = (feature === 'holdCold' ? settings.holdColdDefault : settings.keepWarmDefault) ? 'on' : 'off'
+  if (state.why === 'unattended') return `${words}: off, this session runs unattended (QUOTA_BAND_UNATTENDED).${asked ? ' Not changed.' : ''}`
+  if (state.why === 'session') return `${words}: ${state.on ? 'on' : 'off'} in this session (default ${byDefault}, set in /config).`
+  const flip = state.on ? 'off' : 'on'
+  return `${words}: ${byDefault} by default (set in /config). /${name} ${flip} turns it ${flip} here.`
+}
+
+/**
+ * This session's choice of a feature (null: follow `/config`), kept in the module and mirrored for
+ * drawing. Ignored in a session nobody attends. Holding turned off settles a held message's
+ * question (the message stays in the box); keeping warm is timed again either way.
+ */
+async function choose($: $T, feature: keyof Auto, value: boolean | null): Promise<void> {
+  if (unattended) return
+  mine = { ...mine, [feature]: value }
+  if (feature === 'holdCold') holdGen++
+  await update($, autoA, () => mine)
+  if (!isOn('holdCold')) await update($, uiA, (u: UiState): UiState => (u.confirm === 'send' ? { ...u, confirm: '', held: '' } : u))
+  if (feature === 'keepWarm') await scheduleWarm($)
+}
+
+/** `/hold-cold` and `/keep-warm`: `on`, `off` or `default` for this session; bare, where it stands. */
+async function autoCommand($: $T, feature: keyof Auto, args: string): Promise<{ text: string }> {
+  const arg = args.trim().toLowerCase()
+  if (arg && arg !== 'on' && arg !== 'off' && arg !== 'default') return { text: `Use /${AUTO_COMMANDS[feature].name} on, off or default.` }
+  if (arg) await choose($, feature, arg === 'default' ? null : arg === 'on')
+  return { text: autoText(feature, Boolean(arg)) }
 }
 
 // ---- hooks ----
@@ -612,6 +681,8 @@ function actsOf($: $T): Do {
     handoff: then => handoffNow($, then),
     sendHeld: () => sendHeld($),
     quota: () => $.ui.open({ id: PANE, title: 'Accounts and quota' }),
+    auto: (feature, value) => choose($, feature, value),
+    settings: () => $.ui.open({ id: PANE, title: 'quota-band settings' }),
   }
 }
 
@@ -621,6 +692,9 @@ export const register: Register = (on, options) => {
   settings = settingsOf(options)
 
   on('session.start', async ($, e, next) => {
+    unattended = unattendedOf(await $.env.get('QUOTA_BAND_UNATTENDED'))
+    // A reload keeps the band's state: the choice made before it comes back from its mirror.
+    mine = { ...NO_CHOICE, ...(await read($, autoA)) }
     // A reload keeps the band's state, perhaps an older version's, but none of the module's
     // timers or the actions it was running: a handoff it stopped gives its message back.
     const before = await read($, uiA)
@@ -630,8 +704,12 @@ export const register: Register = (on, options) => {
       confirm: CONFIRMS.includes(u.confirm) ? u.confirm : '',
     }))
     if (before.busy && before.held) await giveBack($, before.held)
+    // A question an earlier version left open about a held message is not asked while holding is off.
+    if (!isOn('holdCold')) await update($, uiA, (u: UiState): UiState => (u.confirm === 'send' ? { ...u, confirm: '', held: '' } : u))
     await $.command.register({ name: 'quota', description: 'Show every account, quota window and route of the proxy' })
     await $.command.register({ name: 'handoff', description: 'Hand off to a new session: a note on this one is saved, it clears, and the new one starts from the note' })
+    await $.command.register({ name: 'hold-cold', description: 'Hold a message that would start a cold turn until you confirm it, in this session', argumentHint: '[on|off|default]', immediate: true })
+    await $.command.register({ name: 'keep-warm', description: 'Keep the prompt cache warm while you are away, in this session', argumentHint: '[on|off|default]', immediate: true })
     await refresh($, true)
     $.clock.every(10_000, () => {
       void refresh($, false)
@@ -646,6 +724,8 @@ export const register: Register = (on, options) => {
   // These events wait for their hooks: what the band learns from them never holds them up.
   on('classic.SessionStart', async ($, e, next) => {
     await heardAbout($, e.session_id, e.transcript_path, e.session_title).catch(() => undefined)
+    // After a /clear the host has wiped the band's state, the choice's mirror with it.
+    if (e.source === 'clear') await update($, autoA, () => mine)
     if ((e.source === 'resume' || e.source === 'fork') && e.context_tokens) {
       const now = await $.clock.now()
       const tokens = e.context_tokens
@@ -672,6 +752,9 @@ export const register: Register = (on, options) => {
     return { text: 'Writing the handoff note…' }
   })
 
+  on('command.run', { command: 'hold-cold' }, ($, e) => autoCommand($, 'holdCold', e.args))
+  on('command.run', { command: 'keep-warm' }, ($, e) => autoCommand($, 'keepWarm', e.args))
+
   /**
    * A message that would start the next turn cold, in a conversation past the reader's threshold,
    * waits: Claude Code puts a dropped prompt back in the box, and the band asks. Enter again sends
@@ -679,7 +762,8 @@ export const register: Register = (on, options) => {
    * Claude works, one the reader did not type here, or a cold turn already confirmed.
    */
   on('prompt.submit', async ($, e, next) => {
-    if (!settings.confirmAbove || e.turnId || e.attachments?.length || !e.text.trim() || /^\s*[/!]/.test(e.text)) return next(e)
+    const gen = holdGen
+    if (!isOn('holdCold') || e.turnId || e.attachments?.length || !e.text.trim() || /^\s*[/!]/.test(e.text)) return next(e)
     const typed = e.origin.kind === 'composer'
       || (e.origin.kind === 'sdk' && (await $.session.surfaces().catch(() => [] as string[])).includes('desktop'))
     if (!typed) return next(e)
@@ -690,6 +774,11 @@ export const register: Register = (on, options) => {
     // Asked once each cold spell: the next Enter sends, as after the reader closed the question.
     if (coldConfirmed(cold, input.ui.coldOk)) return next(e)
     await setUi($, { confirm: 'send', held: e.text, coldOk: cold.key, switchStep: '', move: null })
+    // Holding was turned off while this decided: the message goes, and its question with it.
+    if (gen !== holdGen || !isOn('holdCold')) {
+      await update($, uiA, (u: UiState): UiState => (u.confirm === 'send' && u.held === e.text ? { ...u, confirm: '', held: '' } : u))
+      return next(e)
+    }
     return { drop: `held by quota-band: the next turn starts cold and ${rewriteText(cold.tokens, cost)}. Enter sends it.` }
   }).catch(($, e, next) => next(e)) // a guard that fails lets the message through
 
@@ -757,6 +846,9 @@ export const register: Register = (on, options) => {
     // After a clear or a resume the process goes on with another conversation: a handoff's
     // notice and the move it leaves for the new one stay.
     if (e.reason === 'clear' || e.reason === 'resume') {
+      // Another conversation taken up in this window starts from the defaults; a /clear, the
+      // handoff's too, goes on with the work and keeps the choice.
+      if (e.reason === 'resume') mine = NO_CHOICE
       generation++
       leftTurn = mainTurn
       mainTurn = ''
@@ -787,21 +879,26 @@ export const register: Register = (on, options) => {
     return terminalBand(els, input, f, act, site, below)
   })
 
+  // The pane: the proxy's accounts, or why there are none, then what the plugin and the band are
+  // set to, the band's own settings always, with a control to flip each automatic feature here.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
     const P = e.surface === 'desktop' ? DESK : C
     const { Text } = els
-    const [snap, bandError, now0, sess] = await Promise.all([read($, snapA), read($, bandErrorA), read($, nowA), read($, sessA)])
+    const [snap, bandError, now0, sess, auto] = await Promise.all([read($, snapA), read($, bandErrorA), read($, nowA), read($, sessA), read($, autoA)])
     const now = now0 || Date.now()
-    if (!sess.proxied) {
-      return <Text color={P.dim}>This session signs in to Claude directly, not through the proxy: the band shows this account's own limits.</Text>
-    }
-    if (!snap) {
-      return bandError
-        ? <Text color={P.orange}>{`No quota data: ${bandErrorText(bandError)}`}</Text>
-        : <Text color={P.dim}>No quota-pilot snapshot found. Is the proxy plugin running?</Text>
-    }
     const bar = e.surface === 'desktop' && 'Svg' in els ? lengthBar(els) : cellBar(els)
-    return quotaPane(els, P, snap, sessionAccount(snap, sess.id), now, e.props.bodyColumns, settings, bar)
+    const band = settingsRows({ settings, auto, unattended }, actsOf($))
+    if (!sess.proxied || !snap) {
+      const why = !sess.proxied
+        ? <Text key="why" color={P.dim}>This session signs in to Claude directly, not through the proxy: the band shows this account's own limits.</Text>
+        : bandError
+          ? <Text key="why" color={P.orange}>{`No quota data: ${bandErrorText(bandError)}`}</Text>
+          : <Text key="why" color={P.dim}>No quota-pilot snapshot found. Is the proxy plugin running?</Text>
+      return quotaPane(els, P, [why], band, e.props.bodyColumns, bar)
+    }
+    const accounts = accountsPart(els, P, snap, sessionAccount(snap, sess.id), now, e.props.bodyColumns, bar)
+    const items: SettingRow[] = [...accounts.items, ...band]
+    return quotaPane(els, P, accounts.rows, items, e.props.bodyColumns, bar, snap.last_error)
   })
 }
