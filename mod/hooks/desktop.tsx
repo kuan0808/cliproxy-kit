@@ -85,9 +85,15 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
   // Folding to one line and back, as the band's own control: worded for the desktop.
   const collapse: Act = { key: 'view-line', label: 'collapse', run: () => setView('line') }
   const expand: Act = { key: 'view-cards', label: 'expand', run: () => setView('cards') }
-  // What the engine draws beneath, when it draws anything: an empty slot would add the column's
-  // gap under the band and set its content off centre.
-  const tail = below.type === 'engine' && below.ref === 0 ? null : below
+  // What lies beneath goes outside the band's own column: the engine's slot, drawn by the app even
+  // when the engine has nothing to show, would otherwise take the column's gap and set the band off
+  // centre. Another mod's drawing keeps a gap above it.
+  const frame = (key: string, children: RenderChildren[]) => (
+    <Box flexDirection="column">
+      <Box key={key} flexDirection="column" gap={1}>{children}</Box>
+      {site.beneath ? <Box key="beneath" marginTop={1}>{below}</Box> : below}
+    </Box>
+  )
   const c = f.cache
   const cold = c.state === 'cold'
   // What a meter reads as: used, with the colour of what is left.
@@ -124,9 +130,8 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     }
     meters.push(mini('cache', 'cache', ring(15, [cacheRing]),
       f.isCodex ? cacheWord : c.state === 'unknown' ? '—' : cold ? 'cold' : fmtDuration(c.leftMs), cacheText, '', 'Prompt cache'))
-    return (
-      <Box flexDirection="column" gap={1}>
-        {top}
+    return frame('band', [
+        top,
         <Box key="strip" alignItems="center" justifyContent="space-between" columnGap={2} paddingX={1}>
           <Box key="meters" alignItems="center" columnGap={roomy ? 3 : 2} flexWrap="wrap" flexShrink={1} minWidth={0}>
             <Box key="who" gap={1} alignItems="center">
@@ -140,10 +145,8 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
             {f.controls.switch ? button(f.controls.switch, false) : null}
             {button(expand, false)}
           </Box>
-        </Box>
-        {tail}
-      </Box>
-    )
+        </Box>,
+    ])
   }
 
   // -- cards: who and the controls, then a ring per meter --
@@ -168,10 +171,16 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
   const meterRing = (m: Meter | undefined) => ring(40, [{ fill: m ? 1 - m.remaining / 100 : 0, color: m?.stale ? RING.ink : ringTone(m?.remaining ?? 100) }])
 
   const model = f.route ? `→ ${f.route}` : [f.modelName, f.effort].filter(Boolean).join(' · ')
-  // Read as the gauges are: a mark as large as their rings, then three lines, the account, its plan
-  // (or how it signs in) and the model. Beside two rows of gauges it stands tall, centred.
-  const accountCard = () => (
-    <Box key="account" borderStyle="round" flexGrow={1} width={0} minWidth={0} flexDirection="column" gap={1} justifyContent="space-between">
+  // Read as the gauges are: a mark as large as their rings, centred beside three lines, the account,
+  // its plan (or how it signs in) and the model. The session's controls go on a row under them,
+  // folding the band at its end; with none (a direct login), the fold ends the first row instead,
+  // where the card is wide enough (`roomy`). All of it is centred in the card, which stands tall
+  // beside two rows of gauges.
+  const session = [f.controls.unroute, f.controls.switch, f.controls.quota].filter((a): a is Act => Boolean(a))
+  const accountCard = (roomy: boolean) => {
+    const trailing = roomy && !session.length
+    return (
+    <Box key="account" borderStyle="round" flexGrow={1} width={0} minWidth={0} flexDirection="column" gap={1} justifyContent="center">
       <Box gap={2} alignItems="center">
         <Svg source={avatar(40, f.account)} alt={`Account ${f.account}`} width={40} height={40} />
         <Box flexDirection="column" minWidth={0} flexGrow={1}>
@@ -179,18 +188,19 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
           <Text color={MUTED} wrap="truncate-end">{f.note || ' '}</Text>
           <Text color={f.route ? DESK.aqua : MUTED} wrap="truncate-end">{model}</Text>
         </Box>
+        {trailing ? button(collapse, false) : null}
       </Box>
-      {/* The session's controls on one row, folding the band at its end. */}
-      <Box columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center" justifyContent="space-between">
-        <Box key="session" columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center">
-          {f.controls.unroute ? button(f.controls.unroute, false) : null}
-          {f.controls.switch ? button(f.controls.switch, false) : null}
-          {f.controls.quota ? button(f.controls.quota, false) : null}
-        </Box>
-        {button(collapse, false)}
-      </Box>
+      {trailing
+        ? null
+        : (
+          <Box columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center" justifyContent="space-between">
+            <Box key="session" columnGap={1} rowGap={1} flexWrap="wrap" alignItems="center">{session.map(a => button(a, false))}</Box>
+            {button(collapse, false)}
+          </Box>
+        )}
     </Box>
-  )
+    )
+  }
   const gauges: RenderChildren[] = []
   gauges.push(gauge('five', '5-hour', meterRing(f.five), `5-hour quota: ${f.five ? `${usedPct(f.five)} used` : 'no reading'}`,
     usedText(f.five), f.five ? resetText(f.five.reset) : f.fiveMissing))
@@ -234,22 +244,16 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     return out
   }
   const grid = !odd
-    ? rows([accountCard(), ...gauges], per)
+    ? rows([accountCard(per < count), ...gauges], per)
     : per === 3
       ? [
         <Box key="bento" gap={1}>
-          {slot('slot-account', accountCard())}
+          {slot('slot-account', accountCard(true))}
           <Box key="gauges" flexGrow={2} width={0} minWidth={0} flexDirection="column" gap={1}>{rows(gauges, 2)}</Box>
         </Box>,
       ]
-      : [<Box key="row-account" gap={1}>{slot('slot-account', accountCard())}</Box>, ...rows(gauges, per)]
-  return (
-    <Box flexDirection="column" gap={1}>
-      {top}
-      <Box key="cards" flexDirection="column" gap={1}>{grid}</Box>
-      {tail}
-    </Box>
-  )
+      : [<Box key="row-account" gap={1}>{slot('slot-account', accountCard(true))}</Box>, ...rows(gauges, per)]
+  return frame('band', [top, <Box key="cards" flexDirection="column" gap={1}>{grid}</Box>])
 }
 
 /** The row above the band as a card: its sign, its words, its controls, a close control for alerts. */
