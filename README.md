@@ -298,6 +298,7 @@ nothing to set; the rules and what each failure is called are in
 | Situation | What happens | What the band shows |
 | --- | --- | --- |
 | An account fails | The session moves to another account, which keeps it | `↪ Switched d••• → k••• · d••• hung for 2m 15s`, with `switch back` once the proxy offers d••• again |
+| An account keeps failing | It rests: new sessions get it only when nothing else can, and its sessions move at their next turn | `! d••• resting after 2 failures · moves to k••• (3% used) on the next turn`; the Account card reads `resting, back in 4m` |
 
 In the desktop app the band draws cards in the app's own light or dark theme, with that account's
 own quota (see [without the proxy](#with-and-without-the-band)):
@@ -423,6 +424,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
 | A Codex account has no 5-hour window | Its plan has none; the page and the band say so. |
 | The band says `Switched d••• → k••• · reason not recorded` | quota-pilot is older than the band and does not record why a session moved: update it from the panel's Plugin Store. |
+| The Account card says `resting, back in 4m` | That account failed twice in a row and rests: the session moves at its next turn to an account that can serve, and the rest ends at the time shown, or at its first success. Nothing to do. |
 | A move offers `switch back` | The account the session left can take it again. `switch back` returns, asking first while the cache is warm; quota-pilot never moves a session back on its own, as the new account's cache is the warm one. |
 
 ## Privacy and security

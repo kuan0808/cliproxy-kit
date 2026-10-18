@@ -430,3 +430,14 @@ describe('models', () => {
   })
 })
 
+
+describe('rest', () => {
+  test('next up passes over a resting account while another can serve', () => {
+    const view = SNAP.providers.claude!
+    const until = iso(4 * 60_000)
+    const rested = { ...view, credentials: [view.credentials[0]!, { ...view.credentials[1]!, rest: { until, moments: 2 } }, { ...view.credentials[1]!, id: 'claude-x', label: 'x•••' }] }
+    expect(nextUp(rested, 'claude-d', NOW)).toBe('next up: x••• 7% used')
+    // Once its rest has ended it is as any other.
+    expect(nextUp(rested, 'claude-d', NOW + 5 * 60_000)).toBe('next up: k••• 7% used')
+  })
+})

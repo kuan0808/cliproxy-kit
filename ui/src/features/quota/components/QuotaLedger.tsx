@@ -435,6 +435,14 @@ function LedgerRowItem({ row, kinds, groupKinds, soleAccount, now, locale, ident
       <div className={styles.routing}>
         {blocked ? (
           <span className={styles.blocked}>{reason}</span>
+        ) : row.resting ? (
+          // Not used up: it rests after failures in a row, and is tried again at a time.
+          <span className={styles.resting}>
+            {t('quota_ledger.resting', {
+              count: row.resting.moments,
+              minutes: Math.max(1, Math.round((row.resting.untilMs - now) / 60000)),
+            })}
+          </span>
         ) : row.next && !soleAccount ? (
           <span className={styles.next} title={t('quota_ledger.next_title')}>
             {t('quota_ledger.next')}

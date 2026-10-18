@@ -93,6 +93,8 @@ type Cred struct {
 	// the plan last changed. In memory only: after a restart they start from the windows kept.
 	tracks map[string]*track[Window]
 	planAt time.Time
+	// health is its failure moments and rest (rest.go). In memory only.
+	health health
 }
 
 // CredInfo is the inventory the host reports for a credential.
@@ -219,6 +221,7 @@ const (
 	MoveModel   = "model"    // the account does not serve the model
 	MoveLeftOut = "left-out" // the proxy left it out, and no failure of it was seen
 	MoveFailed  = "failed"   // it failed
+	MoveRest    = "rest"     // it kept failing, and rests
 )
 
 // Cause is what quota-pilot saw of why a session left an account; only what it has evidence of.
@@ -231,6 +234,8 @@ type Cause struct {
 	// "removed" or "disabled".
 	Reason string `json:"reason,omitempty"`
 	Model  string `json:"model,omitempty"` // a model move's model
+	// Until is when a rest move's account is tried again.
+	Until time.Time `json:"until,omitzero"`
 }
 
 // leaving is why a pick did not answer a binding's account for a model: a move kind and reason.
@@ -846,6 +851,9 @@ func (s *State) Observe(u Usage) {
 		// that broke off after it began ran the tokens it reports, and they count.
 		ran := u.Input+u.Output+u.CacheRead+u.CacheCreation > 0
 		if c := s.creds[u.AuthID]; supported && c != nil {
+			if !u.Failed {
+				c.health.succeeded()
+			}
 			switch {
 			case !u.Failed || ran:
 				c.refusedAt = time.Time{}
@@ -921,13 +929,15 @@ func (s *State) Observe(u Usage) {
 // failedLocked classifies a failed attempt, notes when its account last failed, and keeps the
 // failure as why the session may leave the account it is bound to.
 func (s *State) failedLocked(u Usage, provider, root, model string, compact bool, at, now time.Time) string {
-	usedUp := false
-	if c := s.creds[u.AuthID]; c != nil {
-		usedUp = s.classifyLocked(c, u.Model, now).Blocked
-	}
+	c := s.memberLocked(u.AuthID, provider)
+	usedUp := c != nil && s.classifyLocked(c, u.Model, now).Blocked
 	kind := ClassifyFailure(Attempt{Status: u.StatusCode, Body: u.ErrorText, TTFT: u.TTFT, Wait: u.Latency, Compact: compact, UsedUp: usedUp})
-	if end := at.Add(u.Latency); end.After(s.failedAt[u.AuthID]) {
+	end := at.Add(u.Latency)
+	if end.After(s.failedAt[u.AuthID]) {
 		s.failedAt[u.AuthID] = end
+	}
+	if c != nil && restCounts(kind) {
+		c.health.failed(kind, u.StatusCode, u.Latency, end)
 	}
 	if u.SessionID == "" || !healthFailure(kind) {
 		return kind
@@ -990,6 +1000,10 @@ func (s *State) commitLocked(provider, canonical, root, authID, model string, th
 	}
 	reason = "previous account unavailable; " + reason
 	kind, cause := s.moveCauseLocked(key, m, b.AuthID, why, displaced, model, now)
+	if c := s.creds[b.AuthID]; c != nil && (kind == MoveRest || kind == MoveFailed && c.health.resting(now)) {
+		// It failed and now rests: the move says both.
+		kind, cause = MoveRest, c.health.cause()
+	}
 	s.bindings[key] = &Binding{AuthID: authID, Reason: reason, LastUsed: now, At: at, Kind: kind, Cause: cause}
 	delete(s.failures, key)
 	s.movedLocked(provider, canonical, root, b.AuthID, authID, model, reason, kind, cause, now)
@@ -999,8 +1013,11 @@ func (s *State) commitLocked(provider, canonical, root, authID, model string, th
 // that left it out knew (a refusal, an idle move, an account gone), else the account's failure,
 // else nothing, which says so.
 func (s *State) moveCauseLocked(key, m, from string, why leaving, displaced bool, model string, now time.Time) (string, *Cause) {
-	if displaced && why.kind != "" && why.kind != MoveLeftOut {
+	if displaced && why.kind != "" && why.kind != MoveLeftOut && why.kind != MoveRest {
 		return why.kind, &Cause{Reason: why.reason}
+	}
+	if displaced && why.kind == MoveRest {
+		return MoveRest, nil // its rest's cause, filled in by the caller while it rests
 	}
 	f := s.failures[key][m]
 	switch {
@@ -1036,7 +1053,7 @@ func (s *State) movedLocked(provider, canonical, root, from, to, model, reason, 
 // enabled, not used up for it, and listed by a pick for that model since it last failed.
 func (s *State) canTakeLocked(id, model string, now time.Time) bool {
 	c := s.creds[id]
-	if c == nil || c.Disabled || s.classifyLocked(c, model, now).Blocked {
+	if c == nil || c.Disabled || c.health.resting(now) || s.classifyLocked(c, model, now).Blocked {
 		return false
 	}
 	at := s.listed[id][modelKey(model)]
@@ -1115,7 +1132,9 @@ func (s *State) Pick(in PickInput) PickResult {
 	best := s.rankLocked(in.Candidates, in.Model, now, true)[0]
 	bound := b != nil && offered[b.AuthID]
 	refused := bound && s.refusedLocked(b, best, in.Model, now)
-	if bound && !refused && !s.moveIdleLocked(b, best, in.Model, now) {
+	// A resting account gives its sessions to one that can serve and is not resting, when offered.
+	resting := bound && !refused && s.creds[b.AuthID].health.resting(now) && best.ID != b.AuthID && !best.Resting && !best.Blocked
+	if bound && !refused && !resting && !s.moveIdleLocked(b, best, in.Model, now) {
 		b.LastUsed = now
 		delete(s.displaced[key], modelKey(in.Model))
 		return PickResult{Handled: true, AuthID: b.AuthID, Reason: b.Reason}
@@ -1126,6 +1145,9 @@ func (s *State) Pick(in PickInput) PickResult {
 	case refused:
 		reason = "previous account unavailable; " + reason
 		why = leaving{MoveQuota, s.classifyLocked(s.creds[b.AuthID], in.Model, now).Reason}
+	case resting:
+		reason = "previous account unavailable; " + reason
+		why = leaving{kind: MoveRest}
 	case b != nil && !bound:
 		reason = "previous account unavailable; " + reason
 		why = s.leftOutLocked(b.AuthID)
@@ -1219,6 +1241,7 @@ type Ranked struct {
 	Tier    int // 1 ready, 2 unknown, 3 limited
 	Reason  string
 	Blocked bool      // known to be unable to serve right now
+	Resting bool      // it rests: it serves only when nothing else can
 	BackAt  time.Time // when the window that limits it resets; zero when none or unknown
 	reset   time.Time
 }
@@ -1232,8 +1255,22 @@ func (s *State) rankLocked(cands []Candidate, model string, now time.Time, offer
 		c := s.credLocked(cand.ID, cand.Provider)
 		out = append(out, s.classify(c, model, now, offered))
 	}
+	// An account that can serve and is not resting first, whatever its tier; then the resting ones;
+	// then those that cannot serve.
+	group := func(r Ranked) int {
+		switch {
+		case r.Resting:
+			return 1
+		case r.Blocked:
+			return 2
+		}
+		return 0
+	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
+		if group(a) != group(b) {
+			return group(a) < group(b)
+		}
 		if a.Tier != b.Tier {
 			return a.Tier < b.Tier
 		}
@@ -1283,6 +1320,15 @@ func (s *State) classifyLocked(c *Cred, model string, now time.Time) Ranked {
 }
 
 func (s *State) classify(c *Cred, model string, now time.Time, offered bool) Ranked {
+	r := s.quotaRank(c, model, now, offered)
+	// Rest is not a quota limit: a resting account that could serve keeps its tier, not Blocked.
+	if c != nil && !r.Blocked && c.health.resting(now) {
+		r.Resting, r.Reason, r.BackAt = true, c.health.reason(), c.health.until
+	}
+	return r
+}
+
+func (s *State) quotaRank(c *Cred, model string, now time.Time, offered bool) Ranked {
 	if c == nil {
 		return Ranked{Tier: 2, Reason: "quota unknown"}
 	}

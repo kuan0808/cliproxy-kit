@@ -242,6 +242,7 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | 情況 | 會發生什麼 | 額度列顯示 |
 | --- | --- | --- |
 | 帳號失敗 | session 換到另一個帳號，之後留在那裡 | `↪ Switched d••• → k••• · d••• hung for 2m 15s`，等 proxy 再次提供 d••• 時附上 `switch back` |
+| 帳號一直失敗 | 它暫停使用：只有其他帳號都無法服務時，新 session 才會分到它；它上面的 session 在下一輪換走 | `! d••• resting after 2 failures · moves to k••• (3% used) on the next turn`；Account 卡片顯示 `resting, back in 4m` |
 
 在桌面版裡，額度列畫成卡片，跟著 app 的淺色或深色主題，顯示那個帳號自己的額度（見[不經過 proxy 時](#有沒有裝額度列)）：
 
@@ -344,6 +345,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex 說 hook 以代碼 7 或 22 結束 | hook 的位址沒有 proxy 回應（7），或那個 proxy 上沒有 quota-pilot（22）。 |
 | Codex 帳號沒有 5 小時視窗 | 它的方案本來就沒有；頁面和額度列都會標明。 |
 | 額度列顯示 `Switched d••• → k••• · reason not recorded` | quota-pilot 比額度列舊，不會記錄 session 換帳號的原因：到面板的插件商店更新它。 |
+| Account 卡片顯示 `resting, back in 4m` | 那個帳號連續失敗兩次，正在暫停使用：session 會在下一輪換到能服務的帳號，暫停到顯示的時間結束，或在它第一次成功時結束。不用做什麼。 |
 | 切換提示附上 `switch back` | session 離開的帳號現在又能接手。按 `switch back` 換回去，快取還熱著時會先問；quota-pilot 不會自己把 session 換回去，因為新帳號的快取才是熱的。 |
 
 ## 隱私與安全

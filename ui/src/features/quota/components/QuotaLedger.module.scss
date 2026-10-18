@@ -332,6 +332,12 @@ $track: color-mix(in srgb, var(--text-primary) 9%, transparent);
   color: var(--danger-color);
 }
 
+/* Resting is not used up: orange, never the red of an account that cannot serve. */
+.resting {
+  font-weight: 600;
+  color: var(--rest-color);
+}
+
 /* Window columns sit in the row grid directly, so every row lines up. */
 .meters {
   display: contents;

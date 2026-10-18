@@ -103,7 +103,7 @@ func codexNotice(session, client string, start bool, now time.Time) string {
 			if c := credByID(view, sw.From); c != nil {
 				from = c.Label
 			}
-			why, _ := moveWhy(*sw, from)
+			why, _ := moveWhy(*sw, from, now)
 			return fmt.Sprintf("quota-pilot: switched to %s · %s · %s", accountText(cred), why, usage)
 		}
 		return fmt.Sprintf("quota-pilot: switched to %s · %s", accountText(cred), usage)
@@ -150,10 +150,25 @@ func credByID(view *core.ProviderView, id string) *core.CredView {
 // moveWhy is why a session left from, worded from its switch record and never from the account's
 // state now, as the band words it (mod/hooks/logic.ts moveWhy; mod/tests/moves.js holds both
 // sides' expected wording): why for the notice, short for a narrow row.
-func moveWhy(sw core.Switch, from string) (why, short string) {
+func moveWhy(sw core.Switch, from string, now time.Time) (why, short string) {
 	c := core.Cause{}
 	if sw.Cause != nil {
 		c = *sw.Cause
+	}
+	if sw.Kind == core.MoveRest {
+		// The failures that rested it, while their kind agrees, and when it is tried again.
+		what := fmt.Sprintf("%s resting after %d failures", from, max(c.Count, 2))
+		if c.Kind != "" {
+			what = failedWhy(c, from)
+		}
+		switch {
+		case !c.Until.After(now):
+			short, _, _ := strings.Cut(what, "; ")
+			return what, short
+		case c.Kind != "":
+			return what + "; resting, back in " + untilText(c.Until.Sub(now)), from + " resting"
+		}
+		return what, from + " resting"
 	}
 	status := ""
 	if c.Status != 0 {
@@ -201,6 +216,14 @@ func moveWhy(sw core.Switch, from string) (why, short string) {
 	case core.MoveLeftOut:
 		return "the proxy left " + from + " out; no failure recorded", "reason unknown"
 	}
+	if c.Kind == core.FailHang {
+		return failedWhy(c, from), from + " hung"
+	}
+	return said(failedWhy(c, from))
+}
+
+// failedWhy is what a failure, or a run of failures of one kind, did: "d••• returned HTTP 529 twice".
+func failedWhy(c core.Cause, from string) string {
 	n := ""
 	switch {
 	case c.Count == 2:
@@ -211,25 +234,28 @@ func moveWhy(sw core.Switch, from string) (why, short string) {
 	switch c.Kind {
 	case core.FailHang:
 		if n != "" {
-			return from + " hung" + n, from + " hung"
+			return from + " hung" + n
 		}
-		return from + " hung for " + waitText(time.Duration(c.WaitMs)*time.Millisecond), from + " hung"
+		return from + " hung for " + waitText(time.Duration(c.WaitMs)*time.Millisecond)
 	case core.FailConnection:
-		return said(from + " lost its connection" + n)
+		return from + " lost its connection" + n
 	case core.FailTimeout:
-		return said(from + " timed out" + n)
+		return from + " timed out" + n
 	case core.FailOverloaded:
 		code := c.Status
 		if code == 0 {
 			code = 529
 		}
-		return said(fmt.Sprintf("%s returned HTTP %d%s", from, code, n))
+		return fmt.Sprintf("%s returned HTTP %d%s", from, code, n)
 	case core.FailServer:
-		return said(fmt.Sprintf("%s returned HTTP %d%s", from, c.Status, n))
+		return fmt.Sprintf("%s returned HTTP %d%s", from, c.Status, n)
 	case core.FailRate:
-		return said(from + " was rate-limited" + n)
+		return from + " was rate-limited" + n
 	}
-	return said(from + " failed" + status + n)
+	if c.Status != 0 {
+		return fmt.Sprintf("%s failed (HTTP %d)%s", from, c.Status, n)
+	}
+	return from + " failed" + n
 }
 
 // waitText is a wait as long as its seconds matter: "45s", "2m 15s", "2m", "1h 5m".

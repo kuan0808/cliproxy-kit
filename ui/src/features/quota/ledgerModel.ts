@@ -46,6 +46,8 @@ export interface LedgerRow {
   sameAs: string;
   /** That credential as the ledger names it, though a search may hide its row; null for none. */
   twin: { fileName: string; email: string } | null;
+  /** While it rests: when it is tried again and after how many failures; null otherwise. */
+  resting: { untilMs: number; moments: number } | null;
 }
 
 export interface LedgerGroup {
@@ -222,6 +224,7 @@ export function buildLedger(
           twin: byId.has(cred.sameAs)
             ? { fileName: cred.sameAs, email: byId.get(cred.sameAs)?.email ?? '' }
             : null,
+          resting: cred.rest && cred.rest.untilMs > nowMs ? cred.rest : null,
         }));
       return buildGroup(provider, view.health, rows, nowMs);
     })

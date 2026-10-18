@@ -181,6 +181,8 @@ type CredView struct {
 	// SameAs is the credential the proxy also holds that logs in to the same provider account: its
 	// quota is that one's, counted once.
 	SameAs string `json:"same_as,omitempty"`
+	// Rest is its rest and trial (rest.go), while it has one.
+	Rest *RestView `json:"rest,omitempty"`
 }
 
 // WindowView is one window as displayed.
@@ -336,7 +338,7 @@ func (s *State) buildLocked() Snapshot {
 		if v.AuthID != "" && now.Sub(sess.LastSeen) <= activeAfter {
 			sessionsPerCred[v.AuthID]++
 		}
-		s.fillImminentLocked(v, now)
+		s.fillImminentLocked(v, sess, now)
 		sessions[root] = v
 	}
 	byProvider := map[string][]Candidate{}
@@ -354,7 +356,7 @@ func (s *State) buildLocked() Snapshot {
 			c := s.creds[r.ID]
 			v := &CredView{ID: c.ID, Index: c.Index, Label: masked[c.ID], Email: c.Email, Plan: c.Plan, Order: i + 1,
 				Tier: r.Tier, Reason: r.Reason, Sessions: sessionsPerCred[c.ID],
-				Unavailable: c.Disabled || r.Blocked, Disabled: c.Disabled, BackAt: r.BackAt}
+				Unavailable: c.Disabled || r.Blocked, Disabled: c.Disabled, BackAt: r.BackAt, Rest: c.health.view(now)}
 			v.Windows = s.windowViewsLocked(c, now)
 			for kind := range c.Absent {
 				v.Absent = append(v.Absent, kind)
@@ -429,7 +431,7 @@ func (s *State) lookupModelLocked(sess *session, next string) string {
 // account it will most likely land on. An account read as used up often answers a while longer:
 // the session stays until it turns a request away, then moves. An account that is only running
 // low keeps serving the session it holds.
-func (s *State) fillImminentLocked(v *SessionView, now time.Time) {
+func (s *State) fillImminentLocked(v *SessionView, sess *session, now time.Time) {
 	c := s.creds[v.AuthID]
 	if c == nil {
 		return
@@ -439,6 +441,14 @@ func (s *State) fillImminentLocked(v *SessionView, now time.Time) {
 		model = v.RequestedModel
 	}
 	r := s.classifyLocked(c, model, now)
+	if r.Resting {
+		// Its next turn goes to the account a failover would take now, when one is known to be
+		// offered: no warning without it.
+		if to := s.takeoverLocked(c, s.lookupModelLocked(sess, model), now); to != "" {
+			v.SwitchImminent, v.SwitchReason, v.NextAuthID = true, r.Reason, to
+		}
+		return
+	}
 	if !r.Blocked {
 		return
 	}
@@ -454,6 +464,24 @@ func (s *State) fillImminentLocked(v *SessionView, now time.Time) {
 			v.NextAuthID = next.ID
 		}
 	}
+}
+
+// takeoverLocked is the account a failover off from would take now, by evidence only: the
+// best-ranked other account of its provider, not resting, that can take the model by its listings
+// (canTakeLocked); "" when none is known.
+func (s *State) takeoverLocked(from *Cred, model string, now time.Time) string {
+	var cands []Candidate
+	for _, other := range s.creds {
+		if other.Provider == from.Provider && other.ID != from.ID {
+			cands = append(cands, Candidate{ID: other.ID, Provider: other.Provider})
+		}
+	}
+	for _, r := range s.rankLocked(cands, model, now, false) {
+		if !r.Resting && s.canTakeLocked(r.ID, model, now) {
+			return r.ID
+		}
+	}
+	return ""
 }
 
 func (s *State) windowViewsLocked(c *Cred, now time.Time) []WindowView {

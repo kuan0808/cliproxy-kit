@@ -15,7 +15,7 @@ import { bandFacts } from '../hooks/view'
 import MOVES from './moves.js'
 
 /** The expected wording of every move, which the plugin's Codex notice tests read too. */
-const moves = (MOVES as { moves: { name: string; switch: Omit<SnapSwitch, 'from' | 'to' | 'at'>; why: string; short: string }[] }).moves
+const moves = (MOVES as { moves: { name: string; switch: Omit<SnapSwitch, 'from' | 'to' | 'at'>; until_in?: number; why: string; short: string }[] }).moves
 
 const NOW = Date.parse('2026-10-04T12:00:00Z')
 const iso = (ms: number) => new Date(NOW + ms).toISOString()
@@ -1306,6 +1306,8 @@ test('a move says why from its record, in a short form where the row would not f
       generated_at: new Date(clock.now()).toISOString(),
       sessions: { s1: { ...SNAP.sessions.s1!, auth_id: 'claude-k', served_auth_id: 'claude-k', last_switch: { from: 'claude-d', to: 'claude-k', at: new Date(clock.now() - 60_000).toISOString(), ...m.switch } } },
     }
+    // A rest's end, from the band's now, which a read moves on 10 s.
+    if (m.until_in !== undefined) snapshot.sessions.s1!.last_switch!.cause = { ...m.switch.cause, until: new Date(clock.now() + 10_000 + m.until_in).toISOString() }
     await clock.advance(10_000)
     const full = `Switched d••• → k••• · ${m.why}`
     const short = `Switched d••• → k••• · ${m.short}`
@@ -1360,4 +1362,49 @@ test('a move offers switch back while the plugin says the account it left can ta
   await ui.press({ key: 'switch-back' })
   expect(commands).toMatchObject([{ action: 'switch', auth_id: 'claude-d' }])
   await ui.unmount()
+})
+
+test('a session on a resting account is warned of its move, which counts as cold, and the cards say when it is tried again', { options: { holdColdDefault: true } }, async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  const until = () => new Date(clock.now() + 4 * 60_000 + 10_000).toISOString()
+  const resting = (imminent: boolean): Snap => ({
+    ...SNAP,
+    generated_at: new Date(clock.now()).toISOString(),
+    providers: {
+      claude: {
+        ...SNAP.providers.claude!,
+        // Resting ranks it after k•••, which can serve.
+        credentials: [
+          SNAP.providers.claude!.credentials[1]!,
+          { ...SNAP.providers.claude!.credentials[0]!, reason: 'resting after 2 failures', back_at: until(), rest: { until: until(), moments: 2, last_kind: 'overloaded' } },
+        ],
+      },
+    },
+    sessions: { s1: { ...SNAP.sessions.s1!, ...(imminent ? { switch_imminent: true, switch_reason: 'resting after 2 failures', next_auth_id: 'claude-k' } : {}) } },
+  })
+  // No account known to take it: no warning, and the next turn is not cold for it.
+  snapshot = resting(false)
+  await clock.advance(10_000)
+  expect(await rowText($)).toBe('')
+  expect(await $.prompt.submit(composer('still warm'))).toMatchObject({ text: 'still warm' })
+  snapshot = resting(true)
+  await clock.advance(10_000)
+  expect(await rowText($)).toMatch(/^! d••• resting after 2 failures · moves to k••• \(7% used\) on the next turn/)
+  const cards = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  expect(await cards.find({ text: /^resting, back in 4m$/ })).toBeDefined()
+  await cards.unmount()
+  const narrow = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(80, false) })
+  expect((await narrow.find({ key: 'alert' }))?.text).toMatch(/^! d••• resting · moves to k••• next turn/)
+  await narrow.unmount()
+  // A message into that turn is held as for any move.
+  const held = await $.prompt.submit(composer('the login page next'))
+  expect(held).toMatchObject({ drop: expect.stringMatching(/held by quota-band/) })
+  expect(await rowText($, 'ask')).toMatch(/^\? Message held: next turn starts cold \(moves to k•••, d••• resting\): rewrites 412k tokens/)
+  // The pane says why it rests and when it is tried again, as for a limited account.
+  const pane = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...PANE_MOUNT } as never)
+  expect(await pane.find({ text: /^Max 20x · resting after 2 failures, back in 4m$/ })).toBeDefined()
+  await pane.unmount()
 })

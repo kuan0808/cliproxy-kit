@@ -93,3 +93,22 @@ describe('QuotaLedger rendering', () => {
     expect(markup).not.toContain('Weekly left, summed');
   });
 });
+
+describe('a resting account', () => {
+  test('reads orange, apart from an account that cannot serve, with when it is tried again', () => {
+    const raw = structuredClone(rawSnapshot) as typeof rawSnapshot;
+    const claude = (raw.providers as Record<string, { credentials: Record<string, unknown>[] }>)
+      .claude!;
+    const bob = claude.credentials.find((c) => c.id === 'claude-bob@example.com.json')!;
+    bob.rest = { until: new Date(NOW_MS + 4 * 60_000).toISOString(), moments: 2 };
+    const resting = normalizeQuotaPilotSnapshot(raw)!;
+    const markup = render({ snapshot: { status: 'live', snapshot: resting, failure: null } });
+    expect(markup).toMatch(/class="[^"]*resting[^"]*">resting after 2 failures · back in 4 min</);
+    // Once the rest has ended, nothing says so.
+    const later = render({
+      snapshot: { status: 'live', snapshot: resting, failure: null },
+      now: NOW_MS + 5 * 60_000,
+    });
+    expect(later).not.toContain('resting after');
+  });
+});

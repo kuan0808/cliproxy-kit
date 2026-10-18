@@ -10,6 +10,8 @@ export type SnapWindow = {
 }
 
 export type SnapCred = {
+  /** Its rest, while it has one (resting, or on trial after one). */
+  rest?: SnapRest
   id: string
   auth_index: string
   label: string
@@ -79,7 +81,10 @@ export type SnapSession = {
 export type SnapSwitch = { from: string; to: string; at: string; reason: string; kind?: string; cause?: SnapCause }
 
 /** What quota-pilot saw of why a session left an account. */
-export type SnapCause = { kind?: string; status?: number; wait_ms?: number; count?: number; reason?: string; model?: string }
+export type SnapCause = { kind?: string; status?: number; wait_ms?: number; count?: number; reason?: string; model?: string; until?: string }
+
+/** An account that kept failing rests until `until`, then is on trial until it serves. */
+export type SnapRest = { until: string; moments: number; last_kind?: string; trial?: boolean }
 
 export type SnapAck = { command_id: string; session?: string; status: string; reason?: string; at: string }
 

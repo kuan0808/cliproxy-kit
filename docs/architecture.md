@@ -66,6 +66,44 @@ the proxy chose lives in `state.json` for 24 hours after its last use, and one t
 days, as long as Claude Code keeps a session to resume, so a resumed session keeps its account,
 route and prompt cache.
 
+### When an account fails
+
+quota-pilot never changes the proxy's own state: the proxy's cooldown decides which accounts are
+offered, and quota-pilot chooses among them. What it adds:
+
+1. **Classify.** Each failed attempt gets a kind from its status, error body, time to first
+   response and wait (see [Where quota went](#where-quota-went)).
+2. **Move.** The proxy gives a failed request to another account; the success there moves the
+   session, and its switch record says why (see [quota-band](#quota-band)). quota-pilot never moves
+   a session back on its own: the new account's cache is the warm one.
+3. **Rest.** An account that keeps failing rests, what other proxies call a circuit breaker:
+   failures that end within 10 s of a moment's first failure are one failure moment (requests that
+   hung from different times and failed together, or several sessions at once), and only hang,
+   connection, timeout, overloaded and server failures count, the ones the proxy cools no account
+   for, or only briefly; after the others (rate, quota, sign-in, model, request, other) the proxy
+   holds the account back itself, for as long as it judges. A second moment within 15 minutes, with
+   no success on the account between, rests it for 5 minutes.
+4. **Trial.** After a rest the account is on trial until it serves: one failure moment rests it
+   again at once, for twice as long (10, 20, 40, then 60 minutes at most). One success ends a rest
+   or a trial, and the count starts over.
+
+While an account rests it ranks after every account that can serve and is not resting, whatever
+their tiers, so a new session gets it only when nothing else can; its sessions move at their next
+turn to such an account when one is offered (the move's kind `rest`), and stay when none is.
+Requests already running on it are left alone. Rest is not a quota limit: a resting account is not
+used up, a provider whose accounts all rest is not exhausted, and `cross_provider: auto` never
+moves a session to another provider for it. Before a session's next turn leaves a resting account,
+the band warns and counts that turn as cold, toward the account a failover would take now: the
+best-ranked other account, not resting, not used up, that a pick has listed for the session's model
+since that account last failed (`switch_back`'s evidence); with none known, no warning.
+
+| Constant | Value | Why |
+| --- | --- | --- |
+| Failure moment | 10 s | Requests that hung together, or several sessions at once, are one event, not several |
+| Second moment | within 15 min | Two separate failures close together; one failure is not a pattern |
+| First rest | 5 min | Longer than the proxy's 60 s pause after a 529, short enough to lose little |
+| Rest after a failed trial | doubled, 60 min at most | An account that fails again at once is still unwell |
+
 ### Moving a session to another provider
 
 `cross_provider: off` (the default) never changes provider: the band offers a one-press switch to
@@ -433,6 +471,8 @@ response headers arrive; and it retries a 408, 409, 429, 5xx or 529 up to 10 tim
 
 ## Limitations
 
+- Rests and trials live in memory, like refusals: a proxy restart forgets them. An account that
+  alternates failure and success never rests, as each success starts the count over.
 - Crossing providers changes the model and rewrites the prompt cache; Claude Code does not know a
   non-Claude model's context size, so its auto-compact timing may be off.
 - Remote Control, voice dictation and claude.ai connectors do not work through a proxy.

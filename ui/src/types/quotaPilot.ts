@@ -38,6 +38,13 @@ export interface QuotaPilotCredential {
   absent: string[];
   /** The credential held that logs in to the same provider account: one quota, counted under that one; '' for none. */
   sameAs: string;
+  /** Its rest after failures in a row, while it has one: when it is tried again, after how many. */
+  rest: QuotaPilotRest | null;
+}
+
+export interface QuotaPilotRest {
+  untilMs: number;
+  moments: number;
 }
 
 export interface QuotaPilotProvider {

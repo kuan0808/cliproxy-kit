@@ -4,7 +4,7 @@
 import type { Elements, RenderChildren, RenderElement } from 'claude-code'
 
 import type { Snap } from '../types'
-import { blockedOthers, fmtDuration, kindLabel, missingText, sevIn, untilIso, type Palette, type SessionAccount } from './logic'
+import { blockedOthers, fmtDuration, kindLabel, missingText, restingNow, sevIn, untilIso, type Palette, type SessionAccount } from './logic'
 import type { SettingRow } from './view'
 
 /** What both surfaces' tables have, which is all the pane draws with. */
@@ -62,14 +62,16 @@ export function accountsPart(els: Els, P: Palette, snap: Snap, acct: SessionAcco
     for (const c of view.credentials) {
       const mine = acct?.session.auth_id === c.id
       const blocked = c.tier === 3
+      // A resting account, in the form of a limited one: why, and when it is tried again.
+      const rest = restingNow(c, now) ? `${c.reason}, back in ${fmtDuration(Date.parse(c.rest!.until) - now)}` : ''
       const same = c.same_as ? view.credentials.find(x => x.id === c.same_as)?.label : undefined
       rows.push(
         <Box key={`c-${c.id}`} marginTop={1} width={cols} justifyContent="space-between">
           <Text bold color={mine ? P.accent : P.fg}>{c.label}</Text>
           {mine ? <Text color={P.accent}>this session</Text> : null}
         </Box>,
-        <Text key={`s-${c.id}`} color={blocked ? P.orange : P.dim} wrap="truncate-end">
-          {[c.plan, same ? `same account as ${same}` : '', blocked ? blockedOthers({ ...view, credentials: [c] }, '', now).replace(`${c.label} `, '') : '', !blocked && c.sessions ? `${c.sessions} ${c.sessions === 1 ? 'session' : 'sessions'}` : ''].filter(Boolean).join(' · ') || ' '}
+        <Text key={`s-${c.id}`} color={blocked || rest ? P.orange : P.dim} wrap="truncate-end">
+          {[c.plan, same ? `same account as ${same}` : '', blocked ? blockedOthers({ ...view, credentials: [c] }, '', now).replace(`${c.label} `, '') : rest, !blocked && !rest && c.sessions ? `${c.sessions} ${c.sessions === 1 ? 'session' : 'sessions'}` : ''].filter(Boolean).join(' · ') || ' '}
         </Text>,
       )
       for (const kind of kinds) {

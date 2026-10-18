@@ -85,7 +85,14 @@ const normalizeCredential = (value: unknown): QuotaPilotCredential | null => {
       : [],
     absent: asStrings(value.absent),
     sameAs: asString(value.same_as),
+    rest: normalizeRest(value.rest),
   };
+};
+
+const normalizeRest = (value: unknown): QuotaPilotCredential['rest'] => {
+  if (!isRecord(value)) return null;
+  const untilMs = asInstantMs(value.until);
+  return untilMs === null ? null : { untilMs, moments: Math.max(0, asNumber(value.moments)) };
 };
 
 const normalizeProvider = (value: unknown): QuotaPilotProvider => {

@@ -47,7 +47,7 @@ function QuotaPilotPage({ resolvedTheme }: { resolvedTheme: ResolvedTheme }) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
 
-  const { types, counts, accounts, sessions, attention } = useMemo(() => {
+  const { types, counts, accounts, sessions, attention, resting } = useMemo(() => {
     const providers = Object.entries(live?.providers ?? {}).filter(
       ([, provider]) => provider.credentials.length > 0
     );
@@ -63,6 +63,14 @@ function QuotaPilotPage({ resolvedTheme }: { resolvedTheme: ResolvedTheme }) {
       accounts: credentials.length,
       sessions: credentials.reduce((sum, credential) => sum + credential.sessions, 0),
       attention: credentials.filter((credential) => credential.unavailable).length,
+      // Resting is told apart from unavailable: the account still serves when nothing else can. As
+      // of the snapshot, which the page reads again every 15 seconds.
+      resting: credentials.filter(
+        (credential) =>
+          !credential.unavailable &&
+          credential.rest !== null &&
+          credential.rest.untilMs > (live?.generatedAtMs ?? 0)
+      ).length,
     };
   }, [live]);
   // A remembered tab whose provider is gone falls back to all; while loading it is kept.
@@ -133,6 +141,16 @@ function QuotaPilotPage({ resolvedTheme }: { resolvedTheme: ResolvedTheme }) {
                     </span>
                     <span className={headerStyles.metaAttention}>
                       {t('quota_pilot.meta_attention', { count: attention })}
+                    </span>
+                  </>
+                )}
+                {resting > 0 && (
+                  <>
+                    <span className={headerStyles.metaDot} aria-hidden="true">
+                      ·
+                    </span>
+                    <span className={headerStyles.metaResting}>
+                      {t('quota_pilot.meta_resting', { count: resting })}
                     </span>
                   </>
                 )}

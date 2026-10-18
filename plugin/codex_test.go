@@ -137,13 +137,19 @@ func TestTheCodexNoticeWordsAMoveAsTheBandDoes(t *testing.T) {
 			Switch core.Switch `json:"switch"`
 			Why    string      `json:"why"`
 			Short  string      `json:"short"`
+			// UntilIn, when set, is when a rest ends, from now.
+			UntilIn *int64 `json:"until_in"`
 		} `json:"moves"`
 	}
 	if !found || json.Unmarshal([]byte(data), &fixture) != nil || len(fixture.Moves) == 0 {
 		t.Fatalf("the fixture does not read: %.200s", data)
 	}
+	now := time.Now()
 	for _, m := range fixture.Moves {
-		if why, short := moveWhy(m.Switch, "d•••"); why != m.Why || short != m.Short {
+		if m.UntilIn != nil {
+			m.Switch.Cause.Until = now.Add(time.Duration(*m.UntilIn) * time.Millisecond)
+		}
+		if why, short := moveWhy(m.Switch, "d•••", now); why != m.Why || short != m.Short {
 			t.Errorf("%s: %q, %q; want %q, %q", m.Name, why, short, m.Why, m.Short)
 		}
 	}

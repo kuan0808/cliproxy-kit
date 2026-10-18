@@ -1,6 +1,9 @@
 // Pure helpers for the band: no `$`, so the tests call them directly.
 import type { Auto, BandError, CacheInfo, ModelInfo, Pending, Snap, SnapCred, SnapProvider, SnapSession, SnapSwitch, SnapWindow } from '../types'
 
+/** Whether an account rests now: it serves only when nothing else can. */
+export const restingNow = (c: SnapCred | undefined, now: number): boolean => Boolean(c?.rest && Date.parse(c.rest.until) > now)
+
 export const C = {
   fg: '#ebdbb2',
   dim: '#928374',
@@ -237,7 +240,8 @@ export function otherAccounts(view: SnapProvider, current: string): SnapCred[] {
 /** The account a new session or a switch would land on next, other than `current`. */
 export function nextUp(view: SnapProvider, current: string, now: number): string {
   const others = otherAccounts(view, current).filter(c => !c.disabled)
-  const ready = others.find(c => c.tier < 3)
+  // A resting account takes a session only when nothing else can.
+  const ready = others.find(c => c.tier < 3 && !restingNow(c, now)) ?? others.find(c => c.tier < 3)
   if (ready) return `next up: ${ready.label} ${usedText(windowOf(ready, '7d'))}`
   // When the window that stops each account resets: the plugin knows which one it is.
   const back = others
@@ -317,10 +321,16 @@ const times = (n: number | undefined) => (n && n > 1 ? (n === 2 ? ' twice' : ` $
  * (tests/moves.json holds both sides' expected wording). A record from an older plugin says only
  * what it can confirm.
  */
-export function moveWhy(sw: SnapSwitch, from: string): { why: string; short: string } {
+export function moveWhy(sw: SnapSwitch, from: string, now: number): { why: string; short: string } {
   const c = sw.cause ?? {}
   const status = c.status ? ` (HTTP ${c.status})` : ''
   const said = (why: string, short = why.split('; ')[0]!) => ({ why, short })
+  if (sw.kind === 'rest') {
+    // The failures that rested it, while their kind agrees, and when it is tried again.
+    const left = Date.parse(c.until ?? '') - now
+    const what = c.kind ? failedWhy(c, from) : `${from} resting after ${c.count ?? 2} failures`
+    return left > 0 ? { why: c.kind ? `${what}; resting, back in ${fmtDuration(left)}` : what, short: `${from} resting` } : said(what)
+  }
   switch (sw.kind) {
     case undefined:
     case '':
@@ -341,22 +351,27 @@ export function moveWhy(sw: SnapSwitch, from: string): { why: string; short: str
     case 'left-out':
       return said(`the proxy left ${from} out; no failure recorded`, 'reason unknown')
   }
+  return said(failedWhy(c, from), c.kind === 'hang' ? `${from} hung` : undefined)
+}
+
+/** What a failure, or a run of failures of one kind, did: "d••• returned HTTP 529 twice". */
+function failedWhy(c: NonNullable<SnapSwitch['cause']>, from: string): string {
   const n = times(c.count)
   switch (c.kind) {
     case 'hang':
-      return said(n ? `${from} hung${n}` : `${from} hung for ${fmtWait(c.wait_ms ?? 0)}`, `${from} hung`)
+      return n ? `${from} hung${n}` : `${from} hung for ${fmtWait(c.wait_ms ?? 0)}`
     case 'connection':
-      return said(`${from} lost its connection${n}`)
+      return `${from} lost its connection${n}`
     case 'timeout':
-      return said(`${from} timed out${n}`)
+      return `${from} timed out${n}`
     case 'overloaded':
-      return said(`${from} returned HTTP ${c.status || 529}${n}`)
+      return `${from} returned HTTP ${c.status || 529}${n}`
     case 'server':
-      return said(`${from} returned HTTP ${c.status}${n}`)
+      return `${from} returned HTTP ${c.status}${n}`
     case 'rate':
-      return said(`${from} was rate-limited${n}`)
+      return `${from} was rate-limited${n}`
   }
-  return said(`${from} failed${status}${n}`)
+  return `${from} failed${c.status ? ` (HTTP ${c.status})` : ''}${n}`
 }
 
 /**
@@ -380,7 +395,19 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
       action: fallback ? 'route' : undefined,
     }
   }
-  if (session.switch_imminent) {
+  if (session.switch_imminent && session.switch_reason?.startsWith('resting')) {
+    // A resting account gives its session to the account the plugin names, at its next turn.
+    const label = acct.cred?.label ?? 'this account'
+    const next = view.credentials.find(c => c.id === session.next_auth_id)
+    if (next) {
+      return {
+        level: 'warn',
+        text: `${label} ${session.switch_reason} · moves to ${next.label} (${usedText(windowOf(next, '7d'))}) on the next turn`,
+        short: `${label} resting · moves to ${next.label} next turn`,
+      }
+    }
+  }
+  if (session.switch_imminent && !session.switch_reason?.startsWith('resting')) {
     // An account read as used up often answers a while longer: the session moves once it refuses.
     const reason = session.switch_reason ?? 'quota low'
     const label = acct.cred?.label ?? 'this account'
@@ -395,7 +422,7 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
   if (sw && sw.at !== dismissed && now - Date.parse(sw.at) < 15 * MIN) {
     const from = view.credentials.find(c => c.id === sw.from)?.label ?? 'previous account'
     const to = view.credentials.find(c => c.id === sw.to)?.label ?? 'another account'
-    const { why, short } = moveWhy(sw, from)
+    const { why, short } = moveWhy(sw, from, now)
     const back = session.switch_back && session.switch_back === sw.from && sw.kind !== 'user' ? sw.from : undefined
     return { level: 'info', text: `Switched ${from} → ${to} · ${why}`, short: `Switched ${from} → ${to} · ${short}`, action: 'dismiss', key: sw.at, back }
   }
@@ -668,6 +695,12 @@ export function coldTurn(cache: CacheInfo, acct: SessionAccount | null, asked: s
   // A route to another model of the same account moves nothing the proxy tells, but what the
   // last reply's route was, as the band saw it then.
   const rerouted = s && cache.route !== null && (s.route?.model ?? '') !== cache.route
+  // A move the plugin expects at the next turn (its account rests) is as cold as one made.
+  const next = s?.switch_imminent && s.switch_reason?.startsWith('resting') ? acct?.view.credentials.find(c => c.id === s.next_auth_id) : undefined
+  if (s && next && !nextTurnMoves(acct)) {
+    const label = acct?.cred?.label ?? 'its account'
+    return { reason: 'moved', why: `moves to ${next.label}, ${label} resting`, key: movedKey(cache, next.id), tokens }
+  }
   if (s && (nextTurnMoves(acct) || rerouted)) {
     const label = acct?.view.credentials.find(c => c.id === s.auth_id)?.label ?? 'another account'
     return { reason: 'moved', why: s.route ? `routed to ${s.route.model}` : `moved to ${label}`, key: movedKey(cache, s.auth_id), tokens }

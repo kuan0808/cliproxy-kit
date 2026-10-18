@@ -224,6 +224,34 @@ export default {
       "short": "d••• is disabled"
     },
     {
+      "name": "two 529s, and it rests",
+      "switch": { "kind": "rest", "reason": "previous account unavailable; weekly quota resets soonest", "cause": { "kind": "overloaded", "status": 529, "wait_ms": 900, "count": 2 } },
+      "until_in": 300000,
+      "why": "d••• returned HTTP 529 twice; resting, back in 5m",
+      "short": "d••• resting"
+    },
+    {
+      "name": "two hangs, and it rests",
+      "switch": { "kind": "rest", "reason": "previous account unavailable; weekly quota resets soonest", "cause": { "kind": "hang", "wait_ms": 135000, "count": 2 } },
+      "until_in": 300000,
+      "why": "d••• hung twice; resting, back in 5m",
+      "short": "d••• resting"
+    },
+    {
+      "name": "failures of several kinds, and it rests",
+      "switch": { "kind": "rest", "reason": "previous account unavailable; weekly quota resets soonest", "cause": { "count": 2 } },
+      "until_in": 240000,
+      "why": "d••• resting after 2 failures",
+      "short": "d••• resting"
+    },
+    {
+      "name": "a rest that has ended",
+      "switch": { "kind": "rest", "reason": "previous account unavailable; weekly quota resets soonest", "cause": { "kind": "overloaded", "status": 529, "count": 2 } },
+      "until_in": -60000,
+      "why": "d••• returned HTTP 529 twice",
+      "short": "d••• returned HTTP 529 twice"
+    },
+    {
       "name": "the user's own switch",
       "switch": {
         "kind": "user",

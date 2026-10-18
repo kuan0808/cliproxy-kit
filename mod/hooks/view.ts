@@ -21,6 +21,7 @@ import {
   pooled,
   providerOfModel,
   providerTitle,
+  restingNow,
   rewriteBrief,
   rewriteText,
   sessionAccount,
@@ -183,8 +184,9 @@ export function bandFacts(i: BandInput, act: Do): Facts {
   const likely = sess.proxied && !acct?.cred ? likelyAccount(snap, acct?.provider ?? providerOfModel(sess.model)) : null
   if (acct?.cred) {
     account = acct.cred.label
-    // The plan only: a move is told once, by the row above the band.
-    note = acct.cred.plan ?? ''
+    // The plan only: a move is told once, by the row above the band. While the account rests, when
+    // it is tried again.
+    note = restingNow(acct.cred, now) ? `resting, back in ${fmtDuration(Date.parse(acct.cred.rest!.until) - now)}` : acct.cred.plan ?? ''
     five = meterOf(windowOf(acct.cred, '5h'))
     week = meterOf(weeklyFor(acct.cred, model))
   } else if (likely) {
@@ -339,7 +341,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
     const acts: Act[] = alert.action === 'route' && fbProvider && fbModel && menu.canSend
       ? [{ key: 'route', label: `use ${fbModel}`, name: true, run: () => menu.pick({ action: 'route', fields: { provider: fbProvider, model: fbModel }, text: `Route to ${fbModel}` }) }]
       : alert.action === 'handoff' && !working ? [handoff] : []
-    return { key: 'alert', tone: alert.level, title: alert.text, detail: '', acts }
+    return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts }
   }
   const cold = c.cold
   if (cold && !working && cold.tokens >= COLD_NOTICE_FLOOR && !coldConfirmed(cold, ui.coldDismissed)) {

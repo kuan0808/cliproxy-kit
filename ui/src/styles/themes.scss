@@ -4,6 +4,7 @@
 
 // 浅色主题（默认）
 :root {
+  --rest-color: #b8641c; // a resting account: orange, apart from the error colour
   // 极简暖灰：浅色模式
   --bg-secondary: #faf9f5; // 页面背景（纸感）
   --bg-primary: #f0eee8; // 容器/卡片背景
@@ -94,6 +95,7 @@
 
 // 纯白主题
 [data-theme='white'] {
+  --rest-color: #b8641c; // a resting account: orange, apart from the error colour
   --bg-secondary: #ffffff;
   --bg-primary: #ffffff;
   --bg-tertiary: #f6f6f6;
@@ -164,6 +166,7 @@
 
 // 深色主题（#191919）
 [data-theme='dark'] {
+  --rest-color: #ef8a3c; // a resting account: orange, apart from the error colour
   // 极简暖灰：深色模式（提升对比度与层级）
   --bg-secondary: #151412; // 页面背景
   --bg-primary: #1d1b18; // 容器/卡片背景
