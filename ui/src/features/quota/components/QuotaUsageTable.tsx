@@ -1020,22 +1020,24 @@ export function SessionDetailView({
                       </div>
                     ))}
                   </dl>
-            </>
-          )}
+                </>
+              )}
 
-          <div className={styles.subhead}>{t('quota_usage.main_vs_agent')}</div>
-          <div className={styles.duo} aria-hidden="true">
-            <span style={{ width: `${total > 0 ? (1 - d.agent / total) * 100 : 100}%` }} />
-            <span style={{ width: `${total > 0 ? (d.agent / total) * 100 : 0}%` }} />
-          </div>
-          <div className={styles.duoLegend}>
-            <span>
-              {t('quota_usage.main', { value: formatShare(total > 0 ? 1 - d.agent / total : 1) })}
-            </span>
-            <span>
-              {t('quota_usage.agent', { value: formatShare(total > 0 ? d.agent / total : 0) })}
-            </span>
-          </div>
+              <div className={styles.subhead}>{t('quota_usage.main_vs_agent')}</div>
+              <div className={styles.duo} aria-hidden="true">
+                <span style={{ width: `${total > 0 ? (1 - d.agent / total) * 100 : 100}%` }} />
+                <span style={{ width: `${total > 0 ? (d.agent / total) * 100 : 0}%` }} />
+              </div>
+              <div className={styles.duoLegend}>
+                <span>
+                  {t('quota_usage.main', {
+                    value: formatShare(total > 0 ? 1 - d.agent / total : 1),
+                  })}
+                </span>
+                <span>
+                  {t('quota_usage.agent', { value: formatShare(total > 0 ? d.agent / total : 0) })}
+                </span>
+              </div>
             </>
           )}
 
