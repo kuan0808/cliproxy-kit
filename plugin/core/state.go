@@ -111,6 +111,9 @@ type Binding struct {
 	// At is when the request that set it was sent: a request sent earlier that answers later
 	// cannot take the binding back.
 	At time.Time `json:"at,omitzero"`
+	// Kind and Cause say why the thread came to this account, as its switch record does.
+	Kind  string `json:"kind,omitempty"`
+	Cause *Cause `json:"cause,omitempty"`
 }
 
 // Route is a per-session cross-provider override: the band's, or the proxy's own takeover (Auto).
@@ -156,6 +159,11 @@ type Usage struct {
 	TierAsked      string // the service tier the client asked for, as the host read it; "auto" for none
 	TierServed     string // the service tier the provider reported serving it at; "" when it did not say
 	ClientKey      string // the client key the proxy accepted the request with
+	// ErrorText is a failed attempt's error, read to classify it and never kept; Latency how long
+	// the attempt waited; TTFT its time to the first response, 0 when none came.
+	ErrorText string
+	Latency   time.Duration
+	TTFT      time.Duration
 }
 
 type session struct {
@@ -174,6 +182,11 @@ type session struct {
 	// without api-keys), once Owned: only that key's band commands it.
 	Client string
 	Owned  bool
+	// RoutedModel is the model its last main turn was picked for, which the proxy's picks name (an
+	// alias as the client named it, a route's model); Model is the one the executor ran.
+	RoutedModel string
+	// Generation advances whenever where its next turn goes changes: a move, a switch, a route.
+	Generation uint64
 }
 
 // Tokens are summed or single-request token counts of a session's main thread.
@@ -185,13 +198,43 @@ type Tokens struct {
 	At            time.Time `json:"at,omitempty"`
 }
 
-// Switch records a change of serving credential for a session.
+// Switch records a change of the account a session's main conversation is bound to. Reason is the
+// binding's, for an older band; Kind and Cause say why it changed.
 type Switch struct {
 	From   string    `json:"from"`
 	To     string    `json:"to"`
 	At     time.Time `json:"at"`
 	Reason string    `json:"reason"`
+	Kind   string    `json:"kind,omitempty"`
+	Cause  *Cause    `json:"cause,omitempty"`
 }
+
+// Move kinds: why a session left an account.
+const (
+	MoveUser    = "user"     // the user switched it
+	MoveQuota   = "quota"    // the account was used up and refused a request
+	MoveIdle    = "idle"     // the account ran low while the session was idle past its cache
+	MoveGone    = "gone"     // the account was removed or disabled
+	MoveSignIn  = "sign-in"  // the account refused its sign-in
+	MoveModel   = "model"    // the account does not serve the model
+	MoveLeftOut = "left-out" // the proxy left it out, and no failure of it was seen
+	MoveFailed  = "failed"   // it failed
+)
+
+// Cause is what quota-pilot saw of why a session left an account; only what it has evidence of.
+type Cause struct {
+	Kind   string `json:"kind,omitempty"`    // the failure's kind
+	Status int    `json:"status,omitempty"`  // its HTTP status, 0 for none
+	WaitMs int64  `json:"wait_ms,omitempty"` // how long it waited
+	Count  int    `json:"count,omitempty"`   // failures of that kind in a row before the session left
+	// Reason is a quota or idle move's reading ("weekly quota used up"), or a gone account's
+	// "removed" or "disabled".
+	Reason string `json:"reason,omitempty"`
+	Model  string `json:"model,omitempty"` // a model move's model
+}
+
+// leaving is why a pick did not answer a binding's account for a model: a move kind and reason.
+type leaving struct{ kind, reason string }
 
 // State is the plugin's whole routing state.
 type State struct {
@@ -209,10 +252,19 @@ type State struct {
 	// tell a conversation turn from a side request of the same session.
 	traces map[string]trace
 	// displaced holds, by binding key, the models for which the bound account was not offered at
-	// the last pick: it cannot serve them, so the next success of that model elsewhere takes the
-	// binding over. By model, as a request beside the conversation on another model may still be
-	// served there.
-	displaced    map[string]map[string]bool
+	// the last pick, with why: it cannot serve them, so the next success of that model elsewhere
+	// takes the binding over. By model, as a request beside the conversation on another model may
+	// still be served there.
+	displaced map[string]map[string]leaving
+	// failures holds, by binding key and model, the bound account's failure since its last success
+	// there: why the session may leave it. In memory only.
+	failures map[string]map[string]*Cause
+	// listed is, per account and model, when a pick last listed it, and failedAt when it last
+	// failed on any model: a pick lists only the accounts the proxy would serve the model with now,
+	// and any failure may cool an account, so only a listing since the failure says it can take the
+	// model. In memory only.
+	listed       map[string]map[string]time.Time
+	failedAt     map[string]time.Time
 	log          []LogEntry // usage log lines not yet written to disk
 	acks         []Ack
 	lastActivity time.Time
@@ -247,7 +299,10 @@ func New(bootID string, now func() time.Time) *State {
 		sessions:   map[string]*session{},
 		routes:     map[string]Route{},
 		traces:     map[string]trace{},
-		displaced:  map[string]map[string]bool{},
+		displaced:  map[string]map[string]leaving{},
+		failures:   map[string]map[string]*Cause{},
+		listed:     map[string]map[string]time.Time{},
+		failedAt:   map[string]time.Time{},
 		identities: map[string]Identity{},
 		clients:    map[string]time.Time{},
 	}
@@ -399,7 +454,9 @@ type SavedSession struct {
 	Owned          bool      `json:"owned,omitempty"`
 	// Last is its last main turn, so a restart does not leave routing to judge a conversation's
 	// size by a continuation that carries only what is new.
-	Last Tokens `json:"last,omitzero"`
+	Last        Tokens `json:"last,omitzero"`
+	RoutedModel string `json:"routed_model,omitempty"`
+	Generation  uint64 `json:"generation,omitempty"`
 }
 
 // Export returns the bindings, routes, sessions and quota readings to save.
@@ -417,7 +474,7 @@ func (s *State) Export() Persisted {
 	for root, sess := range s.sessions {
 		p.Sessions[root] = SavedSession{Provider: sess.Provider, Model: sess.Model, ServedAuth: sess.ServedAuth,
 			RequestedModel: sess.RequestedModel, LastMainAt: sess.LastMainAt, LastSeen: sess.LastSeen, LastSwitch: sess.LastSwitch, Client: sess.Client,
-			Owned: sess.Owned, Last: sess.Last}
+			Owned: sess.Owned, Last: sess.Last, RoutedModel: sess.RoutedModel, Generation: sess.Generation}
 	}
 	for id, c := range s.creds {
 		if len(c.Windows) == 0 && len(c.Absent) == 0 && c.Plan == "" {
@@ -469,7 +526,7 @@ func (s *State) Import(p Persisted) {
 		if now.Sub(saved.LastSeen) <= sessionTTL || chosen[root] {
 			s.sessions[root] = &session{Provider: saved.Provider, Model: saved.Model, ServedAuth: saved.ServedAuth,
 				RequestedModel: saved.RequestedModel, LastMainAt: saved.LastMainAt, LastSeen: saved.LastSeen, LastSwitch: saved.LastSwitch,
-				Client: saved.Client, Owned: saved.Owned, Last: saved.Last}
+				Client: saved.Client, Owned: saved.Owned, Last: saved.Last, RoutedModel: saved.RoutedModel, Generation: saved.Generation}
 		}
 	}
 	for id, ident := range p.Identities {
@@ -763,6 +820,17 @@ func (s *State) Observe(u Usage) {
 	if !u.Failed {
 		delete(s.traces, u.TraceID)
 	}
+	// The model the pick named, by which every per-model state is kept: the one Intercept saw after
+	// routing (an alias as the client named it, a route's model), else the executor's.
+	model := u.Model
+	if known && tr.Model != "" {
+		model = tr.Model
+	}
+	root := RootSession(u.SessionID, u.ParentID)
+	kind := ""
+	if u.Failed && u.AuthID != "" && supported {
+		kind = s.failedLocked(u, provider, root, model, tr.Compact, at, now)
+	}
 	if u.AuthID != "" {
 		var windows []Window
 		if supported {
@@ -787,12 +855,17 @@ func (s *State) Observe(u Usage) {
 				c.refusedAt = at
 			}
 		}
-		if u.Failed && !ran && read {
+		// A failed attempt is written once: as its request line when it ran tokens, else as its
+		// reading, else as a line of its own that no report counts (LogEntry.Counts).
+		if kind != "" {
+			r.Session, r.Agent, r.Model = RawSession(root), u.SessionID != "" && u.SessionID != root, u.Model
+			r.F, r.St, r.W, r.TTFT = kind, u.StatusCode, u.Latency.Milliseconds(), u.TTFT.Milliseconds()
+		}
+		if u.Failed && !ran && (read || kind != "") {
 			r.Poll = true
 			s.log = append(s.log, r)
 		}
 		if !u.Failed || ran {
-			root := RootSession(u.SessionID, u.ParentID)
 			r.Session, r.Agent = RawSession(root), u.SessionID != "" && u.SessionID != root
 			r.Model, r.TierAsked, r.TierServed = u.Model, u.TierAsked, u.TierServed
 			if known {
@@ -800,13 +873,21 @@ func (s *State) Observe(u Usage) {
 			}
 			r.Input = freshInput(provider, u.Input, u.CacheRead, u.CacheCreation)
 			r.Output, r.CacheRead, r.CacheWrite = u.Output, u.CacheRead, u.CacheCreation
+			if !u.Failed && u.TTFT > 0 {
+				r.TTFT = u.TTFT.Milliseconds()
+				// The client's wait, from the request reaching the proxy to this attempt's first
+				// response: every attempt before it included. The attempt's own time before its send
+				// is not measured, so it is a lower bound.
+				if known {
+					r.FW = max(0, at.Add(u.TTFT).Sub(tr.At).Milliseconds())
+				}
+			}
 			s.log = append(s.log, r)
 		}
 	}
 	if u.SessionID == "" {
 		return
 	}
-	root := RootSession(u.SessionID, u.ParentID)
 	sess := s.sessionLocked(root, now)
 	if u.Failed || u.AuthID == "" {
 		return
@@ -816,22 +897,16 @@ func (s *State) Observe(u Usage) {
 		sess.Client, sess.Owned = clientID(u.ClientKey), true
 	}
 	if supported {
-		s.commitLocked(provider, u.SessionID, root, u.AuthID, u.Model, tr.Thread, known && tr.Side, at, now)
+		s.commitLocked(provider, u.SessionID, root, u.AuthID, model, tr.Thread, known && tr.Side, at, now)
 	}
 	if u.SessionID != root || at.Before(sess.LastMainAt) || (known && tr.Side) {
 		return // a subagent, a fork, a side request, or a late record from an older request
 	}
 	sess.LastMainAt = at
-	sess.Provider, sess.Model = provider, u.Model
+	sess.Provider, sess.Model, sess.RoutedModel = provider, u.Model, model
 	// The served account is the one that answered: a late answer from the old account after a
-	// switch names that account, so the cache the band shows is the one that was written.
-	if prev := s.creds[sess.ServedAuth]; prev != nil && prev.Provider == provider && sess.ServedAuth != u.AuthID {
-		reason := ""
-		if b := s.bindings[provider+"|"+root]; b != nil && b.AuthID == u.AuthID {
-			reason = b.Reason
-		}
-		sess.LastSwitch = &Switch{From: sess.ServedAuth, To: u.AuthID, At: now, Reason: reason}
-	}
+	// switch names that account, so the cache the band shows is the one that was written. It is not
+	// a move: only a change of the binding writes the switch record (commitLocked, applyLocked).
 	sess.ServedAuth = u.AuthID
 	// Input without the cached part, which Codex counts in it: the same for every provider.
 	input := freshInput(provider, u.Input, u.CacheRead, u.CacheCreation)
@@ -843,6 +918,39 @@ func (s *State) Observe(u Usage) {
 	s.dirty = true
 }
 
+// failedLocked classifies a failed attempt, notes when its account last failed, and keeps the
+// failure as why the session may leave the account it is bound to.
+func (s *State) failedLocked(u Usage, provider, root, model string, compact bool, at, now time.Time) string {
+	usedUp := false
+	if c := s.creds[u.AuthID]; c != nil {
+		usedUp = s.classifyLocked(c, u.Model, now).Blocked
+	}
+	kind := ClassifyFailure(Attempt{Status: u.StatusCode, Body: u.ErrorText, TTFT: u.TTFT, Wait: u.Latency, Compact: compact, UsedUp: usedUp})
+	if end := at.Add(u.Latency); end.After(s.failedAt[u.AuthID]) {
+		s.failedAt[u.AuthID] = end
+	}
+	if u.SessionID == "" || !healthFailure(kind) {
+		return kind
+	}
+	key, b := s.boundLocked([]string{provider}, u.SessionID, root)
+	if b == nil || b.AuthID != u.AuthID {
+		return kind
+	}
+	m := modelKey(model)
+	if s.failures[key] == nil {
+		s.failures[key] = map[string]*Cause{}
+	}
+	// The first failure since the last success says why; a run of the same kind is counted.
+	if prev := s.failures[key][m]; prev != nil {
+		if prev.Kind == kind {
+			prev.Count++
+		}
+		return kind
+	}
+	s.failures[key][m] = &Cause{Kind: kind, Status: u.StatusCode, WaitMs: u.Latency.Milliseconds(), Count: 1}
+	return kind
+}
+
 // commitLocked moves a thread's binding only after a request succeeded. A request that carried
 // a message thread proves the thread now lives on authID, and so does a turn's success once the
 // bound account stopped being offered. A side request (a permission check, a title) only binds a
@@ -851,7 +959,8 @@ func (s *State) Observe(u Usage) {
 func (s *State) commitLocked(provider, canonical, root, authID, model string, threaded, side bool, at, now time.Time) {
 	key := provider + "|" + canonical
 	b := s.bindings[key]
-	displaced := s.displaced[key][modelKey(model)]
+	m := modelKey(model)
+	why, displaced := s.displaced[key][m]
 	moved := threaded || (displaced && !side)
 	switch {
 	case b != nil && b.AuthID == authID:
@@ -860,7 +969,8 @@ func (s *State) commitLocked(provider, canonical, root, authID, model string, th
 		if at.After(b.At) {
 			b.At = at
 		}
-		delete(s.displaced[key], modelKey(model))
+		delete(s.displaced[key], m)
+		delete(s.failures[key], m)
 		return
 	case b != nil && at.Before(b.At):
 		return // sent before the binding was set: it says nothing of where the thread lives now
@@ -871,13 +981,66 @@ func (s *State) commitLocked(provider, canonical, root, authID, model string, th
 	case b == nil && canonical != root && !threaded:
 		return
 	}
-	delete(s.displaced[key], modelKey(model))
+	delete(s.displaced[key], m)
 	reason := s.classifyLocked(s.creds[authID], model, now).Reason
-	if b != nil {
-		reason = "previous account unavailable; " + reason
+	if b == nil {
+		s.bindings[key] = &Binding{AuthID: authID, Reason: reason, LastUsed: now, At: at}
+		s.dirty = true
+		return
 	}
-	s.bindings[key] = &Binding{AuthID: authID, Reason: reason, LastUsed: now, At: at}
+	reason = "previous account unavailable; " + reason
+	kind, cause := s.moveCauseLocked(key, m, b.AuthID, why, displaced, model, now)
+	s.bindings[key] = &Binding{AuthID: authID, Reason: reason, LastUsed: now, At: at, Kind: kind, Cause: cause}
+	delete(s.failures, key)
+	s.movedLocked(provider, canonical, root, b.AuthID, authID, model, reason, kind, cause, now)
+}
+
+// moveCauseLocked says why a binding left its account, from what quota-pilot saw: what the pick
+// that left it out knew (a refusal, an idle move, an account gone), else the account's failure,
+// else nothing, which says so.
+func (s *State) moveCauseLocked(key, m, from string, why leaving, displaced bool, model string, now time.Time) (string, *Cause) {
+	if displaced && why.kind != "" && why.kind != MoveLeftOut {
+		return why.kind, &Cause{Reason: why.reason}
+	}
+	f := s.failures[key][m]
+	switch {
+	case f == nil:
+		return MoveLeftOut, nil
+	case f.Kind == FailSignIn:
+		return MoveSignIn, f
+	case f.Kind == FailModel:
+		f.Model = model
+		return MoveModel, f
+	case f.Kind == FailQuota:
+		return MoveQuota, &Cause{Reason: s.classifyLocked(s.creds[from], model, now).Reason}
+	}
+	return MoveFailed, f
+}
+
+// movedLocked records a binding that changed account: an event line for the thread, and for the
+// main conversation's own binding its switch record. A child's own thread (a Codex child) moving
+// never writes the main conversation's record.
+func (s *State) movedLocked(provider, canonical, root, from, to, model, reason, kind string, cause *Cause, now time.Time) {
+	s.log = append(s.log, LogEntry{T: now.UnixMilli(), Session: RawSession(root), Agent: canonical != root, Account: to,
+		Provider: provider, Model: model, Poll: true, Ev: EventMove, From: from, Move: kind, Cause: cause})
 	s.dirty = true
+	if canonical != root {
+		return
+	}
+	sess := s.sessionLocked(root, now)
+	sess.LastSwitch = &Switch{From: from, To: to, At: now, Reason: reason, Kind: kind, Cause: cause}
+	sess.Generation++
+}
+
+// canTakeLocked tells whether an account can take a session's model now, by evidence only: held,
+// enabled, not used up for it, and listed by a pick for that model since it last failed.
+func (s *State) canTakeLocked(id, model string, now time.Time) bool {
+	c := s.creds[id]
+	if c == nil || c.Disabled || s.classifyLocked(c, model, now).Blocked {
+		return false
+	}
+	at := s.listed[id][modelKey(model)]
+	return !at.IsZero() && at.After(s.failedAt[id])
 }
 
 // modelKey is a model as a pick and its usage record both name it: without a context or thinking
@@ -941,6 +1104,10 @@ func (s *State) Pick(in PickInput) PickResult {
 	for _, c := range in.Candidates {
 		s.credLocked(c.ID, c.Provider)
 		offered[c.ID] = true
+		if s.listed[c.ID] == nil {
+			s.listed[c.ID] = map[string]time.Time{}
+		}
+		s.listed[c.ID][modelKey(in.Model)] = now
 	}
 	root := RootSession(in.Canonical, in.Parent)
 	s.sessionLocked(root, now)
@@ -954,19 +1121,37 @@ func (s *State) Pick(in PickInput) PickResult {
 		return PickResult{Handled: true, AuthID: b.AuthID, Reason: b.Reason}
 	}
 	reason := best.Reason
+	var why leaving
 	switch {
-	case refused, b != nil && !bound:
+	case refused:
 		reason = "previous account unavailable; " + reason
+		why = leaving{MoveQuota, s.classifyLocked(s.creds[b.AuthID], in.Model, now).Reason}
+	case b != nil && !bound:
+		reason = "previous account unavailable; " + reason
+		why = s.leftOutLocked(b.AuthID)
 	case bound:
 		reason = "moved while idle; " + reason
+		why = leaving{MoveIdle, s.classifyLocked(s.creds[b.AuthID], in.Model, now).Reason}
 	}
 	if b != nil {
 		if s.displaced[key] == nil {
-			s.displaced[key] = map[string]bool{}
+			s.displaced[key] = map[string]leaving{}
 		}
-		s.displaced[key][modelKey(in.Model)] = true
+		s.displaced[key][modelKey(in.Model)] = why
 	}
 	return PickResult{Handled: true, AuthID: best.ID, Reason: reason}
+}
+
+// leftOutLocked is why a pick did not offer a bound account: removed from the proxy, disabled, or
+// for a reason the proxy did not tell.
+func (s *State) leftOutLocked(id string) leaving {
+	switch c := s.creds[id]; {
+	case c == nil:
+		return leaving{MoveGone, "removed"}
+	case c.Disabled:
+		return leaving{MoveGone, "disabled"}
+	}
+	return leaving{kind: MoveLeftOut}
 }
 
 // refusedLocked tells whether a bound session leaves an account that is read as used up and has

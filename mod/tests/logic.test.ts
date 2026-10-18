@@ -327,8 +327,10 @@ describe('accounts', () => {
       providers: { claude: used },
       sessions: { s1: { ...SNAP.sessions.s1!, auth_id: 'claude-k', last_switch: { from: 'claude-d', to: 'claude-k', at, reason: 'previous account unavailable; weekly quota resets soonest' } } },
     }
+    // A record from an older plugin, without a kind: its reason names where the session went, so
+    // the band says nothing of why it left, and never reads it from d•••'s state now.
     const alert = pickAlert(switched, sessionAccount(switched, 's1'), true, NOW)
-    expect(alert).toEqual({ level: 'info', text: 'Switched d••• → k••• · d••• weekly quota used up', action: 'dismiss', key: at })
+    expect(alert).toEqual({ level: 'info', text: 'Switched d••• → k••• · reason not recorded', short: 'Switched d••• → k••• · reason not recorded', action: 'dismiss', key: at })
     expect(pickAlert(switched, sessionAccount(switched, 's1'), true, NOW, at)).toBe(null)
     const later = { ...switched, generated_at: iso(20 * 60_000) }
     expect(pickAlert(later, sessionAccount(later, 's1'), true, NOW + 20 * 60_000)).toBe(null)

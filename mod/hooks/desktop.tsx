@@ -51,7 +51,8 @@ function ring(size: number, parts: { fill: number; color: string }[]): string {
 
 /** The account's mark: its first letter on the brand color. */
 function avatar(size: number, label: string): string {
-  const letter = ([...label.replace(/[^\p{L}\p{N}]/gu, '')][0] ?? '?').toUpperCase().replace(/[<&>"]/g, '')
+  // As the label writes it: d••• is not D•••.
+  const letter = ([...label.replace(/[^\p{L}\p{N}]/gu, '')][0] ?? '?').replace(/[<&>"]/g, '')
   const mid = size / 2
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><circle cx="${mid}" cy="${mid}" r="${mid}" fill="${RING.brand}"/><text x="${mid}" y="${n2(mid + size * 0.18)}" text-anchor="middle" font-size="${n2(size * 0.52)}" font-weight="600" fill="#fff">${letter}</text></svg>`
 }
@@ -109,7 +110,7 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     : { fill: c.frac, color: c.state === 'expiring' ? RING.yellow : RING.green }
 
   // -- the row above the band --
-  const top = f.top ? rowCard(els, f.top) : null
+  const top = f.top ? rowCard(els, f.top, site.bodyColumns) : null
 
   if (strip) {
     // One line: who and what, a small ring per meter, the way into the cards.
@@ -247,18 +248,29 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
   return frame('band', [top, <Box key="cards" flexDirection="column" gap={1}>{grid}</Box>])
 }
 
-/** The row above the band as a card: its sign, its words, its controls, a close control for alerts. */
-function rowCard(els: Els, row: Row): RenderElement {
+/**
+ * The row above the band as a card: its sign, its words, its controls, a close control for alerts.
+ * A row with a short form draws it when the whole row would not fit `columns` on one line.
+ */
+function rowCard(els: Els, row: Row, columns: number): RenderElement {
   const { Box, Text, Button, Svg } = els
   const border = row.tone === 'warn' ? DESK.orange : row.tone === 'ask' ? DESK.aqua : undefined
+  // The sign, the border and the padding take about 6 columns; a button its label and 5.
+  const controls = [...row.acts, ...(row.close ? [row.close] : [])].reduce((n, a) => n + a.label.length + 5, 0)
+  const full = row.detail ? `${row.title} ${row.detail}` : row.title
+  const short = row.short && 6 + full.length + controls > columns ? row.short : ''
   return (
     <Box key={row.key} borderStyle="round" borderColor={border} gap={2} alignItems="center" justifyContent="space-between">
       <Box key="words" gap={1} alignItems="center" flexGrow={1} flexShrink={1} minWidth={0}>
         <Svg source={sign(row.tone)} alt={row.tone === 'warn' ? 'Warning' : row.tone === 'ask' ? 'Question' : 'Note'} width={16} height={16} />
-        <Text>
-          <Text bold>{row.title}</Text>
-          {row.detail ? <Text color={MUTED}>{` ${cap(row.detail)}`}</Text> : null}
-        </Text>
+        {short
+          ? <Text bold>{short}</Text>
+          : (
+            <Text>
+              <Text bold>{row.title}</Text>
+              {row.detail ? <Text color={MUTED}>{` ${cap(row.detail)}`}</Text> : null}
+            </Text>
+          )}
       </Box>
       <Box key="acts" gap={1} alignItems="center" flexShrink={row.acts.length > 3 ? 1 : 0} flexWrap="wrap" justifyContent="flex-end">
         {row.busy ? <Text color={MUTED}>Working…</Text> : null}

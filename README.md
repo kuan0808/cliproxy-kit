@@ -287,6 +287,18 @@ button to flip each.
 `QUOTA_BAND_UNATTENDED=1` in its environment: there the band never holds a message or keeps the
 cache warm, whatever the defaults or a command say, so what it types always goes in.
 
+### When an account fails
+
+When an account fails a session's request, the proxy gives the request to another account, which
+then keeps the session, and the band says why, from what quota-pilot saw of that account: a hang, a
+lost connection, a status, a refused sign-in, a model it does not serve, a used-up quota. There is
+nothing to set; the rules and what each failure is called are in
+[docs/architecture.md](docs/architecture.md#where-quota-went).
+
+| Situation | What happens | What the band shows |
+| --- | --- | --- |
+| An account fails | The session moves to another account, which keeps it | `↪ Switched d••• → k••• · d••• hung for 2m 15s`, with `switch back` once the proxy offers d••• again |
+
 In the desktop app the band draws cards in the app's own light or dark theme, with that account's
 own quota (see [without the proxy](#with-and-without-the-band)):
 
@@ -382,6 +394,9 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   `claude plugin update quota-band@cliproxy-kit`, or by itself once auto-update is on for the
   marketplace under **Marketplaces** in `/plugin`; `/reload-plugins` loads it in a running session.
   Update both: they change together.
+- **From 0.1.16:** a move now says why it happened. Update the band and quota-pilot together: an
+  older band words every move of the new plugin `was unavailable`, and the new band words a move
+  an older plugin made `reason not recorded`.
 - **From 0.1.14:** holding a message before a cold turn and keeping the cache warm are off until you
   turn them on, in `/config` for every session or with `/hold-cold on` and `/keep-warm on` for one.
   `0` in **Hold above** or **Keep warm up to** no longer turns a feature off: it means any size, and
@@ -407,6 +422,8 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex sessions are missing from the page | Codex does not use the proxy yet (step 4). |
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
 | A Codex account has no 5-hour window | Its plan has none; the page and the band say so. |
+| The band says `Switched d••• → k••• · reason not recorded` | quota-pilot is older than the band and does not record why a session moved: update it from the panel's Plugin Store. |
+| A move offers `switch back` | The account the session left can take it again. `switch back` returns, asking first while the cache is warm; quota-pilot never moves a session back on its own, as the new account's cache is the warm one. |
 
 ## Privacy and security
 

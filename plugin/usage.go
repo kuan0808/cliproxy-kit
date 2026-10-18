@@ -128,9 +128,12 @@ func pruneLog(now time.Time) {
 // are written, each account's in time order: a report reads them in memory rather than parsing
 // the files again, which took seconds on a busy machine and grew with the log.
 var logIndex struct {
-	mu     sync.RWMutex // lines, and loaded (with logMu too)
+	mu     sync.RWMutex // lines, events, and loaded (with logMu too)
 	loaded bool
-	lines  map[string][]core.LogEntry // each account's lines ("" for none), oldest first
+	lines  map[string][]core.LogEntry // each account's lines a report counts ("" for none), oldest first
+	// events are the lines no report counts (core.LogEntry.Counts): failures with neither tokens
+	// nor a reading, and binding events, oldest first.
+	events []core.LogEntry
 	// pending are the lines written since they were last taken in, and seq the order the last
 	// line read or written was given (core.LogEntry.Seq), both under logMu, which every writer
 	// holds: a writer never waits on a report.
@@ -179,7 +182,7 @@ func takeLines() {
 // written, under both locks. A file it cannot read whole leaves the index to be read again by
 // the next report, so no line is lost to a file that was out of reach for a moment.
 func loadLogLocked(since time.Time) {
-	logIndex.lines, logIndex.pending = map[string][]core.LogEntry{}, nil
+	logIndex.lines, logIndex.events, logIndex.pending = map[string][]core.LogEntry{}, nil, nil
 	files, _ := filepath.Glob(filepath.Join(usageDir(), "20*.jsonl")) // a month's file sorts after the one before
 	whole := true
 	for _, f := range files {
@@ -192,16 +195,22 @@ func loadLogLocked(since time.Time) {
 			whole = false
 		}
 		for _, e := range entries {
-			if e.T >= since.UnixMilli() {
-				logIndex.seq++
-				e.Seq = logIndex.seq
+			if e.T < since.UnixMilli() {
+				continue
+			}
+			logIndex.seq++
+			e.Seq = logIndex.seq
+			if e.Counts() {
 				logIndex.lines[e.Account] = append(logIndex.lines[e.Account], e)
+			} else {
+				logIndex.events = append(logIndex.events, e)
 			}
 		}
 	}
 	for _, ls := range logIndex.lines {
 		sort.Slice(ls, func(i, j int) bool { return byTime(ls[i], ls[j]) })
 	}
+	sort.Slice(logIndex.events, func(i, j int) bool { return byTime(logIndex.events[i], logIndex.events[j]) })
 	logIndex.loaded = whole
 }
 
@@ -214,6 +223,14 @@ func byTime(a, b core.LogEntry) bool {
 // sent later) and lets go of those older than cutoff.
 func takeLinesLocked(pending []core.LogEntry, cutoff int64) {
 	for _, e := range pending {
+		if !e.Counts() {
+			ev := append(logIndex.events, e)
+			for i := len(ev) - 1; i > 0 && byTime(ev[i], ev[i-1]); i-- {
+				ev[i-1], ev[i] = ev[i], ev[i-1]
+			}
+			logIndex.events = ev
+			continue
+		}
 		ls := append(logIndex.lines[e.Account], e)
 		for i := len(ls) - 1; i > 0 && byTime(ls[i], ls[i-1]); i-- {
 			ls[i-1], ls[i] = ls[i], ls[i-1]
@@ -231,9 +248,13 @@ func takeLinesLocked(pending []core.LogEntry, cutoff int64) {
 			logIndex.lines[id] = ls[i:]
 		}
 	}
+	if i := sort.Search(len(logIndex.events), func(i int) bool { return logIndex.events[i].T >= cutoff }); i > 0 {
+		logIndex.events = append([]core.LogEntry(nil), logIndex.events[i:]...)
+	}
 }
 
-// logBegan is when the log began: the first line of its oldest month file, now if there is none.
+// logBegan is when the log began: the first line a report counts of its oldest month file, now if
+// there is none.
 func logBegan() int64 {
 	files, _ := filepath.Glob(filepath.Join(usageDir(), "20*.jsonl"))
 	sort.Strings(files)
@@ -242,9 +263,11 @@ func logBegan() int64 {
 			defer f.Close()
 			sc := bufio.NewScanner(f)
 			sc.Buffer(make([]byte, 64*1024), 1024*1024)
-			var e core.LogEntry
-			if sc.Scan() && json.Unmarshal(sc.Bytes(), &e) == nil && e.T > 0 {
-				return e.T
+			for sc.Scan() {
+				var e core.LogEntry
+				if json.Unmarshal(sc.Bytes(), &e) == nil && e.T > 0 && e.Counts() {
+					return e.T
+				}
 			}
 		}
 	}

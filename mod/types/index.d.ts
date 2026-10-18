@@ -57,7 +57,11 @@ export type SnapSession = {
   binding_reason: string
   switched?: boolean
   route?: { provider: string; model: string; auto: boolean; at: string }
-  last_switch?: { from: string; to: string; at: string; reason: string }
+  last_switch?: SnapSwitch
+  /** The account the session last moved off, while it can take the session's model again. */
+  switch_back?: string
+  /** Advances whenever where the session's next turn goes changes. */
+  generation?: number
   switch_imminent: boolean
   switch_reason?: string
   next_auth_id?: string
@@ -67,6 +71,15 @@ export type SnapSession = {
   last: SnapTokens
   last_seen: string
 }
+
+/**
+ * A change of the account the session is bound to. `kind` and `cause` say why (an older plugin
+ * sends neither); `reason` is the binding's, for an older band.
+ */
+export type SnapSwitch = { from: string; to: string; at: string; reason: string; kind?: string; cause?: SnapCause }
+
+/** What quota-pilot saw of why a session left an account. */
+export type SnapCause = { kind?: string; status?: number; wait_ms?: number; count?: number; reason?: string; model?: string }
 
 export type SnapAck = { command_id: string; session?: string; status: string; reason?: string; at: string }
 

@@ -34,6 +34,29 @@ type LogEntry struct {
 	TierServed string   `json:"ts,omitempty"`   // the service tier the provider reported serving it at
 	Remote     bool     `json:"rm,omitempty"`   // it reached the proxy from another device
 	Plan       string   `json:"pl,omitempty"`   // a line of its own: the account's plan changed to this
+	// A failed attempt: its kind (core.Fail*), status, how long it waited in ms, and its time to
+	// the first response in ms as the proxy gave it (for Codex the first packet when no token came).
+	// A successful request line carries its own ttft too, and fw, the client's wait in ms from the
+	// request reaching the proxy to that first response: a lower bound.
+	F    string `json:"f,omitempty"`
+	St   int    `json:"st,omitempty"`
+	W    int64  `json:"w,omitempty"`
+	TTFT int64  `json:"ttft,omitempty"`
+	FW   int64  `json:"fw,omitempty"`
+	// A binding event (EventMove): the session's thread left From for Account; its kind and cause.
+	Ev    string `json:"ev,omitempty"`
+	From  string `json:"from,omitempty"`
+	Move  string `json:"mv,omitempty"`
+	Cause *Cause `json:"c,omitempty"`
+}
+
+// EventMove is a binding event: a thread moved to another account.
+const EventMove = "move"
+
+// Counts tells whether a report counts the line: not an event, nor a failure with neither tokens
+// nor a reading, so neither adds an account, a provider or coverage.
+func (e LogEntry) Counts() bool {
+	return e.Ev == "" && !(e.F != "" && e.Poll && e.Used5h == nil && e.Used7d == nil)
 }
 
 // DayOf names the calendar day, in loc, of a unix-millisecond time.

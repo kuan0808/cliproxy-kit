@@ -207,11 +207,18 @@ type InterceptInput struct {
 	Tools          int    // tools the request offers the model
 	Tier           string // the speed the request asked for: a service tier, "fast" for Claude's fast mode, "auto" for none
 	Remote         bool   // it reached the proxy from another device
+	Path           string // the request's path, as the proxy names it in the request's metadata
 }
 
 // trace is what Intercept saw of an inbound request, kept for its usage records.
 type trace struct {
+	// At is when the request reached the proxy, from which the client's wait is measured.
 	At time.Time
+	// Model is the model it runs, after routing: the one its picks name, by which every per-model
+	// state is kept, where its usage records name the model the executor ran.
+	Model string
+	// Compact marks a Codex compact request, after whose failure the proxy leaves the account alone.
+	Compact bool
 	// Thread marks a request whose conversation lives on the account that answers: an Anthropic
 	// message thread, and every Codex request, which continues its conversation where it ran.
 	Thread bool
@@ -244,8 +251,8 @@ func (s *State) Intercept(in InterceptInput) InterceptDecision {
 	now := s.now()
 	if in.TraceID != "" {
 		claude := in.Format == "claude"
-		s.traces[in.TraceID] = trace{At: now, Thread: in.Thread != "" || !claude, Side: claude && in.Tools == 0 && in.Thread == "",
-			Tier: in.Tier, Remote: in.Remote}
+		s.traces[in.TraceID] = trace{At: now, Model: in.Model, Compact: strings.HasSuffix(in.Path, "/responses/compact"),
+			Thread: in.Thread != "" || !claude, Side: claude && in.Tools == 0 && in.Thread == "", Tier: in.Tier, Remote: in.Remote}
 	}
 	if in.Session == "" {
 		return InterceptDecision{}

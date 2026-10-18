@@ -97,7 +97,16 @@ func codexNotice(session, client string, start bool, now time.Time) string {
 		// Told nothing yet (its key was new at the start, or the proxy restarted): all of it.
 		return fmt.Sprintf("quota-pilot: on %s · %s", accountText(cred), usage)
 	case last.auth != cred.ID:
-		return fmt.Sprintf("quota-pilot: moved to %s · %s", accountText(cred), usage)
+		// Another account took the session: why, in the band's words, when the record says.
+		if sw := sess.LastSwitch; sw != nil && sw.To == cred.ID {
+			from := "previous account"
+			if c := credByID(view, sw.From); c != nil {
+				from = c.Label
+			}
+			why, _ := moveWhy(*sw, from)
+			return fmt.Sprintf("quota-pilot: switched to %s · %s · %s", accountText(cred), why, usage)
+		}
+		return fmt.Sprintf("quota-pilot: switched to %s · %s", accountText(cred), usage)
 	case up == 2:
 		// An account read as used up answers until it refuses a request (see State.Pick).
 		next := "no other account has quota"
@@ -136,6 +145,109 @@ func credByID(view *core.ProviderView, id string) *core.CredView {
 		}
 	}
 	return nil
+}
+
+// moveWhy is why a session left from, worded from its switch record and never from the account's
+// state now, as the band words it (mod/hooks/logic.ts moveWhy; mod/tests/moves.js holds both
+// sides' expected wording): why for the notice, short for a narrow row.
+func moveWhy(sw core.Switch, from string) (why, short string) {
+	c := core.Cause{}
+	if sw.Cause != nil {
+		c = *sw.Cause
+	}
+	status := ""
+	if c.Status != 0 {
+		status = fmt.Sprintf(" (HTTP %d)", c.Status)
+	}
+	said := func(why string) (string, string) {
+		short, _, _ := strings.Cut(why, "; ")
+		return why, short
+	}
+	switch sw.Kind {
+	case "":
+		switch {
+		case strings.Contains(sw.Reason, "by user"):
+			return said("switched by you")
+		case strings.HasPrefix(sw.Reason, "moved while idle"):
+			return said("moved while idle")
+		}
+		return said("reason not recorded")
+	case core.MoveUser:
+		return said("switched by you")
+	case core.MoveQuota:
+		reason := c.Reason
+		if reason == "" {
+			reason = "quota used up"
+		}
+		return said(from + " " + reason)
+	case core.MoveIdle:
+		if c.Reason == "" {
+			return said("moved while idle")
+		}
+		return said(from + " " + c.Reason + "; moved while idle")
+	case core.MoveGone:
+		if c.Reason == "disabled" {
+			return said(from + " is disabled")
+		}
+		return said(from + " was removed")
+	case core.MoveSignIn:
+		return said(from + " refused sign-in" + status)
+	case core.MoveModel:
+		model := c.Model
+		if model == "" {
+			model = "this model"
+		}
+		return said(from + " cannot serve " + strings.TrimPrefix(model, "claude-"))
+	case core.MoveLeftOut:
+		return "the proxy left " + from + " out; no failure recorded", "reason unknown"
+	}
+	n := ""
+	switch {
+	case c.Count == 2:
+		n = " twice"
+	case c.Count > 2:
+		n = fmt.Sprintf(" %d times", c.Count)
+	}
+	switch c.Kind {
+	case core.FailHang:
+		if n != "" {
+			return from + " hung" + n, from + " hung"
+		}
+		return from + " hung for " + waitText(time.Duration(c.WaitMs)*time.Millisecond), from + " hung"
+	case core.FailConnection:
+		return said(from + " lost its connection" + n)
+	case core.FailTimeout:
+		return said(from + " timed out" + n)
+	case core.FailOverloaded:
+		code := c.Status
+		if code == 0 {
+			code = 529
+		}
+		return said(fmt.Sprintf("%s returned HTTP %d%s", from, code, n))
+	case core.FailServer:
+		return said(fmt.Sprintf("%s returned HTTP %d%s", from, c.Status, n))
+	case core.FailRate:
+		return said(from + " was rate-limited" + n)
+	}
+	return said(from + " failed" + status + n)
+}
+
+// waitText is a wait as long as its seconds matter: "45s", "2m 15s", "2m", "1h 5m".
+func waitText(d time.Duration) string {
+	s := max(1, int(math.Round(d.Seconds())))
+	switch {
+	case s < 60:
+		return fmt.Sprintf("%ds", s)
+	case s < 3600 && s%60 != 0:
+		return fmt.Sprintf("%dm %ds", s/60, s%60)
+	case s < 3600:
+		return fmt.Sprintf("%dm", s/60)
+	}
+	m := int(math.Round(float64(s) / 60))
+	if m%60 != 0 {
+		return fmt.Sprintf("%dh %dm", m/60, m%60)
+	}
+	return fmt.Sprintf("%dh", m/60)
 }
 
 // levelOf is how far a window is used: 0 below 80%, 1 from 80%, 2 used up.

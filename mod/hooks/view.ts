@@ -56,6 +56,8 @@ export type Row = {
   detail: string
   /** The detail in fewer words, for a row too narrow for it. */
   brief?: string
+  /** The whole row in fewer words, drawn in place of title and detail when it does not fit. */
+  short?: string
   acts: Act[]
   /** Something runs meanwhile: the row has no way to close it. */
   busy?: boolean
@@ -348,7 +350,12 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
     }
   }
   if (alert) {
-    return { key: 'alert', tone: alert.level, title: alert.text, detail: '', acts: [], close: { key: 'alert-ok', label: 'ok', run: () => act.ui({ dismissedSwitch: alert.key ?? '' }) } }
+    // Back to the account a move left, by today's switch and its question about a cold turn.
+    const back = alert.back && acct && menu.canSend ? acct.view.credentials.find(c => c.id === alert.back) : undefined
+    const acts: Act[] = back
+      ? [{ key: 'switch-back', label: 'switch back', run: () => menu.pick({ action: 'switch', fields: { auth_id: back.id }, text: `Switch to ${back.label}` }) }]
+      : []
+    return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts, close: { key: 'alert-ok', label: 'ok', run: () => act.ui({ dismissedSwitch: alert.key ?? '' }) } }
   }
   const used = f.ctx ? Math.round(100 - f.ctx.left) : 0
   if (settings.handoffAt > 0 && used >= settings.handoffAt && !working && (!ui.handoffDismissedAt || used >= ui.handoffDismissedAt + 10)) {

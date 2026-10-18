@@ -136,11 +136,15 @@ func TestObserveAndPollsWriteTheLog(t *testing.T) {
 	s.Observe(Usage{Provider: "claude", SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t, Failed: true})
 	s.MergeWindows("claude-a", "claude", []Window{{Kind: KindWeekly, Remaining: 0.6, ObservedAt: c.t.Add(time.Minute)}})
 	log := s.TakeLog()
-	if len(log) != 2 || log[0].Session != "s1" || !log[0].Agent || log[0].Output != 7 || !near(*log[0].Used7d, 0.33) {
+	if len(log) != 3 || log[0].Session != "s1" || !log[0].Agent || log[0].Output != 7 || !near(*log[0].Used7d, 0.33) {
 		t.Fatalf("request line = %+v", log)
 	}
-	if !log[1].Poll || !near(*log[1].Used7d, 0.4) || len(s.TakeLog()) != 0 {
-		t.Fatalf("poll line = %+v", log[1])
+	// The failed attempt, with neither tokens nor a reading: a line no report counts.
+	if f := log[1]; !f.Poll || f.F != FailOther || f.Session != "s1" || f.Counts() {
+		t.Fatalf("failure line = %+v", f)
+	}
+	if !log[2].Poll || !near(*log[2].Used7d, 0.4) || !log[2].Counts() || len(s.TakeLog()) != 0 {
+		t.Fatalf("poll line = %+v", log[2])
 	}
 }
 
@@ -436,7 +440,7 @@ func TestABrokenStreamsTokensCount(t *testing.T) {
 	s.Observe(Usage{Provider: "claude", SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t, Failed: true, Input: 10, Output: 200})
 	s.Observe(Usage{Provider: "claude", SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t, Failed: true})
 	log := s.TakeLog()
-	if len(log) != 1 || log[0].Poll || log[0].Output != 200 || log[0].Session != "s1" {
+	if len(log) != 2 || log[0].Poll || log[0].Output != 200 || log[0].Session != "s1" || !log[0].Counts() || log[1].Counts() {
 		t.Fatalf("log = %+v", log)
 	}
 }

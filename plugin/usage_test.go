@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -694,7 +695,7 @@ func resetLogIndex() {
 	defer logIndex.mu.Unlock()
 	logMu.Lock()
 	defer logMu.Unlock()
-	logIndex.loaded, logIndex.lines, logIndex.pending = false, nil, nil
+	logIndex.loaded, logIndex.lines, logIndex.events, logIndex.pending = false, nil, nil, nil
 }
 
 // The log is read from its files once; what is written after reaches a report through the index,
@@ -808,5 +809,86 @@ func TestOneAccountsCredentialsKeepTheirOrder(t *testing.T) {
 	ls := u.lines["claude-new.json"]
 	if len(ls) != 2 || ls[0].Poll || !ls[1].Poll || ls[0].Account != "claude-new.json" {
 		t.Fatalf("lines = %+v", ls)
+	}
+}
+
+// Failure lines with neither tokens nor a reading, and event lines, change no report: not its
+// accounts, providers, coverage or numbers. A failed attempt carrying a reading reads as that
+// reading did before.
+func TestFailureAndEventLinesChangeNoReport(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetLogIndex()
+	defer resetLogIndex()
+	saved := state
+	defer func() { state = saved }()
+	now := time.Now()
+	at := func(d time.Duration) int64 { return now.Add(d).UnixMilli() }
+	used := func(f float64) *float64 { return &f }
+	reset := at(3 * 24 * time.Hour)
+	counted := []core.LogEntry{
+		{T: at(-9 * 24 * time.Hour), Account: "claude-a", Provider: "claude", Poll: true, Used7d: used(0.95), Reset7: reset - 7*24*3600*1000},
+		{T: at(-3 * 24 * time.Hour), Account: "claude-a", Provider: "claude", Poll: true, Used7d: used(0.1), Reset7: reset},
+		{T: at(-2 * 24 * time.Hour), Account: "claude-a", Provider: "claude", Session: "s1", Model: "claude-opus-5-5", Output: 4000, CacheRead: 9000},
+		{T: at(-24 * time.Hour), Account: "claude-b", Provider: "claude", Session: "s2", Model: "claude-opus-5-5", Output: 1000},
+		{T: at(-23 * time.Hour), Account: "claude-a", Provider: "claude", Poll: true, Used7d: used(0.3), Reset7: reset},
+	}
+	extra := []core.LogEntry{
+		// Before the first reading, around the window boundary, and on an account the proxy no
+		// longer holds.
+		{T: at(-12 * 24 * time.Hour), Account: "claude-a", Provider: "claude", Session: "s1", Model: "claude-opus-5-5", Poll: true, F: core.FailHang, W: 135000},
+		{T: reset - 7*24*3600*1000 - 1000, Account: "claude-a", Provider: "claude", Session: "s1", Poll: true, F: core.FailOverloaded, St: 529, W: 900, TTFT: 900},
+		{T: reset - 7*24*3600*1000 + 1000, Account: "claude-a", Provider: "claude", Session: "s1", Poll: true, F: core.FailConnection, W: 300},
+		{T: at(-2*24*time.Hour + time.Minute), Account: "claude-b", Provider: "claude", Session: "s1", Model: "claude-opus-5-5", Poll: true,
+			Ev: core.EventMove, From: "claude-a", Move: core.MoveFailed, Cause: &core.Cause{Kind: core.FailHang, WaitMs: 135000}},
+		{T: at(-time.Hour), Account: "claude-gone", Provider: "claude", Session: "s3", Poll: true, F: core.FailServer, St: 502},
+		{T: at(-time.Hour), Account: "claude-gone", Provider: "claude", Session: "s3", Poll: true, Ev: core.EventMove, From: "claude-a", Move: core.MoveLeftOut},
+		{T: at(-time.Hour), Account: "codex-x", Provider: "codex", Session: "s4", Poll: true, F: core.FailRate, St: 429},
+	}
+	report := func(lines []core.LogEntry) map[string]string {
+		resetLogIndex()
+		files, _ := filepath.Glob(filepath.Join(usageDir(), "*.jsonl"))
+		for _, f := range files {
+			_ = os.Remove(f)
+		}
+		state = core.New(newBootID(), nil)
+		state.UpdateInventory([]core.CredInfo{{ID: "claude-a", Provider: "claude", Email: "dana@example.com"}, {ID: "claude-b", Provider: "claude", Email: "kim@example.com"}})
+		appendLines(lines)
+		out := map[string]string{}
+		for _, rng := range []string{"", "7d", "30d"} {
+			for _, scope := range []string{"all", "provider:claude", "claude-a"} {
+				raw, err := usageResponse(url.Values{"range": {rng}, "account": {scope}, "tz": {"UTC"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var envelope struct {
+					Result struct{ Body []byte }
+				}
+				var doc map[string]any
+				if json.Unmarshal(raw, &envelope) != nil || json.Unmarshal(envelope.Result.Body, &doc) != nil {
+					t.Fatalf("unreadable: %s", raw)
+				}
+				// Where an account without a reading begins counts from the call's own time.
+				delete(doc, "to")
+				delete(doc, "from")
+				clean, _ := json.Marshal(doc)
+				out[rng+"|"+scope] = string(clean)
+			}
+		}
+		return out
+	}
+	before := report(counted)
+	// The reading of a failed attempt, as today's line, and with the failure's fields.
+	withFailure := append([]core.LogEntry(nil), counted...)
+	withFailure[4].F, withFailure[4].St, withFailure[4].W = core.FailOverloaded, 529, 900
+	after := report(append(withFailure, extra...))
+	for k, want := range before {
+		if got := after[k]; got != want {
+			i := 0
+			for i < len(got) && i < len(want) && got[i] == want[i] {
+				i++
+			}
+			from := max(0, i-200)
+			t.Errorf("%s changed at %d:\n%s\n%s", k, i, want[from:min(len(want), i+100)], got[from:min(len(got), i+100)])
+		}
 	}
 }

@@ -9,9 +9,13 @@ import type { Engine, FoundElement, MockClock, TestBody, TestOptions } from 'cla
 const test = (name: string, a: TestOptions | TestBody, b?: TestBody) =>
   typeof a === 'function' ? kitTest(name, { timeoutMs: 120_000 }, a) : kitTest(name, { timeoutMs: 120_000, ...a }, b!)
 
-import type { SessionInfo, Snap, UiState } from '../types'
+import type { SessionInfo, Snap, SnapSwitch, UiState } from '../types'
 import { settingsOf } from '../hooks/logic'
 import { bandFacts } from '../hooks/view'
+import MOVES from './moves.js'
+
+/** The expected wording of every move, which the plugin's Codex notice tests read too. */
+const moves = (MOVES as { moves: { name: string; switch: Omit<SnapSwitch, 'from' | 'to' | 'at'>; why: string; short: string }[] }).moves
 
 const NOW = Date.parse('2026-10-04T12:00:00Z')
 const iso = (ms: number) => new Date(NOW + ms).toISOString()
@@ -1290,4 +1294,70 @@ test("without quota data from the proxy the pane still shows the band's settings
   expect(await pane.find({ text: /no quota-pilot band route/ })).toBeDefined()
   expect(await pane.find({ key: 'auto-holdCold' })).toBeDefined()
   await pane.unmount()
+})
+
+test('a move says why from its record, in a short form where the row would not fit, on both surfaces', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  for (const m of moves) {
+    snapshot = {
+      ...SNAP,
+      generated_at: new Date(clock.now()).toISOString(),
+      sessions: { s1: { ...SNAP.sessions.s1!, auth_id: 'claude-k', served_auth_id: 'claude-k', last_switch: { from: 'claude-d', to: 'claude-k', at: new Date(clock.now() - 60_000).toISOString(), ...m.switch } } },
+    }
+    await clock.advance(10_000)
+    const full = `Switched d••• → k••• · ${m.why}`
+    const short = `Switched d••• → k••• · ${m.short}`
+    const wide = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+    expect((await wide.find({ key: 'alert' }))?.text, m.name).toMatch(new RegExp(`^↪ ${esc(full)}\\s*ok$`))
+    expect(await wide.find({ key: 'switch-back' }), m.name).toBeUndefined() // no listing since d••• failed
+    await wide.unmount()
+    // At 80 columns (a 79-column row) the row and its control fit on one line: padding, the mark,
+    // the words, a space and ok.
+    const fits = (t: string) => 4 + 2 + t.length + 2 + 'ok'.length + 2 <= 79
+    const words = fits(full) ? full : short
+    expect(fits(words), `${m.name}: "${words}" does not fit 80 columns`).toBe(true)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const narrow = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(80, false) })
+      expect((await narrow.find({ key: 'alert' }))?.text, `${m.name} on the ${surface}`).toMatch(new RegExp(`${esc(words)}\\s*(ok|Ok)$`))
+      await narrow.unmount()
+    }
+  }
+})
+
+test('a move offers switch back while the plugin says the account it left can take the session, by today\'s switch', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const moved = (kind: string, switchBack?: string) => ({
+    ...SNAP,
+    generated_at: new Date(clock.now()).toISOString(),
+    sessions: {
+      s1: {
+        ...SNAP.sessions.s1!, auth_id: 'claude-k', served_auth_id: 'claude-k', switch_back: switchBack,
+        last_switch: { from: 'claude-d', to: 'claude-k', at: new Date(clock.now() - 60_000).toISOString(), reason: 'previous account unavailable; weekly quota resets soonest', kind, cause: { kind: 'overloaded', status: 529, count: 1 } },
+      },
+    },
+  })
+  // d••• reads ready (tier 1) but the plugin names no switch_back: no button, whatever the tier.
+  snapshot = moved('failed')
+  await clock.advance(10_000)
+  expect(await rowText($)).toMatch(/^↪ Switched d••• → k••• · d••• returned HTTP 529\s*ok$/)
+  // Never on the user's own switch.
+  snapshot = moved('user', 'claude-d')
+  await clock.advance(10_000)
+  expect(await rowText($)).toMatch(/^↪ Switched d••• → k••• · switched by you\s*ok$/)
+  snapshot = moved('failed', 'claude-d')
+  await clock.advance(10_000)
+  expect(await rowText($)).toMatch(/^↪ Switched d••• → k••• · d••• returned HTTP 529\s*switch back\s*ok$/)
+  // The desktop card's avatar keeps the label's case: k•••, not K•••.
+  const desk = await $.ui.mount({ plugin: 'quota-band', surface: 'desktop', ...BAND(160, false) })
+  const marks = (await desk.findAll({ type: 'Svg' })).map(x => String(x.props.source))
+  expect(marks.some(m => m.includes('>k</text>'))).toBe(true)
+  expect(marks.some(m => m.includes('>K</text>'))).toBe(false)
+  await desk.unmount()
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  await ui.press({ key: 'switch-back' })
+  expect(commands).toMatchObject([{ action: 'switch', auth_id: 'claude-d' }])
+  await ui.unmount()
 })

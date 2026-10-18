@@ -122,6 +122,27 @@ rise no request explains, such as use on claude.ai or another tool, is reported 
 a request; what the first reading already showed used is reported apart and never split. A range is
 known only from readings inside it, so an account without one shows as unknown, not as 0%.
 
+A failed attempt is logged too, once, with its kind (`f`: request, model, quota, sign-in, hang,
+connection, timeout, overloaded, server, rate, other), its status (`st`), how long it waited (`w`,
+ms) and its time to the first response (`ttft`, ms, absent when none came), never its error text:
+as its request line when it ran tokens (a Claude stream that broke after `message_start`), as its
+quota reading when it carried one, else as a line of its own. A successful request's line has its
+`ttft` too, and `fw`, the client's wait from the request reaching the proxy to that first
+response, which covers every failed attempt before it: a lower bound, as the attempt's own time
+before it is sent is not measured. `ttft` is what the proxy records: for Claude the first response
+bytes, an error body included; for Codex the first token event, else the first packet. Each change
+of a session's account is logged as an event line (`ev: move`, its kind and cause, from and to).
+Failure lines with neither tokens nor a reading, and event lines, are left out of every report, so
+no report changes by them.
+
+The kind is read from the status, the error body, `ttft` and the wait, in that order: a client
+cancel (499) and what the proxy itself reads as the request's fault (`core/faults.go`, pinned
+against the proxy below) are `request`; a model the account does not serve is `model`; a 429 while
+the account reads as used up is `quota`; 401, 402, 403 and a refused grant are `sign-in`; no
+response in 30 s after waiting 30 s or more is `hang`; then a lost connection, a timeout, a 529, any
+other 5xx, a 429, anything else. A compact request's failure is `request` unless it is a sign-in,
+a 429 or a Cloudflare challenge, as the proxy leaves the account alone after it.
+
 The report runs the window rules above over the logged readings, so it and the live state agree; a
 plan change is logged as a line of its own, after which a request's use is learned anew, and the
 current week counts from where it started over. A fall within 5 minutes of the report's end still
@@ -237,6 +258,21 @@ minute, or across a proxy restart, says so. When `/band` gives nothing the band 
 proxy has not accepted yet, no plugin there, no answer) and keeps the last snapshot, marked old.
 The switch list leaves out accounts that cannot serve the session's model and second credentials
 of an account.
+
+A move is worded from the session's switch record (`last_switch`), which quota-pilot writes where
+the main conversation's binding changes account and nowhere else: at the success elsewhere that
+moves it, and when a switch of the user's is applied. Its `kind` and `cause` say why, only with
+evidence: a failure of the account it left (`d••• hung for 2m 15s`, `d••• returned HTTP 529 twice`,
+`d••• refused sign-in (HTTP 401)`, `d••• cannot serve opus-5-5`), a refusal while used up, an idle
+move, an account removed or disabled, the user's own switch; with none seen, `the proxy left d•••
+out; no failure recorded`. Never from the account's state now: a record of an older plugin, without
+a kind, says `switched by you`, `moved while idle` or `reason not recorded`. The move row offers
+`switch back` while the snapshot's `switch_back` names the account it left: quota-pilot says so per
+model, each snapshot, only when that account is held, enabled, not used up for the model, and
+listed by a pick for that model since its last failure (any failure, any model, as quota-pilot cannot
+always tell which ones the proxy cools an account for). It never moves a session back by itself.
+A row too wide for the band draws its short form (`↪ Switched d••• → k••• · d••• hung`); the
+Codex notice says the same words (`mod/tests/moves.js` holds both sides' expected wording).
 
 A session signed in to Claude directly reads no proxy. The desktop app's are: it points them at
 Anthropic's own API with the app's sign-in. The band then shows that account's own limits, as Claude

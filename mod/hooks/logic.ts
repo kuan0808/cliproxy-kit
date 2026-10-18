@@ -1,5 +1,5 @@
 // Pure helpers for the band: no `$`, so the tests call them directly.
-import type { Auto, BandError, CacheInfo, ModelInfo, Pending, Snap, SnapCred, SnapProvider, SnapSession, SnapWindow } from '../types'
+import type { Auto, BandError, CacheInfo, ModelInfo, Pending, Snap, SnapCred, SnapProvider, SnapSession, SnapSwitch, SnapWindow } from '../types'
 
 export const C = {
   fg: '#ebdbb2',
@@ -294,8 +294,70 @@ export function missingText(cred: SnapCred | undefined, kind: string): string {
   return cred?.windows.length ? 'not reported yet' : 'after the first reply'
 }
 
-/** `key` names what a dismissal hides, for alerts that can be dismissed. */
-export type Alert = { level: 'warn' | 'info'; text: string; action?: 'handoff' | 'route' | 'dismiss'; key?: string }
+/**
+ * `key` names what a dismissal hides, for alerts that can be dismissed; `short` is the whole row in
+ * fewer words, for a row too narrow for it; `back` the account `switch back` returns to.
+ */
+export type Alert = { level: 'warn' | 'info'; text: string; short?: string; action?: 'handoff' | 'route' | 'dismiss'; key?: string; back?: string }
+
+/** "45s", "2m 15s", "2m", "1h 5m": a wait as long as the seconds matter. */
+export function fmtWait(ms: number): string {
+  const s = Math.max(1, Math.round(ms / 1000))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return s % 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s / 60}m`
+  const m = Math.round(s / 60)
+  return m % 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m / 60}h`
+}
+
+const times = (n: number | undefined) => (n && n > 1 ? (n === 2 ? ' twice' : ` ${n} times`) : '')
+
+/**
+ * Why a session left `from`, worded from its switch record and never from the account's state
+ * now: `why` for the row, `short` for a narrow one. The Codex notice says the same words
+ * (tests/moves.json holds both sides' expected wording). A record from an older plugin says only
+ * what it can confirm.
+ */
+export function moveWhy(sw: SnapSwitch, from: string): { why: string; short: string } {
+  const c = sw.cause ?? {}
+  const status = c.status ? ` (HTTP ${c.status})` : ''
+  const said = (why: string, short = why.split('; ')[0]!) => ({ why, short })
+  switch (sw.kind) {
+    case undefined:
+    case '':
+      if (sw.reason.includes('by user')) return said('switched by you')
+      return said(sw.reason.startsWith('moved while idle') ? 'moved while idle' : 'reason not recorded')
+    case 'user':
+      return said('switched by you')
+    case 'quota':
+      return said(`${from} ${c.reason || 'quota used up'}`)
+    case 'idle':
+      return said(c.reason ? `${from} ${c.reason}; moved while idle` : 'moved while idle')
+    case 'gone':
+      return said(c.reason === 'disabled' ? `${from} is disabled` : `${from} was removed`)
+    case 'sign-in':
+      return said(`${from} refused sign-in${status}`)
+    case 'model':
+      return said(`${from} cannot serve ${(c.model ?? 'this model').replace(/^claude-/, '')}`)
+    case 'left-out':
+      return said(`the proxy left ${from} out; no failure recorded`, 'reason unknown')
+  }
+  const n = times(c.count)
+  switch (c.kind) {
+    case 'hang':
+      return said(n ? `${from} hung${n}` : `${from} hung for ${fmtWait(c.wait_ms ?? 0)}`, `${from} hung`)
+    case 'connection':
+      return said(`${from} lost its connection${n}`)
+    case 'timeout':
+      return said(`${from} timed out${n}`)
+    case 'overloaded':
+      return said(`${from} returned HTTP ${c.status || 529}${n}`)
+    case 'server':
+      return said(`${from} returned HTTP ${c.status}${n}`)
+    case 'rate':
+      return said(`${from} was rate-limited${n}`)
+  }
+  return said(`${from} failed${status}${n}`)
+}
 
 /**
  * The single alert the band shows, most important first. Confirmations and notices are drawn
@@ -327,16 +389,15 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
     const tail = next ? `moves to ${next.label} (${usedText(windowOf(next, '7d'))}) ${when}` : 'no other account has quota'
     return { level: 'warn', text: `${reason} on ${label} · ${tail}` }
   }
-  // A move shows for 15 minutes, or until dismissed, and says why the session left.
+  // A move shows for 15 minutes, or until dismissed, and says why the session left, from its
+  // record; `switch back` while quota-pilot says the account it left can take the session again.
   const sw = session.last_switch
   if (sw && sw.at !== dismissed && now - Date.parse(sw.at) < 15 * MIN) {
-    const fromCred = view.credentials.find(c => c.id === sw.from)
-    const from = fromCred?.label ?? 'previous account'
+    const from = view.credentials.find(c => c.id === sw.from)?.label ?? 'previous account'
     const to = view.credentials.find(c => c.id === sw.to)?.label ?? 'another account'
-    const why = sw.reason.includes('by user')
-      ? 'switched by you'
-      : fromCred?.tier === 3 ? `${from} ${fromCred.reason}` : `${from} was unavailable`
-    return { level: 'info', text: `Switched ${from} → ${to} · ${why}`, action: 'dismiss', key: sw.at }
+    const { why, short } = moveWhy(sw, from)
+    const back = session.switch_back && session.switch_back === sw.from && sw.kind !== 'user' ? sw.from : undefined
+    return { level: 'info', text: `Switched ${from} → ${to} · ${why}`, short: `Switched ${from} → ${to} · ${short}`, action: 'dismiss', key: sw.at, back }
   }
   return null
 }

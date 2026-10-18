@@ -235,6 +235,14 @@ Claude 等待時顯示方塊，工作時縮成一行：
 
 **沒有人在看的 session。** 由 agent、排程或協調工具啟動 Claude Code 時，在環境變數設定 `QUOTA_BAND_UNATTENDED=1`：額度列在那裡一律不攔訊息、不保持快取，不管預設或指令怎麼設，它送進來的內容都會直接進去。
 
+### 帳號失敗時
+
+帳號處理 session 的請求失敗時，proxy 會把請求交給另一個帳號，之後 session 就留在那個帳號上；額度列會依 quota-pilot 看到的情況說明原因：沒有回應、連線中斷、回傳某個狀態碼、拒絕登入、不支援這個模型、額度用完。這些都不用設定；規則和每種失敗的名稱寫在 [docs/architecture.md](docs/architecture.md#where-quota-went)。
+
+| 情況 | 會發生什麼 | 額度列顯示 |
+| --- | --- | --- |
+| 帳號失敗 | session 換到另一個帳號，之後留在那裡 | `↪ Switched d••• → k••• · d••• hung for 2m 15s`，等 proxy 再次提供 d••• 時附上 `switch back` |
+
 在桌面版裡，額度列畫成卡片，跟著 app 的淺色或深色主題，顯示那個帳號自己的額度（見[不經過 proxy 時](#有沒有裝額度列)）：
 
 <p align="center">
@@ -316,6 +324,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 ## 更新與移除
 
 - **更新：** 面板的插件商店會提供 quota-pilot 的新版本。額度列用 `claude plugin update quota-band@cliproxy-kit` 更新，或在 `/plugin` 的 **Marketplaces** 開啟自動更新；執行中的 session 用 `/reload-plugins` 載入新版。兩者一起改版，請一起更新。
+- **從 0.1.16 升級：** 切換現在會說明原因。額度列和 quota-pilot 請一起更新：舊版額度列會把新版插件的每次切換都寫成 `was unavailable`，新版額度列則把舊版插件做的切換寫成 `reason not recorded`。
 - **從 0.1.14 升級：** 冷啟動前攔下訊息和保持快取都改成預設關閉，要用時在 `/config` 對所有 session 打開，或用 `/hold-cold on`、`/keep-warm on` 只對一個打開。**攔下訊息的對話大小**或**保持快取的次數**設為 `0` 不再代表關閉：分別代表任何大小和刷新一次；攔下訊息的對話大小為 `0` 時，快取還熱著的每次切換都會先問。
 - **從 0.1.6 升級：** 額度列改成全部走網路，用 Claude Code 本來就在用的 key，所以 `band_tokens` 不再讀取，可以從 `config.yaml` 刪掉。session、專案和記住的資料夾會自動移進 `usage/sessions.json`。
 - **移除：** 在面板的**插件**頁面刪除 Quota Pilot，用 `claude plugin uninstall quota-band@cliproxy-kit` 移除額度列，其餘照上表還原。
@@ -334,6 +343,8 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | 用量頁看不到 Codex 的 session | Codex 還沒經過 proxy（步驟 4）。 |
 | Codex 說 hook 以代碼 7 或 22 結束 | hook 的位址沒有 proxy 回應（7），或那個 proxy 上沒有 quota-pilot（22）。 |
 | Codex 帳號沒有 5 小時視窗 | 它的方案本來就沒有；頁面和額度列都會標明。 |
+| 額度列顯示 `Switched d••• → k••• · reason not recorded` | quota-pilot 比額度列舊，不會記錄 session 換帳號的原因：到面板的插件商店更新它。 |
+| 切換提示附上 `switch back` | session 離開的帳號現在又能接手。按 `switch back` 換回去，快取還熱著時會先問；quota-pilot 不會自己把 session 換回去，因為新帳號的快取才是熱的。 |
 
 ## 隱私與安全
 

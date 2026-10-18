@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -118,7 +119,32 @@ func TestACodexHookTellsWhatMatters(t *testing.T) {
 		{ID: "codex-alex.json", Provider: "codex"}, {ID: "codex-blair.json", Provider: "codex"},
 	}})
 	ran(pick.AuthID)
-	if got := codexHook(t, key, session, "Stop"); !strings.HasPrefix(got, "quota-pilot: moved to b•••") {
+	if got := codexHook(t, key, session, "Stop"); !strings.HasPrefix(got, "quota-pilot: switched to b••• · a••• weekly quota used up · ") {
 		t.Fatalf("moved = %q", got)
+	}
+}
+
+// The Codex notice says why a session moved in the band's words: both read one fixture.
+func TestTheCodexNoticeWordsAMoveAsTheBandDoes(t *testing.T) {
+	raw, errRead := os.ReadFile("../mod/tests/moves.js")
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	_, data, found := strings.Cut(string(raw), "export default ")
+	var fixture struct {
+		Moves []struct {
+			Name   string      `json:"name"`
+			Switch core.Switch `json:"switch"`
+			Why    string      `json:"why"`
+			Short  string      `json:"short"`
+		} `json:"moves"`
+	}
+	if !found || json.Unmarshal([]byte(data), &fixture) != nil || len(fixture.Moves) == 0 {
+		t.Fatalf("the fixture does not read: %.200s", data)
+	}
+	for _, m := range fixture.Moves {
+		if why, short := moveWhy(m.Switch, "d•••"); why != m.Why || short != m.Short {
+			t.Errorf("%s: %q, %q; want %q, %q", m.Name, why, short, m.Why, m.Short)
+		}
 	}
 }

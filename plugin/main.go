@@ -76,6 +76,7 @@ import (
 
 	"github.com/kuan0808/cliproxy-kit/plugin/core"
 
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/tidwall/gjson"
@@ -324,6 +325,7 @@ func usage(raw []byte) ([]byte, error) {
 		RequestedAt: r.RequestedAt, Input: r.Detail.InputTokens, Output: r.Detail.OutputTokens,
 		CacheRead: r.Detail.CacheReadTokens, CacheCreation: r.Detail.CacheCreationTokens,
 		ResponseHeader: r.ResponseHeaders, TierAsked: tierOf(r.ServiceTier), TierServed: servedTier(r), ClientKey: r.APIKey,
+		ErrorText: r.Failure.Body, Latency: r.Latency, TTFT: r.TTFT,
 	})
 	return okEnvelope(map[string]any{})
 }
@@ -544,6 +546,7 @@ func intercept(raw []byte) ([]byte, error) {
 		Tools:          len(gjson.GetBytes(req.Body, "tools").Array()),
 		Tier:           askedTier(req.SourceFormat, req.Body),
 		Remote:         otherDevice(req.Headers) != "",
+		Path:           pathOf(req.Metadata),
 	})
 	if !d.Terminate {
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
@@ -562,6 +565,12 @@ func intercept(raw []byte) ([]byte, error) {
 		ResponseHeaders: http.Header{"Content-Type": {"application/json"}},
 		ResponseBody:    body,
 	})
+}
+
+// pathOf is a request's path as the proxy puts it in the request's metadata.
+func pathOf(metadata map[string]any) string {
+	path, _ := metadata[cliproxyexecutor.RequestPathMetadataKey].(string)
+	return path
 }
 
 // interceptAfter runs once the account is chosen, when the host has named the request's session:

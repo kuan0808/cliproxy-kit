@@ -237,10 +237,14 @@ function rowOf(els: Els, row: Row, width: number): RenderElement {
     ? <Button key={a.key} label={a.label} plain dimColor={!a.main} onPress={a.run} />
     : <Text key={a.key} color={C.dim}>{a.label}</Text>
   const acts = [...row.acts, ...(row.close ? [row.close] : [])]
-  // The detail in fewer words when the row, its controls included, would not fit on one line.
+  // The detail in fewer words, else the whole row's short form, when the row, its controls
+  // included, would not fit on one line.
   const words = (detail: string) => (detail ? `${row.title}: ${detail}` : row.title)
   const controls = row.busy ? 'working…'.length : acts.reduce((n, a) => n + a.label.length + 2, 0)
-  const text = row.brief && 4 + mark.length + words(row.detail).length + 2 + controls > width ? words(row.brief) : words(row.detail)
+  const fits = (text: string) => 4 + mark.length + text.length + 2 + controls <= width
+  const text = fits(words(row.detail)) ? words(row.detail)
+    : row.short ? row.short
+    : row.brief ? words(row.brief) : words(row.detail)
   return (
     <Box key={row.key} backgroundColor={bg} paddingX={2} justifyContent="space-between" width={width}>
       <Text><Text bold color={markColor}>{mark}</Text>{text}</Text>

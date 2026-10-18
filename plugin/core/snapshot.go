@@ -84,16 +84,32 @@ func (s *State) applyLocked(cmd Command, root string, sess *session, now time.Ti
 		if r := s.classifyLocked(c, model, now); r.Blocked {
 			return "account cannot serve now: " + r.Reason
 		}
-		s.bindings[c.Provider+"|"+root] = &Binding{AuthID: c.ID, Reason: switchedReason, LastUsed: now, At: now}
+		key := c.Provider + "|" + root
+		from := ""
+		if b := s.bindings[key]; b != nil {
+			from = b.AuthID
+		} else if served := s.creds[sess.ServedAuth]; served != nil && served.Provider == c.Provider {
+			from = served.ID
+		}
+		s.bindings[key] = &Binding{AuthID: c.ID, Reason: switchedReason, LastUsed: now, At: now, Kind: MoveUser}
+		delete(s.failures, key)
+		// The switch record is written when the switch is applied, not at the new account's first
+		// answer, so it says when and why it was made.
+		if from != "" && from != c.ID {
+			s.movedLocked(c.Provider, root, root, from, c.ID, model, switchedReason, MoveUser, nil, now)
+		}
 	case "route":
 		if cmd.Provider == "" || cmd.Model == "" {
 			return "route needs provider and model"
 		}
+		// No account is chosen until the first routed reply, so a route writes no switch record.
 		s.routes[root] = Route{Provider: strings.ToLower(cmd.Provider), Model: cmd.Model, At: now}
+		sess.Generation++
 	case "unroute":
 		delete(s.routes, root)
 		if sess != nil {
 			s.noteLocked(sess, "")
+			sess.Generation++
 		}
 	default:
 		return "unknown action " + cmd.Action
@@ -193,9 +209,14 @@ type SessionView struct {
 	Switched       bool    `json:"switched,omitempty"` // the user chose this account
 	Route          *Route  `json:"route,omitempty"`
 	LastSwitch     *Switch `json:"last_switch,omitempty"`
-	SwitchImminent bool    `json:"switch_imminent"`
-	SwitchReason   string  `json:"switch_reason,omitempty"`
-	NextAuthID     string  `json:"next_auth_id,omitempty"`
+	// SwitchBack is the account the session last moved off, while it can take the session's model
+	// again (State.canTakeLocked); absent after the user's own switch.
+	SwitchBack string `json:"switch_back,omitempty"`
+	// Generation advances whenever where the session's next turn goes changes.
+	Generation     uint64 `json:"generation"`
+	SwitchImminent bool   `json:"switch_imminent"`
+	SwitchReason   string `json:"switch_reason,omitempty"`
+	NextAuthID     string `json:"next_auth_id,omitempty"`
 	// Blocked names the accounts of its provider that cannot serve its next model (used up, also
 	// on a model's own window, or disabled): the band does not offer a switch to them.
 	Blocked  []string  `json:"blocked,omitempty"`
@@ -371,8 +392,12 @@ func (s *State) nextLocked(root string, sess *session) (provider, model string) 
 func (s *State) sessionViewLocked(root string, sess *session) *SessionView {
 	v := &SessionView{ServedAuthID: sess.ServedAuth,
 		RequestedModel: sess.RequestedModel, RouteNote: sess.RouteNote,
-		LastSwitch: sess.LastSwitch, Totals: sess.Totals, Last: sess.Last, LastSeen: sess.LastSeen}
+		LastSwitch: sess.LastSwitch, Totals: sess.Totals, Last: sess.Last, LastSeen: sess.LastSeen, Generation: sess.Generation}
 	v.Provider, v.Model = s.nextLocked(root, sess)
+	now := s.now()
+	if sw := sess.LastSwitch; sw != nil && sw.Kind != "" && sw.Kind != MoveUser && s.canTakeLocked(sw.From, s.lookupModelLocked(sess, v.Model), now) {
+		v.SwitchBack = sw.From
+	}
 	if r, ok := s.routes[root]; ok {
 		rr := r
 		v.Route = &rr
@@ -382,7 +407,6 @@ func (s *State) sessionViewLocked(root string, sess *session) *SessionView {
 	} else if c := s.creds[sess.ServedAuth]; c != nil && c.Provider == v.Provider {
 		v.AuthID = sess.ServedAuth
 	}
-	now := s.now()
 	for _, c := range s.creds {
 		if c.Provider == v.Provider && s.classifyLocked(c, v.Model, now).Blocked {
 			v.Blocked = append(v.Blocked, c.ID)
@@ -390,6 +414,15 @@ func (s *State) sessionViewLocked(root string, sess *session) *SessionView {
 	}
 	sort.Strings(v.Blocked)
 	return v
+}
+
+// lookupModelLocked is the model the proxy's picks name for a session's next turn: the one its last
+// turn was picked for (an alias as the client named it), else where its next turn goes.
+func (s *State) lookupModelLocked(sess *session, next string) string {
+	if sess.RoutedModel != "" {
+		return sess.RoutedModel
+	}
+	return next
 }
 
 // fillImminentLocked flags a session whose account is read as unable to serve it, and names the
@@ -540,7 +573,7 @@ func (s *State) BuildForBand(session, model, client string) Snapshot {
 		}
 	}
 	for _, v := range snap.Sessions {
-		v.AuthID, v.ServedAuthID, v.NextAuthID = opaqueID(v.AuthID), opaqueID(v.ServedAuthID), opaqueID(v.NextAuthID)
+		v.AuthID, v.ServedAuthID, v.NextAuthID, v.SwitchBack = opaqueID(v.AuthID), opaqueID(v.ServedAuthID), opaqueID(v.NextAuthID), opaqueID(v.SwitchBack)
 		for i, id := range v.Blocked {
 			v.Blocked[i] = opaqueID(id)
 		}
