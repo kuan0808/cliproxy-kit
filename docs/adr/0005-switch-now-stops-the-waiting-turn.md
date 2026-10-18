@@ -1,19 +1,19 @@
 # Switch now switches the session, then stops the waiting turn
 
 While a turn waits on a failing account (a hang, its retry, or a wait for a retry), the band offers
-`switch to k•••`. A press sends today's switch; only after quota-pilot has applied it does the band stop
-the turn (`$.turn.abort`), which cancels the stalled request through Claude Code's own cancel. Nothing
-is sent for the user: their next message, any text, carries the conversation, the stopped turn's
-finished steps included, to the new account. The band says so (`send a message to go on`). We chose to
-switch first so that a refused switch leaves the turn waiting rather than gone, and to stop rather than
-send the turn again because sending it again could not be made safe from the band's side. The retry
-after a hang stays the default; the button is for whoever would rather not wait.
+`switch to k•••`: a press sends today's switch, and only after quota-pilot has applied it does the
+band stop the turn (`$.turn.abort`), so the user's next message, any text, carries the conversation
+to the new account ([When an account fails](../architecture.md#when-an-account-fails)). We chose to
+switch first so that a refused switch leaves the turn waiting rather than gone, and to stop rather
+than send the turn again because sending it again could not be made safe from the band's side. The
+retry after a hang stays the default; the button is for whoever would rather not wait.
 
 ## Considered Options
 
-- Send the stopped turn again automatically, one line from quota-band: nothing to retype, but the band cannot see when the proxy has really dropped the old request (Claude Code's abort
-  resolves before the proxy has seen the cancel), whether Claude Code still holds a message the user
-  queued, or whether its own line entered (a hook may answer for a call; the engine wraps a plugin's
+- Send the stopped turn again automatically, one line from quota-band: nothing to retype, but the
+  band cannot see when the proxy has really dropped the old request (Claude Code's abort resolves
+  before the proxy has seen the cancel), whether Claude Code still holds a message the user queued,
+  or whether its own line entered (a hook may answer for a call; the engine wraps a plugin's
   prompt). Each guard added a signal across two processes, completion events, message digests, turn
   events, and each brought new races, so it was dropped.
 - Restart the stalled step in place (a second `next(e)` in the band's `turn.step` hook): same turn, but

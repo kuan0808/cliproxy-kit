@@ -70,9 +70,9 @@ _Avoid_: rate limit (a 429 on an account with quota left)
 ### Moving between accounts
 
 **Retry**:
-Another attempt of a request on its bound account, which quota-pilot asks for before any failover.
-_Avoid_: the proxy's request-retry round and Claude Code's own retries, which are the mechanisms that
-carry it
+Another attempt of a request on its bound account, which quota-pilot asks for before any failover;
+the proxy's request-retry round and Claude Code's own retries are the mechanisms that carry it.
+_Avoid_: request-retry, retry round (the mechanisms, not the retry)
 
 **Retry episode**:
 The span after a bound account fails during which quota-pilot keeps that binding's requests on it: up
