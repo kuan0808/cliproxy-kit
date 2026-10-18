@@ -74,24 +74,24 @@ offered, and quota-pilot chooses among them. What it adds:
 
 1. **Classify.** Each failed attempt gets a kind from its status, error body, time to first
    response and wait (see [Where quota went](#where-quota-went)).
-2. **Retry on the bound account.** For a failure something retries, quota-pilot keeps a Claude
-   Code session's request on its own account by declining the proxy's pick of any other: the proxy's
-   next request-retry round retries a lost connection and 408, 429, 500, 502, 503 and 504; Claude
-   Code retries what the proxy hands back (520 to 526, 529, other 5xx, a bare deadline, and
-   everything when no further round runs). Up to 2 retries, 1 after a hang, each starting within
-   75 s of when the first failure ended; the retry stays inside the same request when the account
-   is not cooling (a lost connection: Claude Code sees one long request), and comes with Claude
-   Code's next try when it is. Waiting through the proxy's pause after a status happens only for a
-   session whose last main prompt was 100k tokens or more: below that a cold start elsewhere costs
-   less, and only the retries that need no wait run. A success on the account ends the episode,
-   kept; so do its retries spent, 75 s with none started, a retry that hangs, a quota, sign-in,
-   model or request failure, and the account resting, removed or disabled (while an episode runs
-   the account list is read again when older than 5 s). Ending stops the declines and nothing
-   more: the next pick follows the ranking, the bound account first whenever it is offered. The
-   decline's reason, which Claude Code shows on its retry line, says what is happening:
-   `quota-pilot: d••• returned HTTP 529; retrying it in about 50s; k••• is next if needed`.
-   Never retried: quota, sign-in, model and request failures, any other status, an account at rest,
-   and Codex sessions, whose own retries are not pinned.
+2. **Retry on the bound account.** For a failure something retries, quota-pilot keeps a Claude Code
+   session's request on its own account by declining the proxy's pick of any other: the proxy's next
+   request-retry round retries a lost connection and 408, 429, 500, 502, 503 and 504; Claude Code
+   retries what the proxy hands back (520 to 526, 529, other 5xx, a bare deadline, and everything
+   when no further round runs). Up to the retries the table below allows, fewer after a hang, each
+   starting within the retry window; the retry stays inside the same request when the account is not
+   cooling (a lost connection: Claude Code sees one long request), and comes with Claude Code's next
+   try when it is. Waiting through the proxy's pause after a status happens only for a session whose
+   last main prompt reached the size the table names: below it a cold start elsewhere costs less,
+   and only the retries that need no wait run. A success on the account ends the episode, kept; so
+   do its retries spent, the retry window passing with none started, a retry that hangs, a quota,
+   sign-in, model or request failure, and the account resting, removed or disabled (while an episode
+   runs the account list is read again once older than its age in the table). Ending stops the
+   declines and nothing more: the next pick follows the ranking, the bound account first whenever it
+   is offered. The decline's reason, which Claude Code shows on its retry line, says what is
+   happening: `quota-pilot: d••• returned HTTP 529; retrying it in about 50s; k••• is next if
+   needed`. Never retried: quota, sign-in, model and request failures, any other status, an account
+   at rest, and Codex sessions, whose own retries are not pinned.
 3. **The `hung` mark.** When an episode that began with a hang ends with no retry answered, or any
    retry in it hung, the binding is marked: its picks skip the account while another that can serve
    is offered, until a success elsewhere moves the session, a success on the account by another
@@ -104,15 +104,15 @@ offered, and quota-pilot chooses among them. What it adds:
    [quota-band](#quota-band)). quota-pilot never moves a session back on its own: the new
    account's cache is the warm one.
 5. **Rest.** An account that keeps failing rests, what other proxies call a circuit breaker:
-   failures that end within 10 s of a moment's first failure are one failure moment (requests that
-   hung from different times and failed together, or several sessions at once), and only hang,
+   failures that end within a failure moment of its first failure count as one (requests that hung
+   from different times and failed together, or several sessions at once), and only hang,
    connection, timeout, overloaded and server failures count, the ones the proxy cools no account
    for, or only briefly; after the others (rate, quota, sign-in, model, request, other) the proxy
-   holds the account back itself, for as long as it judges. A second moment within 15 minutes, with
-   no success on the account between, rests it for 5 minutes.
+   holds the account back itself, for as long as it judges. A second moment soon after, with no
+   success on the account between, rests it for the first rest.
 6. **Trial.** After a rest the account is on trial until it serves: one failure moment rests it
-   again at once, for twice as long (10, 20, 40, then 60 minutes at most). One success ends a rest
-   or a trial, and the count starts over.
+   again at once, for twice as long, up to the longest rest. One success ends a rest or a trial, and
+   the count starts over.
 
 While an account rests it ranks after every account that can serve and is not resting, whatever
 their tiers, so a new session gets it only when nothing else can; its sessions move at their next
@@ -128,15 +128,16 @@ Each pick carries no request identity, so an episode belongs to the binding and 
 request, its side requests and parent-following subagents all take part, and a success of any of
 them on the account ends it. quota-pilot learns of a failure from its usage record, which the proxy
 delivers a moment after the attempt ends: a pick that does not offer the bound account while an
-attempt it was just answered with has no record waits up to 200 ms for it. When a pick answers
-another account, that moment is the binding's takeover boundary: a failure of an attempt sent
-before it never starts a retry, as its request has moved on. A switch, a route and a move advance
-the session's generation, which ends any episode, and a record sent before says nothing of it.
+attempt it was just answered with has no record waits up to the record wait for it. When a pick
+answers another account, that moment is the binding's takeover boundary: a failure of an attempt
+sent before it never starts a retry, as its request has moved on. A switch, a route and a move
+advance the session's generation, which ends any episode, and a record sent before says nothing of
+it.
 
 **Switch now.** While a turn waits (the band's hang watch, waiting and running rows), the band
 offers `switch to k•••`, k••• being the account a failover would take now (the snapshot's
 `takeover`), only while the step's request is surely still on the bound account: no pick of the
-binding for its model has answered another account since a second before the step began
+binding for its model has answered another account since the takeover margin before the step began
 (`elsewhere_at`), and the session's generation is the one the step began under. A press asks first
 by today's rule for a switch, then sends today's switch with how long the turn had waited, the
 generation and the step's start; quota-pilot checks all three again under its lock and refuses with
@@ -145,9 +146,9 @@ k•••`. Applied, the switch is the user's (kind `user`, with `waited_ms` an
 try), the episode ends, a try still running writes its `retry` line when its record comes, and only
 then does the band stop the waiting turn (`$.turn.abort`), once, waiting for the turn's own end. It
 sends nothing for the user: their next message, any text, goes to k•••, the stopped turn's finished
-tool steps included. A press that the step's first content, the turn's end, a refusal or 5 s without
-an acknowledgement overtakes goes void and stops nothing; a switch it sent that lands later is told
-as any move.
+tool steps included. A press that the step's first content, the turn's end, a refusal or the
+acknowledgement wait overtakes goes void and stops nothing; a switch it sent that lands later is
+told as any move.
 
 A worked timeline, the hang of 2026-10-11 under these rules: at 22:04:17 d••• has hung for 2m 15s
 and its connection drops; the proxy's next round offers d••• at once and quota-pilot answers it,
@@ -162,13 +163,17 @@ back in 5m`.
 | Retry window | 75 s from the first failure's end | About as far as Claude Code's own retries reach; longer is worse than a cold start |
 | Waiting through a pause | from 100k tokens | Below it a cold start elsewhere costs less than the wait |
 | Hang | no response in 30 s, after waiting 30 s | Longer than any first response to a large cold prompt, far shorter than a stuck connection |
+| Hang watch | 30 s with no content in the band's main step | The same span: the band warns as soon as quota-pilot would call it a hang |
 | Record wait | 200 ms | The proxy delivers an attempt's record a moment after the attempt ends |
 | Account list age | 5 s while an episode runs | An account removed or disabled ends the wait within seconds |
 | Failure moment | 10 s | Requests that hung together, or several sessions at once, are one event, not several |
-| Second moment | within 15 min | Two separate failures close together; one failure is not a pattern |
+| Second moment | within 15 min of the first | Two separate failures close together; one failure is not a pattern |
 | First rest | 5 min | Longer than the proxy's 60 s pause after a 529, short enough to lose little |
-| Rest after a failed trial | doubled, 60 min at most | An account that fails again at once is still unwell |
-| Switch now's waits | 5 s for the acknowledgement; 5 s after the stop before saying it is not confirmed | The proxy answers within one read; a turn's end comes at once unless a hook holds it |
+| Rest after a failed trial | doubled, up to 60 min (the longest rest) | An account that fails again at once is still unwell |
+| Live reads | `/band` every 2 s while a retry names the session | The countdown, the running seconds and the outcome show promptly |
+| Takeover margin | 1 s before the step's start | The proxy's clock and the band's agree to within a read's latency |
+| Acknowledgement wait | 5 s for a press's switch; then 5 s after the stop before saying it is not confirmed | The proxy answers within one read; a turn's end comes at once unless a hook holds it |
+| Switch now's notices | 10 s for a refusal or no answer | Long enough to read; then the waiting row and its control come back |
 
 ### Moving a session to another provider
 
@@ -248,9 +253,10 @@ The kind is read from the status, the error body, `ttft` and the wait, in that o
 cancel (499) and what the proxy itself reads as the request's fault (`core/faults.go`, pinned
 against the proxy below) are `request`; a model the account does not serve is `model`; a 429 while
 the account reads as used up is `quota`; 401, 402, 403 and a refused grant are `sign-in`; no
-response in 30 s after waiting 30 s or more is `hang`; then a lost connection, a timeout, a 529, any
-other 5xx, a 429, anything else. A compact request's failure is `request` unless it is a sign-in,
-a 429 or a Cloudflare challenge, as the proxy leaves the account alone after it.
+response within the hang time (see the constants under
+[When an account fails](#when-an-account-fails)) is `hang`; then a lost connection, a timeout, a
+529, any other 5xx, a 429, anything else. A compact request's failure is `request` unless it is a
+sign-in, a 429 or a Cloudflare challenge, as the proxy leaves the account alone after it.
 
 The report runs the window rules above over the logged readings, so it and the live state agree; a
 plan change is logged as a line of its own, after which a request's use is learned anew, and the
@@ -355,8 +361,8 @@ character cells in a terminal (`terminal.tsx`), and as cards in the desktop app 
 whose font is proportional, whose widths are CSS lengths and whose colours follow its light or dark
 theme. Both show cards while Claude waits and one line while it works (also when another mod draws
 beneath it), and the row says one thing at a time: a question, what came of an action, or an alert
-(the proxy's, a cold next turn, a session moved or kept, a full context), in that order. The
-waiting rows carry `switch to k•••` (Switch now, in [When an account fails](#when-an-account-fails)).
+(the proxy's, a cold next turn, a session moved or kept, a full context), in that order. The waiting
+rows carry `switch to k•••` (Switch now, in [When an account fails](#when-an-account-fails)).
 
 Everything it shows of accounts comes from `/band`, read every 10 seconds at `ANTHROPIC_BASE_URL`
 with `ANTHROPIC_AUTH_TOKEN` (else `ANTHROPIC_API_KEY`, else no key, for a proxy without `api-keys`),
@@ -381,38 +387,37 @@ move, an account removed or disabled, the user's own switch; with none seen, `th
 out; no failure recorded`. Never from the account's state now: a record of an older plugin, without
 a kind, says `switched by you`, `moved while idle` or `reason not recorded`. The move row offers
 `switch back` while the snapshot's `switch_back` names the account it left: quota-pilot says so per
-model, each snapshot, only when that account is held, enabled, not used up for the model, and
-listed by a pick for that model since its last failure (any failure, any model, as quota-pilot cannot
-always tell which ones the proxy cools an account for). It never moves a session back by itself.
-A row too wide for the band draws its short form (`↪ Switched d••• → k••• · d••• hung`); the
-Codex notice says the same words (`mod/tests/moves.js` holds both sides' expected wording).
+model, each snapshot, only when that account is held, enabled, not used up for the model, and listed
+by a pick for that model since its last failure (any failure, any model, as quota-pilot cannot
+always tell which ones the proxy cools an account for). It never moves a session back by itself. A
+row too wide for the band draws its short form (`↪ Switched d••• → k••• · d••• hung`); the Codex
+notice says the same words (`mod/tests/moves.js` holds both sides' expected wording).
 
-While a turn waits, the row says what is being tried. When the snapshot's `retry` names the
-session, quota-pilot is waiting to try its account again (`! d••• returned HTTP 529 · retrying it in
-about 50s; k••• is next if needed`, or `waiting up to 75s for it` when the next try would come after
-the give-up, so it never promises a retry it will not make) or a try runs (`! d••• hung for 2m 15s ·
-retrying it, 40s so far`). The account after `next if needed` is the snapshot's `takeover`, the one a
-pick would answer once the retries end; with none the row ends there, or says `no other account has
-quota`. Without `retry`, a
-main step with no content in the 30 s since it started reads `! no answer for 45s`, adding `if it
-fails, a retry or another account takes over` while `takeover` names one: it names no account, as
-the band cannot see where the request is. These rows show only while the band's own main step has
-had no content (text, thinking, a tool call or its input) since the first failure, or since it
-started for the hang watch; Claude Code's retry marker and the stream's envelope do not count. They
-go at the first content, the step's end or a cancel. While `retry` names the session the band reads
-`/band` every 2 s, then every 10 s again, and counts every live number on its own clock shifted by
-the snapshot's `generated_at`, so a band on another device agrees with the proxy. A retry that kept
-the session leaves a note for 15 minutes, `↪ Stayed on d••• after HTTP 529 · the retry 61s later
-worked; cache kept` (`cache kept` only when the retry read the cache); one that ended in a move
-shows the move. An imminent move off a resting account or a binding whose retry got no answer reads
-`! d••• got no answer · moves to k••• (3% used) on the next turn`, and a held message counts that
-turn as cold. After a press of `switch to k•••` that stopped the turn, the move reads `↪ Switched
-d••• → k••• · by you after waiting 2m 55s; send a message to go on` until a main turn starts (the
-band keeps what it saw in its state, so a reload says the same); with nothing stopped, without the
-tail. A refusal and no answer within 5 s are told for 10 s, after which the waiting row and its
-control come back. Of the proxy's alerts, a retry waiting or running goes first (unless quota data is
-old), then the plugin's warnings, then the hang watch. Every row's text and short form come from one
-table, `wording.ts`, checked against the same fixture.
+While a turn waits, the row says what is being tried. When the snapshot's `retry` names the session,
+quota-pilot is waiting to try its account again (`! d••• returned HTTP 529 · retrying it in about
+50s; k••• is next if needed`, or `waiting up to 75s for it` when the next try would come after the
+give-up, so it never promises a retry it will not make) or a try runs (`! d••• hung for 2m 15s ·
+retrying it, 40s so far`). The account after `next if needed` is the snapshot's `takeover`, the one
+a pick would answer once the retries end; with none the row ends there, or says `no other account
+has quota`. Without `retry`, a main step with no content for the hang watch's span reads `! no
+answer for 45s`, adding `if it fails, a retry or another account takes over` while `takeover` names
+one: it names no account, as the band cannot see where the request is. These rows show only while
+the band's own main step has had no content (text, thinking, a tool call or its input) since the
+first failure, or since it started for the hang watch; Claude Code's retry marker and the stream's
+envelope do not count. They go at the first content, the step's end or a cancel. While `retry` names
+the session the band reads `/band` at the live rate, then as before, and counts every live number on
+its own clock shifted by the snapshot's `generated_at`, so a band on another device agrees with the
+proxy. A retry that kept the session leaves a note for 15 minutes, `↪ Stayed on d••• after HTTP 529
+· the retry 61s later worked; cache kept` (`cache kept` only when the retry read the cache); one
+that ended in a move shows the move. An imminent move off a resting account or a binding whose retry
+got no answer reads `! d••• got no answer · moves to k••• (3% used) on the next turn`, and a held
+message counts that turn as cold. After a press of `switch to k•••` that stopped the turn, the move
+reads `↪ Switched d••• → k••• · by you after waiting 2m 55s; send a message to go on` until a main
+turn starts (the band keeps what it saw in its state, so a reload says the same); with nothing
+stopped, without the tail. A refusal and no answer within the acknowledgement wait are told for a
+while, after which the waiting row and its control come back. Of the proxy's alerts, a retry waiting
+or running goes first (unless quota data is old), then the plugin's warnings, then the hang watch.
+Every row's text and short form come from one table, `wording.ts`, checked against the same fixture.
 
 A session signed in to Claude directly reads no proxy. The desktop app's are: it points them at
 Anthropic's own API with the app's sign-in. The band then shows that account's own limits, as Claude
@@ -583,8 +588,8 @@ back, so the band takes only that end as proof the turn stopped.
 
 - Rests and trials live in memory, like refusals: a proxy restart forgets them. An account that
   alternates failure and success never rests, as each success starts the count over.
-- A failure's record that reaches quota-pilot later than 200 ms after the next pick costs that
-  failure its retry; the takeover boundary keeps the late record from starting one.
+- A failure's record that reaches quota-pilot later than the record wait after the next pick costs
+  that failure its retry; the takeover boundary keeps the late record from starting one.
 - Through a proxy Claude Code has no first-byte limit, so a retry that hangs too waits until the
   upstream ends it or Claude Code's request timeout (`API_TIMEOUT_MS`, 600 s); a cancel never
   counts against the account.
