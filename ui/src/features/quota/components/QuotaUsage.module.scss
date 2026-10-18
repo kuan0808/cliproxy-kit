@@ -762,6 +762,45 @@ $selected: color-mix(in srgb, var(--text-primary) 72%, transparent);
   }
 }
 
+// A session whose every attempt failed, in place of its share.
+.noSuccess {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// A session's failures, retries and moves: one line each, its time first.
+.events {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: var(--text-primary);
+
+  li {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 10px;
+  }
+}
+
+.eventTime {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.eventFailure {
+  color: var(--warning-text);
+}
+
+.eventKept {
+  color: var(--kept-color);
+}
+
 .split,
 .detailGrid {
   display: grid;

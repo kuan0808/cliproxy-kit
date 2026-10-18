@@ -236,8 +236,13 @@ response, which covers every failed attempt before it: a lower bound, as the att
 before it is sent is not measured. `ttft` is what the proxy records: for Claude the first response
 bytes, an error body included; for Codex the first token event, else the first packet. Each change
 of a session's account is logged as an event line (`ev: move`, its kind and cause, from and to).
-Failure lines with neither tokens nor a reading, and event lines, are left out of every report, so
-no report changes by them.
+Failure lines with neither tokens nor a reading, and event lines, are left out of every report's
+numbers, so no total or share changes by them. A session with failure or event lines in the range
+and no request line (every attempt failed, as in a provider outage) gets a row of its own all the
+same, under its project and after the sessions that ran, with nothing used and `no successful
+request` in place of its share, so its detail opens. The detail lists the session's failed
+attempts, retries and moves in the range (`events`), each with its own line's model, as `Failures
+and moves`.
 
 The kind is read from the status, the error body, `ttft` and the wait, in that order: a client
 cancel (499) and what the proxy itself reads as the request's fault (`core/faults.go`, pinned
@@ -315,7 +320,10 @@ or a restart loses the log and the state.
 ### Management routes and the page
 
 Under `/v0/management/quota-pilot/`, behind the management key: `snapshot`, `usage` and
-`usage/session` (each with `tz`, the page's time zone), and `POST refresh`, which answers
+`usage/session` (each with `tz`, the page's time zone; `usage/session` also answers `events`, the
+session's failed attempts, retries and moves in the range, each `{t, event, account, label, to,
+to_label, model, cause, status, wait_ms, try, since_first_ms, ok, answered, move, why}` with `event`
+one of `failed`, `retry` and `move`, and `why` a move's cause), and `POST refresh`, which answers
 `{read, failed: [{account, label, failure, status}], complete}`. Three resources, which CLIProxyAPI
 serves without authentication under `/v0/resource/plugins/quota-pilot/`: `ui`, the page (it carries
 no data and asks the management routes for everything); `band`, the snapshot for the band; and

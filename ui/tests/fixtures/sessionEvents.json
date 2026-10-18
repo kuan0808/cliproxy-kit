@@ -1,0 +1,252 @@
+{
+  "s7": {
+    "accounts": [],
+    "agent": 0,
+    "composition": {
+      "requests": 0,
+      "tokens": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 0,
+        "output": 0
+      },
+      "weights": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 0,
+        "output": 0
+      }
+    },
+    "events": [
+      {
+        "account": "claude-a",
+        "cause": "hang",
+        "event": "failed",
+        "label": "d•••",
+        "model": "claude-opus-5-5",
+        "t": 1791997000000,
+        "wait_ms": 135000
+      },
+      {
+        "account": "claude-a",
+        "cause": "connection",
+        "event": "failed",
+        "label": "d•••",
+        "model": "claude-opus-5-5",
+        "t": 1791997120000,
+        "wait_ms": 300
+      },
+      {
+        "account": "claude-a",
+        "cause": "overloaded",
+        "event": "retry",
+        "label": "d•••",
+        "model": "claude-opus-5-5",
+        "since_first_ms": 61000,
+        "status": 529,
+        "t": 1791997180000,
+        "try": 1,
+        "wait_ms": 900
+      }
+    ],
+    "first": 0,
+    "id": "s7",
+    "last": 0,
+    "models": [],
+    "path": "",
+    "project": "",
+    "tiers": [],
+    "title": "",
+    "unit": ""
+  },
+  "s8": {
+    "accounts": [
+      {
+        "id": "claude-a",
+        "label": "d•••",
+        "provider": "claude",
+        "weight": 1500
+      }
+    ],
+    "agent": 0,
+    "composition": {
+      "requests": 1,
+      "tokens": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 0,
+        "output": 100
+      },
+      "weights": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 0,
+        "output": 1500
+      }
+    },
+    "events": [
+      {
+        "account": "claude-a",
+        "cause": "overloaded",
+        "event": "failed",
+        "label": "d•••",
+        "model": "claude-sonnet-5-5",
+        "status": 529,
+        "t": 1791997660000,
+        "wait_ms": 900
+      },
+      {
+        "account": "claude-a",
+        "cause": "model",
+        "event": "failed",
+        "label": "d•••",
+        "model": "claude-opus-5-5",
+        "status": 404,
+        "t": 1791998200000,
+        "wait_ms": 200
+      },
+      {
+        "account": "claude-a",
+        "event": "move",
+        "label": "d•••",
+        "model": "claude-opus-5-5",
+        "move": "model",
+        "t": 1791998201000,
+        "to": "claude-b",
+        "to_label": "k•••",
+        "why": {
+          "kind": "model",
+          "model": "claude-opus-5-5",
+          "status": 404
+        }
+      }
+    ],
+    "first": 1791997600000,
+    "id": "s8",
+    "last": 1791997600000,
+    "models": [
+      {
+        "name": "claude-sonnet-5-5",
+        "weight": 1500
+      }
+    ],
+    "path": "",
+    "project": "",
+    "tiers": [
+      {
+        "asked": "",
+        "provider": "claude",
+        "requests": 1,
+        "served": ""
+      }
+    ],
+    "title": "",
+    "unit": "10m"
+  },
+  "s9": {
+    "accounts": [
+      {
+        "id": "claude-a",
+        "label": "d•••",
+        "provider": "claude",
+        "weight": 2500
+      },
+      {
+        "id": "claude-b",
+        "label": "k•••",
+        "provider": "claude",
+        "weight": 2500
+      }
+    ],
+    "agent": 0,
+    "composition": {
+      "requests": 2,
+      "tokens": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 0,
+        "output": 200
+      },
+      "weights": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 0,
+        "output": 5000
+      }
+    },
+    "events": [
+      {
+        "account": "claude-a",
+        "cause": "request",
+        "event": "retry",
+        "label": "d•••",
+        "model": "claude-opus-5-5",
+        "since_first_ms": 2000,
+        "status": 499,
+        "t": 1791998860000,
+        "try": 1,
+        "wait_ms": 45000
+      },
+      {
+        "account": "claude-a",
+        "answered": true,
+        "cause": "request",
+        "event": "retry",
+        "label": "d•••",
+        "model": "claude-opus-5-5",
+        "since_first_ms": 2000,
+        "status": 499,
+        "t": 1791999400000,
+        "try": 1,
+        "wait_ms": 45000
+      },
+      {
+        "account": "claude-a",
+        "event": "move",
+        "label": "d•••",
+        "model": "claude-opus-5-5",
+        "move": "user",
+        "t": 1791999460000,
+        "to": "claude-b",
+        "to_label": "k•••",
+        "why": {
+          "kind": "hang",
+          "retries": 1,
+          "wait_ms": 135000,
+          "waited_ms": 175000
+        }
+      },
+      {
+        "account": "claude-b",
+        "event": "retry",
+        "label": "k•••",
+        "model": "claude-opus-5-5",
+        "ok": true,
+        "since_first_ms": 61000,
+        "t": 1791999700000,
+        "try": 1
+      }
+    ],
+    "first": 1791998800000,
+    "id": "s9",
+    "last": 1791999700000,
+    "models": [
+      {
+        "name": "claude-opus-5-5",
+        "weight": 5000
+      }
+    ],
+    "path": "",
+    "project": "",
+    "tiers": [
+      {
+        "asked": "",
+        "provider": "claude",
+        "requests": 2,
+        "served": ""
+      }
+    ],
+    "title": "",
+    "unit": "10m"
+  }
+}

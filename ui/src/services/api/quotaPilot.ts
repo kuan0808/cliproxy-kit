@@ -16,7 +16,9 @@ import type {
   QuotaPilotTokens,
   QuotaPilotUsage,
   QuotaPilotUsageAccount,
+  QuotaPilotMoveCause,
   QuotaPilotUsageDay,
+  QuotaPilotUsageEvent,
   QuotaPilotUsageProject,
   QuotaPilotUsageProvider,
   QuotaPilotUsageRange,
@@ -217,6 +219,7 @@ const normalizeUsageSession = (value: unknown): QuotaPilotUsageSession | null =>
     usedBy: asProviderParts(value.used_by),
     metered: value.metered === true,
     providers: asStrings(value.providers).map((p) => p.toLowerCase()),
+    noSuccess: value.no_success === true,
   };
 };
 
@@ -387,6 +390,44 @@ export function normalizeQuotaPilotUsage(value: unknown): QuotaPilotUsage | null
 }
 
 const BUCKET_UNITS = new Set(['10m', 'hour', 'day']);
+const EVENTS = new Set(['failed', 'retry', 'move']);
+
+const normalizeMoveCause = (value: unknown): QuotaPilotMoveCause | null =>
+  isRecord(value)
+    ? {
+        kind: asString(value.kind),
+        status: asNumber(value.status),
+        waitMs: asNumber(value.wait_ms),
+        count: asNumber(value.count),
+        reason: asString(value.reason),
+        model: asString(value.model),
+        retries: asNumber(value.retries),
+        lastRetry: normalizeMoveCause(value.last_retry),
+        answered: value.answered === true,
+        waitedMs: asNumber(value.waited_ms),
+      }
+    : null;
+
+const normalizeUsageEvent = (value: unknown): QuotaPilotUsageEvent | null => {
+  if (!isRecord(value) || !EVENTS.has(asString(value.event)) || !asMs(value.t)) return null;
+  return {
+    atMs: asNumber(value.t),
+    event: asString(value.event) as QuotaPilotUsageEvent['event'],
+    account: asString(value.account),
+    label: asString(value.label),
+    to: asString(value.to),
+    toLabel: asString(value.to_label),
+    model: asString(value.model),
+    cause: asString(value.cause),
+    status: asNumber(value.status),
+    waitMs: asNumber(value.wait_ms),
+    sinceFirstMs: asNumber(value.since_first_ms),
+    ok: value.ok === true,
+    answered: value.answered === true,
+    move: asString(value.move),
+    why: normalizeMoveCause(value.why),
+  };
+};
 
 export function normalizeQuotaPilotUsageSession(
   value: unknown
@@ -440,6 +481,8 @@ export function normalizeQuotaPilotUsageSession(
           }
         : null
     ),
+    // An older plugin answers without them.
+    events: listOf(value.events, normalizeUsageEvent),
   };
 }
 

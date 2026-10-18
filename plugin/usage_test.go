@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -719,7 +720,7 @@ func TestTheLogIsReadOnceAndKeptAsItIsWritten(t *testing.T) {
 	}
 	appendLines([]core.LogEntry{{T: at(-3 * time.Hour), Account: "a", Output: 1}, {T: at(-40 * 24 * time.Hour), Account: "a", Output: 9}})
 	// Lines past usageDays are not read, though the log began with one.
-	lines, began, done := logView(0)
+	lines, _, began, done := logView(0)
 	if outputs(lines["a"]) != "[1]" || began != at(-40*24*time.Hour) {
 		done()
 		t.Fatalf("read from the files = %+v, began %d", lines, began)
@@ -744,7 +745,7 @@ func TestTheLogIsReadOnceAndKeptAsItIsWritten(t *testing.T) {
 	if waiting != 0 {
 		t.Fatalf("the store loop left %d lines waiting", waiting)
 	}
-	lines, _, done = logView(at(-150 * time.Minute))
+	lines, _, _, done = logView(at(-150 * time.Minute))
 	a, b := outputs(lines["a"]), outputs(lines["b"])
 	done()
 	if a != "[3 2]" || b != "[4]" {
@@ -752,7 +753,7 @@ func TestTheLogIsReadOnceAndKeptAsItIsWritten(t *testing.T) {
 	}
 	// Read anew from the files, as after a restart, it is the same.
 	resetLogIndex()
-	lines, _, done = logView(at(-150 * time.Minute))
+	lines, _, _, done = logView(at(-150 * time.Minute))
 	a, b = outputs(lines["a"]), outputs(lines["b"])
 	done()
 	if a != "[3 2]" || b != "[4]" {
@@ -771,14 +772,14 @@ func TestAFileOutOfReachIsReadAgain(t *testing.T) {
 	file := filepath.Join(usageDir(), now.Add(-time.Hour).Format("2006-01")+".jsonl")
 	os.Chmod(file, 0)
 	defer os.Chmod(file, 0o600)
-	lines, _, done := logView(0)
+	lines, _, _, done := logView(0)
 	n := len(lines["a"])
 	done()
 	if n != 0 {
 		t.Skip("this user reads files it may not") // root
 	}
 	os.Chmod(file, 0o600)
-	lines, _, done = logView(0)
+	lines, _, _, done = logView(0)
 	n = len(lines["a"])
 	done()
 	if n != 1 {
@@ -870,8 +871,30 @@ func TestFailureAndEventLinesChangeNoReport(t *testing.T) {
 				// Where an account without a reading begins counts from the call's own time.
 				delete(doc, "to")
 				delete(doc, "from")
+				// A session with failures and no request gets a row of its own (withFailedOnly):
+				// set apart, so the rest is compared whole.
+				var failedOnly []string
+				projects, _ := doc["projects"].([]any)
+				kept := []any{}
+				for _, p := range projects {
+					project := p.(map[string]any)
+					sessions := []any{}
+					for _, x := range project["sessions"].([]any) {
+						if row := x.(map[string]any); row["no_success"] == true {
+							failedOnly = append(failedOnly, row["id"].(string))
+						} else {
+							sessions = append(sessions, row)
+						}
+					}
+					if len(sessions) > 0 {
+						project["sessions"] = sessions
+						kept = append(kept, project)
+					}
+				}
+				doc["projects"] = kept
 				clean, _ := json.Marshal(doc)
 				out[rng+"|"+scope] = string(clean)
+				out[rng+"|"+scope+"|failed only"] = strings.Join(failedOnly, ",")
 			}
 		}
 		return out
@@ -881,7 +904,19 @@ func TestFailureAndEventLinesChangeNoReport(t *testing.T) {
 	withFailure := append([]core.LogEntry(nil), counted...)
 	withFailure[4].F, withFailure[4].St, withFailure[4].W = core.FailOverloaded, 529, 900
 	after := report(append(withFailure, extra...))
+	// Only the sessions that never got a request through have rows of their own: s3 on an account
+	// the proxy no longer holds, s4 on a provider it has no account of; over the week neither
+	// account's lines count, as an account no longer held counts only over a range.
+	for k, want := range map[string]string{"|all|failed only": "", "7d|all|failed only": "s3,s4", "7d|provider:claude|failed only": "s3",
+		"30d|all|failed only": "s3,s4", "7d|claude-a|failed only": ""} {
+		if after[k] != want {
+			t.Errorf("%s = %q, want %q", k, after[k], want)
+		}
+	}
 	for k, want := range before {
+		if strings.HasSuffix(k, "|failed only") {
+			continue
+		}
 		if got := after[k]; got != want {
 			i := 0
 			for i < len(got) && i < len(want) && got[i] == want[i] {
@@ -890,5 +925,210 @@ func TestFailureAndEventLinesChangeNoReport(t *testing.T) {
 			from := max(0, i-200)
 			t.Errorf("%s changed at %d:\n%s\n%s", k, i, want[from:min(len(want), i+100)], got[from:min(len(got), i+100)])
 		}
+	}
+}
+
+// sessionEventsFixture is the page's test fixture: these sessions' details as usage/session answers
+// them after the log is read again, the times moved to a fixed epoch and the buckets left out.
+const sessionEventsFixture = "../ui/tests/fixtures/sessionEvents.json"
+
+// A session's failures, retries and moves read back from the log: a session whose every attempt
+// failed has a row of its own and its events in its detail, each event with its own line's model,
+// and two cancelled retries read apart by whether they had answered. QUOTA_UPDATE_FIXTURES=1 writes
+// the page's fixture anew.
+func TestASessionsEventsAreReadBackFromTheLog(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetLogIndex()
+	defer resetLogIndex()
+	saved := state
+	defer func() { state = saved }()
+	state = core.New(newBootID(), nil)
+	state.UpdateInventory([]core.CredInfo{{ID: "claude-a", Provider: "claude", Email: "dana@example.com"}, {ID: "claude-b", Provider: "claude", Email: "kim@example.com"}})
+	now := time.Now()
+	at := func(d time.Duration) int64 { return now.Add(d).UnixMilli() }
+	used := func(f float64) *float64 { return &f }
+	const opus, sonnet = "claude-opus-5-5", "claude-sonnet-5-5"
+	appendLines([]core.LogEntry{
+		{T: at(-3 * time.Hour), Account: "claude-a", Provider: "claude", Poll: true, Used7d: used(0.1), Reset7: at(4 * 24 * time.Hour)},
+		// s7: the provider was down; nothing got through.
+		{T: at(-50 * time.Minute), Account: "claude-a", Provider: "claude", Session: "s7", Model: opus, Poll: true, F: core.FailHang, W: 135_000},
+		{T: at(-48 * time.Minute), Account: "claude-a", Provider: "claude", Session: "s7", Model: opus, Poll: true, F: core.FailConnection, W: 300},
+		{T: at(-47 * time.Minute), Account: "claude-a", Provider: "claude", Session: "s7", Model: opus, Poll: true, Ev: core.EventRetry, Try: 1, Since: 61_000,
+			F: core.FailOverloaded, St: 529, W: 900},
+		// s8: a failure on Sonnet, then a move for an Opus model failure.
+		{T: at(-40 * time.Minute), Account: "claude-a", Provider: "claude", Session: "s8", Model: sonnet, Output: 100},
+		{T: at(-39 * time.Minute), Account: "claude-a", Provider: "claude", Session: "s8", Model: sonnet, Poll: true, F: core.FailOverloaded, St: 529, W: 900},
+		{T: at(-30 * time.Minute), Account: "claude-a", Provider: "claude", Session: "s8", Model: opus, Poll: true, F: core.FailModel, St: 404, W: 200},
+		{T: at(-30*time.Minute + time.Second), Account: "claude-b", Provider: "claude", Session: "s8", Model: opus, Poll: true, Ev: core.EventMove,
+			From: "claude-a", Move: core.MoveModel, Cause: &core.Cause{Kind: core.FailModel, Status: 404, Model: opus}},
+		// s9: two retries cancelled at 45 s, one before any answer and one after; then a press of
+		// switch to k•••, and a retry that worked.
+		{T: at(-20 * time.Minute), Account: "claude-a", Provider: "claude", Session: "s9", Model: opus, Output: 100},
+		{T: at(-19 * time.Minute), Account: "claude-a", Provider: "claude", Session: "s9", Model: opus, Poll: true, Ev: core.EventRetry, Try: 1, Since: 2_000,
+			F: core.FailRequest, St: 499, W: 45_000},
+		{T: at(-10 * time.Minute), Account: "claude-a", Provider: "claude", Session: "s9", Model: opus, Poll: true, Ev: core.EventRetry, Try: 1, Since: 2_000,
+			F: core.FailRequest, St: 499, W: 45_000, Answered: true},
+		{T: at(-9 * time.Minute), Account: "claude-b", Provider: "claude", Session: "s9", Model: opus, Poll: true, Ev: core.EventMove, From: "claude-a",
+			Move: core.MoveUser, Cause: &core.Cause{Kind: core.FailHang, WaitMs: 135_000, Retries: 1, WaitedMs: 175_000}},
+		{T: at(-5 * time.Minute), Account: "claude-b", Provider: "claude", Session: "s9", Model: opus, Poll: true, Ev: core.EventRetry, Try: 1, Since: 61_000, OK: true},
+		{T: at(-5 * time.Minute), Account: "claude-b", Provider: "claude", Session: "s9", Model: opus, Output: 100},
+	})
+	resetLogIndex() // read back from the files
+	get := func(fn func(url.Values) ([]byte, error), q url.Values) map[string]any {
+		raw, err := fn(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct{ Result struct{ Body []byte } }
+		var doc map[string]any
+		if json.Unmarshal(raw, &envelope) != nil || json.Unmarshal(envelope.Result.Body, &doc) != nil {
+			t.Fatalf("unreadable: %s", raw)
+		}
+		return doc
+	}
+	// The report lists s7 after the sessions that ran, with nothing used.
+	rows := map[string]map[string]any{}
+	var order []string
+	for _, p := range get(usageResponse, url.Values{"tz": {"UTC"}})["projects"].([]any) {
+		for _, x := range p.(map[string]any)["sessions"].([]any) {
+			row := x.(map[string]any)
+			rows[row["id"].(string)], order = row, append(order, row["id"].(string))
+		}
+	}
+	if r := rows["s7"]; r == nil || r["no_success"] != true || r["requests"].(float64) != 0 || r["used"].(float64) != 0 || order[len(order)-1] != "s7" {
+		t.Fatalf("s7's row %v in %v", r, order)
+	}
+	if rows["s8"]["no_success"] != nil || rows["s9"]["no_success"] != nil {
+		t.Fatalf("a session that ran has no_success: %v %v", rows["s8"], rows["s9"])
+	}
+	detail := func(id string) map[string]any {
+		return get(usageSessionResponse, url.Values{"id": {id}, "tz": {"UTC"}})
+	}
+	events := func(d map[string]any) []map[string]any {
+		var out []map[string]any
+		for _, e := range d["events"].([]any) {
+			out = append(out, e.(map[string]any))
+		}
+		return out
+	}
+	s7, s8, s9 := detail("s7"), detail("s8"), detail("s9")
+	if ev := events(s7); len(ev) != 3 || ev[0]["event"] != "failed" || ev[0]["cause"] != core.FailHang || ev[0]["label"] != "d•••" ||
+		ev[2]["event"] != "retry" || ev[2]["status"].(float64) != 529 || ev[2]["since_first_ms"].(float64) != 61_000 {
+		t.Fatalf("s7 events %v", ev)
+	}
+	if ev := events(s8); len(ev) != 3 || ev[0]["model"] != sonnet || ev[1]["model"] != opus || ev[2]["event"] != "move" || ev[2]["model"] != opus ||
+		ev[2]["move"] != core.MoveModel || ev[2]["to_label"] != "k•••" || ev[2]["why"].(map[string]any)["model"] != opus {
+		t.Fatalf("s8 events %v", ev)
+	}
+	if ev := events(s9); len(ev) != 4 || ev[0]["answered"] != nil || ev[1]["answered"] != true || ev[0]["wait_ms"].(float64) != 45_000 ||
+		ev[2]["why"].(map[string]any)["waited_ms"].(float64) != 175_000 || ev[3]["ok"] != true {
+		t.Fatalf("s9 events %v", ev)
+	}
+	// The page's fixture: the details with their times moved to a fixed epoch.
+	const epoch = 1_792_000_000_000 // 2026-10-15T06:13:20Z
+	var rebase func(v any) any
+	rebase = func(v any) any {
+		switch x := v.(type) {
+		case map[string]any:
+			delete(x, "buckets")
+			for k, y := range x {
+				if n, ok := y.(float64); ok && (k == "t" || k == "first" || k == "last") && n > 1e12 {
+					x[k] = epoch + n - float64(now.UnixMilli())
+				} else {
+					x[k] = rebase(y)
+				}
+			}
+		case []any:
+			for i := range x {
+				x[i] = rebase(x[i])
+			}
+		}
+		return v
+	}
+	fixture, _ := json.MarshalIndent(rebase(map[string]any{"s7": s7, "s8": s8, "s9": s9}), "", "  ")
+	fixture = append(fixture, '\n')
+	if os.Getenv("QUOTA_UPDATE_FIXTURES") == "1" {
+		if err := os.WriteFile(sessionEventsFixture, fixture, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if have, _ := os.ReadFile(sessionEventsFixture); !bytes.Equal(have, fixture) {
+		t.Fatalf("%s is not what usage/session answers now; write it anew with QUOTA_UPDATE_FIXTURES=1:\n%s", sessionEventsFixture, fixture)
+	}
+}
+
+// Which sessions get a row of their own for failures: one whose request line carries tokens and a
+// failure keeps its row as today; one whose only failure line read the quota gets the zero-usage
+// row, its reading counting toward the account as today; one with only pure failure lines too.
+func TestASessionWithFailuresAndNoRequestGetsARowOfItsOwn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	saved := state
+	defer func() { state = saved }()
+	now := time.Now()
+	at := func(d time.Duration) int64 { return now.Add(d).UnixMilli() }
+	used := func(f float64) *float64 { return &f }
+	reset := at(4 * 24 * time.Hour)
+	base := []core.LogEntry{
+		{T: at(-3 * time.Hour), Account: "claude-a", Provider: "claude", Poll: true, Used7d: used(0.1), Reset7: reset},
+		{T: at(-2 * time.Hour), Account: "claude-a", Provider: "claude", Session: "s0", Model: "claude-opus-5-5", Output: 4000},
+	}
+	report := func(lines []core.LogEntry) map[string]any {
+		resetLogIndex()
+		files, _ := filepath.Glob(filepath.Join(usageDir(), "*.jsonl"))
+		for _, f := range files {
+			_ = os.Remove(f)
+		}
+		state = core.New(newBootID(), nil)
+		state.UpdateInventory([]core.CredInfo{{ID: "claude-a", Provider: "claude", Email: "dana@example.com"}})
+		appendLines(lines)
+		resetLogIndex()
+		raw, err := usageResponse(url.Values{"tz": {"UTC"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct{ Result struct{ Body []byte } }
+		var doc map[string]any
+		if json.Unmarshal(raw, &envelope) != nil || json.Unmarshal(envelope.Result.Body, &doc) != nil {
+			t.Fatalf("unreadable: %s", raw)
+		}
+		return doc
+	}
+	rowsOf := func(doc map[string]any) map[string]map[string]any {
+		rows := map[string]map[string]any{}
+		for _, p := range doc["projects"].([]any) {
+			for _, x := range p.(map[string]any)["sessions"].([]any) {
+				rows[x.(map[string]any)["id"].(string)] = x.(map[string]any)
+			}
+		}
+		return rows
+	}
+	accountUsed := func(doc map[string]any) float64 {
+		return doc["providers"].([]any)[0].(map[string]any)["accounts"].([]any)[0].(map[string]any)["used"].(float64)
+	}
+	reading := core.LogEntry{T: at(-time.Hour), Account: "claude-a", Provider: "claude", Poll: true, Used7d: used(0.3), Reset7: reset}
+	failedReading := reading
+	failedReading.Session, failedReading.Model, failedReading.F, failedReading.St, failedReading.W = "sB", "claude-opus-5-5", core.FailOverloaded, 529, 900
+	// Today's lines: sA's request without its failure, and the reading alone.
+	ran := core.LogEntry{T: at(-90 * time.Minute), Account: "claude-a", Provider: "claude", Session: "sA", Model: "claude-opus-5-5", Output: 1000}
+	ranAndFailed := ran
+	ranAndFailed.F, ranAndFailed.W = core.FailConnection, 300
+	plain, failed := report(append(append([]core.LogEntry(nil), base...), ran, reading)), report(append(append([]core.LogEntry(nil), base...),
+		ranAndFailed, failedReading,
+		core.LogEntry{T: at(-30 * time.Minute), Account: "claude-a", Provider: "claude", Session: "sC", Model: "claude-opus-5-5", Poll: true, F: core.FailServer, St: 502, W: 100},
+	))
+	rows := rowsOf(failed)
+	if a, was := rows["sA"], rowsOf(plain)["sA"]; a == nil || a["no_success"] != nil || fmt.Sprint(a) != fmt.Sprint(was) {
+		t.Fatalf("sA %v, was %v", a, was)
+	}
+	for _, id := range []string{"sB", "sC"} {
+		if r := rows[id]; r == nil || r["no_success"] != true || r["requests"].(float64) != 0 || r["used"].(float64) != 0 {
+			t.Fatalf("%s %v", id, r)
+		}
+	}
+	if accountUsed(plain) != accountUsed(failed) {
+		t.Fatalf("the failed attempt's reading counts %v, a plain reading %v", accountUsed(failed), accountUsed(plain))
+	}
+	if rowsOf(plain)["s0"]["used"] != rows["s0"]["used"] {
+		t.Fatalf("s0's share changed: %v, was %v", rows["s0"], rowsOf(plain)["s0"])
 	}
 }

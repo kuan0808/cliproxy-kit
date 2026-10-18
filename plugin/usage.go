@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -141,9 +142,10 @@ var logIndex struct {
 	seq     uint64
 }
 
-// logView is each account's lines from since on, and when the log began. The lines are shared:
-// the caller must not change them, and calls done once it no longer reads them.
-func logView(since int64) (lines map[string][]core.LogEntry, logStart int64, done func()) {
+// logView is each account's lines from since on, the lines no report counts from since on (see
+// logIndex.events), and when the log began. The lines are shared: the caller must not change them,
+// and calls done once it no longer reads them.
+func logView(since int64) (lines map[string][]core.LogEntry, events []core.LogEntry, logStart int64, done func()) {
 	logIndex.mu.Lock()
 	logMu.Lock()
 	if !logIndex.loaded {
@@ -162,7 +164,9 @@ func logView(since int64) (lines map[string][]core.LogEntry, logStart int64, don
 			lines[id] = ls[i:]
 		}
 	}
-	return lines, logBegan(), logIndex.mu.RUnlock
+	ev := logIndex.events
+	events = ev[sort.Search(len(ev), func(i int) bool { return ev[i].T >= since }):]
+	return lines, events, logBegan(), logIndex.mu.RUnlock
 }
 
 // takeLines takes the lines written meanwhile into the index, unless a report is reading it.
@@ -716,6 +720,9 @@ type usageSession struct {
 	// quota readings exist (before the log began, or an account not on the proxy).
 	Metered   bool     `json:"metered"`
 	Providers []string `json:"providers"` // the providers it used in the range
+	// NoSuccess: it has failures or moves in the range and no request line, as when its provider was
+	// down; its row says so with nothing used.
+	NoSuccess bool `json:"no_success,omitempty"`
 }
 
 type usageProject struct {
@@ -836,6 +843,7 @@ type reading struct {
 	// lines are each account's lines, oldest first, counted under the account they count for;
 	// shared with the log's index until done is called.
 	lines     map[string][]core.LogEntry
+	events    []core.LogEntry // the lines no report counts: failures with neither tokens nor a reading, and binding events
 	done      func()
 	week      map[string]core.Attribution // each account's current window: its week, or over 5h its 5-hour window
 	ranged    map[string]core.Attribution // each account over the range (the current window for "week" and "5h")
@@ -883,7 +891,7 @@ func rangeDays(rng string) int {
 // kept one by one (nil for none).
 // The caller calls the reading's done once it no longer reads its lines.
 func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
-	view, logStart, done := logView(now.AddDate(0, 0, -usageDays).UnixMilli())
+	view, events, logStart, done := logView(now.AddDate(0, 0, -usageDays).UnixMilli())
 	// One provider account read under two credentials (logged in again under a new one) is one
 	// account: its lines count under one, read with the snapshot so the two agree. Only those
 	// lines are copied, to name that account; the rest are read where the index keeps them.
@@ -920,7 +928,7 @@ func readUsage(now time.Time, rng string, keep func(string) bool) *reading {
 	}
 	u := &reading{rng: rng, canonical: canonical, week: map[string]core.Attribution{}, ranged: map[string]core.Attribution{},
 		froms: map[string]int64{}, starts: map[string]int64{}, owner: map[string]string{}, windows: map[string][]fiveWindow{}, noWindow: map[string]bool{},
-		namedFrom: map[string]int64{}, remote: map[string]bool{}, lines: lines, done: done}
+		namedFrom: map[string]int64{}, remote: map[string]bool{}, lines: lines, events: events, done: done}
 	if n := rangeDays(rng); n > 0 {
 		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		u.from = today.AddDate(0, 0, 1-n).UnixMilli()
@@ -1232,8 +1240,16 @@ func usageResponse(query url.Values) ([]byte, error) {
 	served := map[string]map[string]float64{}     // session to account to weight
 	usedProviders := map[string]map[string]bool{} // session to the providers it used
 	used7 := map[string]map[string]*dayUse{}      // provider to day to what ran
+	failedOnly := map[string]int64{}              // a session with failures or moves and no request line: its last
+	noteFailure := func(e core.LogEntry) {
+		if e.Session != "" && (e.F != "" || e.Ev != "") {
+			id := core.ViewSession(e.Session)
+			failedOnly[id] = max(failedOnly[id], e.T)
+		}
+	}
 	u.each(inScope, func(e core.LogEntry) {
 		if e.Poll {
+			noteFailure(e) // a failed attempt that read the quota: counted toward its account, no request
 			return
 		}
 		doc.Composition.Add(e)
@@ -1272,9 +1288,22 @@ func usageResponse(query url.Values) ([]byte, error) {
 			sh.Last = max(sh.Last, e.T)
 		}
 	})
+	for _, e := range u.events {
+		if inScope(e) {
+			noteFailure(e)
+		}
+	}
+	for id := range failedOnly {
+		if served[id] != nil {
+			delete(failedOnly, id)
+		}
+	}
 	// Each session's project is decided once for the whole report, so the accounts' parts, the
 	// table and the days name projects alike.
 	ids := map[string]bool{}
+	for id := range failedOnly {
+		ids[id] = true
+	}
 	for id := range shares {
 		ids[core.ViewSession(id)] = true
 	}
@@ -1297,7 +1326,7 @@ func usageResponse(query url.Values) ([]byte, error) {
 			a.Projects = projectParts(u.week[a.ID], refs)
 		}
 	}
-	doc.Projects = groupByProject(shares, served, usedBy, usedProviders, refs, u.remote)
+	doc.Projects = withFailedOnly(groupByProject(shares, served, usedBy, usedProviders, refs, u.remote), failedOnly, refs, u.remote)
 	if rng == "5h" {
 		// Each provider's windows of the last day, of the scope's accounts, oldest first.
 		doc.Windows = map[string][]usageWindow{}
@@ -1491,6 +1520,11 @@ func usageSessionResponse(query url.Values) ([]byte, error) {
 		}
 		served = append(served, a)
 	}
+	labels := map[string]string{}
+	for id, info := range infos {
+		labels[id] = info.Label
+	}
+	events := u.sessionEvents(id, u.eventsFrom(accounts, now), labels)
 	meta := sessionMeta(id)
 	body, errMarshal := json.Marshal(struct {
 		ID      string `json:"id"`
@@ -1500,8 +1534,9 @@ func usageSessionResponse(query url.Values) ([]byte, error) {
 		Origin  string `json:"origin,omitempty"`
 		Remote  bool   `json:"remote,omitempty"`
 		core.SessionDetail
-		Accounts []account `json:"accounts"`
-	}{ID: id, Title: meta.Title, Project: meta.Project, Path: meta.Path, Origin: meta.Origin, Remote: meta.Remote || u.remote[id], SessionDetail: detail, Accounts: served})
+		Accounts []account      `json:"accounts"`
+		Events   []sessionEvent `json:"events"`
+	}{ID: id, Title: meta.Title, Project: meta.Project, Path: meta.Path, Origin: meta.Origin, Remote: meta.Remote || u.remote[id], SessionDetail: detail, Accounts: served, Events: events})
 	if errMarshal != nil {
 		return nil, errMarshal
 	}
@@ -1791,4 +1826,101 @@ func groupByProject(shares map[string]*core.Share, served, usedBy map[string]map
 		return a.Used > b.Used || (a.Used == b.Used && a.Last > b.Last)
 	})
 	return out
+}
+
+// withFailedOnly adds a row for each session with failures or moves in the range and no request line
+// (every attempt failed, as in a provider outage), so its detail can open: under its project, after
+// the sessions that ran, most recent first, with nothing used. Totals and every other row stay.
+func withFailedOnly(projects []usageProject, failed map[string]int64, refs map[string]projectRef, remote map[string]bool) []usageProject {
+	ids := make([]string, 0, len(failed))
+	for id := range failed {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return failed[ids[i]] > failed[ids[j]] || failed[ids[i]] == failed[ids[j]] && ids[i] < ids[j]
+	})
+	for _, id := range ids {
+		meta, ref := sessionMeta(id), refs[id]
+		i := slices.IndexFunc(projects, func(p usageProject) bool { return p.Name == ref.Name })
+		if i < 0 {
+			projects = append(projects, usageProject{Name: ref.Name, Path: ref.Path, Sessions: []usageSession{}})
+			i = len(projects) - 1
+		}
+		projects[i].Sessions = append(projects[i].Sessions, usageSession{ID: id, Title: meta.Title, Accounts: []string{}, Origin: meta.Origin,
+			Remote: meta.Remote || remote[id], Device: meta.Device, Providers: []string{}, NoSuccess: true})
+	}
+	return projects
+}
+
+// sessionEvent is one of a session's failed attempts, retries and moves, as its detail lists them.
+type sessionEvent struct {
+	T       int64  `json:"t"`
+	Event   string `json:"event"`   // failed, retry or move
+	Account string `json:"account"` // where it happened; a move's, the account it left
+	Label   string `json:"label"`   // "" when the account is no longer on the proxy
+	To      string `json:"to,omitempty"`
+	ToLabel string `json:"to_label,omitempty"`
+	Model   string `json:"model"` // its own line's model, never the session's current one
+	Agent   bool   `json:"agent,omitempty"`
+	// A failed attempt, or a retry that failed: its kind, status and wait.
+	Cause  string `json:"cause,omitempty"`
+	Status int    `json:"status,omitempty"`
+	WaitMs int64  `json:"wait_ms,omitempty"`
+	// A retry: its number, how long after the first failure ended it started, whether it worked, and
+	// when it failed whether it had begun answering.
+	Try          int   `json:"try,omitempty"`
+	SinceFirstMs int64 `json:"since_first_ms,omitempty"`
+	OK           bool  `json:"ok,omitempty"`
+	Answered     bool  `json:"answered,omitempty"`
+	// A move: its kind and why, as its switch record says it.
+	Move string      `json:"move,omitempty"`
+	Why  *core.Cause `json:"why,omitempty"`
+}
+
+// sessionEvents is a session's failed attempts, retries and moves from `from` on, oldest first: the
+// failed attempts a report counts (they ran tokens or read the quota) and the lines it does not.
+func (u *reading) sessionEvents(id string, from int64, labels map[string]string) []sessionEvent {
+	var lines []core.LogEntry
+	for _, ls := range u.lines {
+		for _, e := range ls[sort.Search(len(ls), func(i int) bool { return ls[i].T >= from }):] {
+			if e.F != "" && core.ViewSession(e.Session) == id {
+				lines = append(lines, e)
+			}
+		}
+	}
+	for _, e := range u.events[sort.Search(len(u.events), func(i int) bool { return u.events[i].T >= from }):] {
+		if (e.F != "" || e.Ev != "") && core.ViewSession(e.Session) == id {
+			lines = append(lines, e)
+		}
+	}
+	sort.SliceStable(lines, func(i, j int) bool { return byTime(lines[i], lines[j]) })
+	out := make([]sessionEvent, 0, len(lines))
+	for _, e := range lines {
+		ev := sessionEvent{T: e.T, Event: "failed", Account: e.Account, Label: labels[e.Account], Model: e.Model, Agent: e.Agent,
+			Cause: e.F, Status: e.St, WaitMs: e.W}
+		switch e.Ev {
+		case core.EventMove:
+			ev = sessionEvent{T: e.T, Event: "move", Account: e.From, Label: labels[e.From], To: e.Account, ToLabel: labels[e.Account],
+				Model: e.Model, Agent: e.Agent, Move: e.Move, Why: e.Cause}
+		case core.EventRetry:
+			ev.Event, ev.Try, ev.SinceFirstMs, ev.OK, ev.Answered = "retry", e.Try, e.Since, e.OK, e.Answered
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// eventsFrom is where a session's events start in a report: the range's start, else the earliest
+// start of the scope's accounts' current windows.
+func (u *reading) eventsFrom(accounts []string, now time.Time) int64 {
+	if u.from > 0 {
+		return u.from
+	}
+	from := now.AddDate(0, 0, -7).UnixMilli()
+	for _, id := range accounts {
+		if f, ok := u.froms[id]; ok {
+			from = min(from, f)
+		}
+	}
+	return from
 }

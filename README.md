@@ -326,6 +326,9 @@ ticked, else it asks for the management key once per tab.
 - **Usage:** each account's 5-hour window, week, or 7 or 30 days, by project and session, with tokens
   and the cache hit rate. Days follow your time zone.
 - **Refresh:** reads every account's quota now, and names any it could not read and why.
+- **Failures and moves:** a session's detail lists its failed requests, retries and account moves,
+  each with its time and model; a session whose every request failed still gets a row, `no
+  successful request`.
 
 ![Projects and sessions behind an account's week, tagged by device and by what ran them](docs/images/projects.png)
 

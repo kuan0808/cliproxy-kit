@@ -109,6 +109,8 @@ export interface QuotaPilotUsageSession {
   metered: boolean;
   /** The providers it used in the range. */
   providers: string[];
+  /** It has failures or moves in the range and no request: nothing used, and its row says so. */
+  noSuccess: boolean;
 }
 
 export interface QuotaPilotUsageProject {
@@ -321,6 +323,49 @@ export interface QuotaPilotUsageSessionDetail {
   remote: boolean;
   /** Most requests first. */
   tiers: QuotaPilotUsageTier[];
+  /** Its failed attempts, retries and moves in the range, oldest first. */
+  events: QuotaPilotUsageEvent[];
+}
+
+/** Why a session moved, as its switch record says it (the plugin's Cause). */
+export interface QuotaPilotMoveCause {
+  kind: string;
+  status: number;
+  waitMs: number;
+  count: number;
+  /** A quota or idle move's reading ("weekly quota used up"), or a gone account's "removed" or "disabled". */
+  reason: string;
+  model: string;
+  retries: number;
+  lastRetry: QuotaPilotMoveCause | null;
+  answered: boolean;
+  /** On the user's own switch from a waiting turn: how long it had waited. */
+  waitedMs: number;
+}
+
+/** One of a session's failed attempts, retries and moves. */
+export interface QuotaPilotUsageEvent {
+  atMs: number;
+  event: 'failed' | 'retry' | 'move';
+  /** Where it happened (a move's, the account it left), and its label: '' when no longer on the proxy. */
+  account: string;
+  label: string;
+  /** A move's new account and its label. */
+  to: string;
+  toLabel: string;
+  /** Its own line's model, never the session's current one. */
+  model: string;
+  /** A failed attempt, or a retry that failed: its kind, status and wait. */
+  cause: string;
+  status: number;
+  waitMs: number;
+  /** A retry: how long after the first failure ended it started, whether it worked, and whether a failed one had begun answering. */
+  sinceFirstMs: number;
+  ok: boolean;
+  answered: boolean;
+  /** A move: its kind, and why. */
+  move: string;
+  why: QuotaPilotMoveCause | null;
 }
 
 /**

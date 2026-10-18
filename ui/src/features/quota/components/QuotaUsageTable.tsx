@@ -60,6 +60,7 @@ import {
   type ProjectSources,
   type SessionSource,
 } from '../usageFormat';
+import { eventText } from '../usageEvents';
 import { BarCard, PickableBars } from './QuotaUsageBars';
 import { Composition } from './QuotaUsageSummary';
 import styles from './QuotaUsage.module.scss';
@@ -80,6 +81,8 @@ interface Row {
   requests: number;
   lastMs: number | null;
   tokens: QuotaPilotTokens;
+  /** A session whose every attempt failed: its row says so in place of its share. */
+  noSuccess?: boolean;
 }
 
 export function UsageTable({
@@ -225,7 +228,15 @@ export function UsageTable({
   const cells = (row: Row, colour: string, accounts?: string[], usedProviders?: string[]) =>
     columns === 'quota' ? (
       <>
-        {all ? (
+        {row.noSuccess ? (
+          <span
+            role="cell"
+            className={styles.noSuccess}
+            style={all ? { gridColumn: `span ${providers.length}` } : undefined}
+          >
+            {t('quota_usage.no_success')}
+          </span>
+        ) : all ? (
           providers.map((p) => providerCell(row, p, Boolean(usedProviders?.includes(p))))
         ) : row.metered ? (
           <span role="cell" className={styles.share}>
@@ -976,34 +987,39 @@ export function SessionDetailView({
             }}
           />
 
-          <div className={styles.subhead}>
-            {t('quota_usage.models')}
-            <span>{t('quota_usage.col_estimated')}</span>
-          </div>
-          {d.models.map((m) => (
-            <div key={m.name} className={styles.mix}>
-              <span>{modelName(m.name)}</span>
-              <span className={styles.kindBar} aria-hidden="true">
-                <span style={{ width: `${total > 0 ? (m.weight / total) * 100 : 0}%` }} />
-              </span>
-              <strong>{formatShare(total > 0 ? m.weight / total : 0)}</strong>
-            </div>
-          ))}
-
-          {tierRows.length > 0 && (
+          {/* A session whose every attempt failed used nothing: no models, no split to show. */}
+          {total > 0 && (
             <>
               <div className={styles.subhead}>
-                {t('quota_usage.tiers')}
-                {tierRows.some((row) => row.mixed) && <span>{t('quota_usage.tiers_note')}</span>}
+                {t('quota_usage.models')}
+                <span>{t('quota_usage.col_estimated')}</span>
               </div>
-              <dl className={`${styles.facts} ${styles.tierFacts}`}>
-                {tierRows.map((row) => (
-                  <div key={row.side}>
-                    <dt>{t(`quota_usage.tier_${row.side}`)}</dt>
-                    <dd>{row.text}</dd>
+              {d.models.map((m) => (
+                <div key={m.name} className={styles.mix}>
+                  <span>{modelName(m.name)}</span>
+                  <span className={styles.kindBar} aria-hidden="true">
+                    <span style={{ width: `${total > 0 ? (m.weight / total) * 100 : 0}%` }} />
+                  </span>
+                  <strong>{formatShare(total > 0 ? m.weight / total : 0)}</strong>
+                </div>
+              ))}
+
+              {tierRows.length > 0 && (
+                <>
+                  <div className={styles.subhead}>
+                    {t('quota_usage.tiers')}
+                    {tierRows.some((row) => row.mixed) && (
+                      <span>{t('quota_usage.tiers_note')}</span>
+                    )}
                   </div>
-                ))}
-              </dl>
+                  <dl className={`${styles.facts} ${styles.tierFacts}`}>
+                    {tierRows.map((row) => (
+                      <div key={row.side}>
+                        <dt>{t(`quota_usage.tier_${row.side}`)}</dt>
+                        <dd>{row.text}</dd>
+                      </div>
+                    ))}
+                  </dl>
             </>
           )}
 
@@ -1020,6 +1036,37 @@ export function SessionDetailView({
               {t('quota_usage.agent', { value: formatShare(total > 0 ? d.agent / total : 0) })}
             </span>
           </div>
+            </>
+          )}
+
+          {d.events.length > 0 && (
+            <>
+              <div className={styles.subhead}>{t('quota_usage.events_title')}</div>
+              <ol className={styles.events}>
+                {d.events.map((e, i) => {
+                  const line = eventText(t, d.events, i);
+                  const tone =
+                    line.tone === 'failure'
+                      ? styles.eventFailure
+                      : line.tone === 'kept'
+                        ? styles.eventKept
+                        : undefined;
+                  // A move names both accounts in its words; the others, where they happened.
+                  const words = [
+                    modelName(e.model),
+                    e.event === 'move' ? '' : line.account,
+                    line.text,
+                  ];
+                  return (
+                    <li key={`${e.atMs}-${i}`} className={tone}>
+                      <span className={styles.eventTime}>{formatDayTime(e.atMs, locale)}</span>
+                      <span>{words.filter(Boolean).join(' · ')}</span>
+                    </li>
+                  );
+                })}
+              </ol>
+            </>
+          )}
         </div>
       </div>
     </div>
