@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Auto, BandError, CacheInfo, Live, ModelInfo, Move, SessionAbout, SessionInfo, Snap, UiState } from '../types'
+import type { Auto, BandError, CacheInfo, Live, ModelInfo, Move, Press, SessionAbout, SessionInfo, Snap, UiState } from '../types'
 import { desktopBand, lengthBar } from './desktop'
 import {
   C,
@@ -31,7 +31,7 @@ import {
 } from './logic'
 import { accountsPart, quotaPane } from './pane'
 import { cellBar, terminalBand } from './terminal'
-import { bandFacts, nextTurn, settingsRows, type BandInput, type Do, type Handoff, type SettingRow } from './view'
+import { PRESS_WAIT_MS, bandFacts, nextTurn, settingsRows, type BandInput, type Do, type Handoff, type SettingRow } from './view'
 import { W } from './wording'
 
 const PANE = 'quota'
@@ -45,7 +45,7 @@ const EMPTY_CACHE: CacheInfo = { lastAt: 0, prompt: 0, read: 0, creation: 0, inp
 const EMPTY_UI: UiState = {
   switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
   pending: [], notice: '', noticeIsError: false, busy: false,
-  viewOverride: '', viewPhase: '', viewTurn: 0, turns: 0, dismissedSwitch: '',
+  viewOverride: '', viewPhase: '', viewTurn: 0, turns: 0, dismissedSwitch: '', noticeLife: null, press: null, pressed: null,
 }
 
 const snapA = atom({ plugin: 'quota-band', key: 'snap' } as const, null)
@@ -342,18 +342,115 @@ function titleLine(text: string): string {
  * is told and held again.
  */
 async function settle($: $T, snap: Snap | null, now: number): Promise<void> {
+  await settlePress($, snap, now)
   const ui = await read($, uiA)
   if (ui.pending.length) {
+    let life = 0
     await update($, uiA, (u: UiState): UiState => {
       const { left, notice } = settlePending(u.pending, snap, now)
-      return notice ? { ...u, pending: left, notice: notice.text, noticeIsError: notice.isError } : u
+      if (!notice) return left.length === u.pending.length ? u : { ...u, pending: left }
+      life = notice.lifeMs ?? 0
+      return {
+        ...u, pending: left, notice: notice.text, noticeIsError: notice.isError,
+        noticeLife: life ? { text: notice.text, short: notice.short ?? '', until: now + life } : null,
+      }
     })
+    if (life) redrawAt($, now + life)
     return
   }
   const landed = snap?.sessions[(await read($, sessA)).id]?.auth_id
   if (!landed || !(ui.coldOk.endsWith(':*') || ui.coldDismissed.endsWith(':*'))) return
   const name = (key: string) => (key.endsWith(':*') ? `${key.slice(0, -1)}${landed}` : key)
   await update($, uiA, (u: UiState): UiState => ({ ...u, coldOk: name(u.coldOk), coldDismissed: name(u.coldDismissed) }))
+}
+
+/**
+ * Switch now: the acknowledgement of a press being sent. Applied, the waiting turn is stopped, with
+ * one call, and the band waits for that turn's own end, however late (`endPress`); 5 s on, its row
+ * says the stop is not confirmed yet. Refused, the press is over, and `settlePending` words it.
+ */
+async function settlePress($: $T, snap: Snap | null, now: number): Promise<void> {
+  const press = (await read($, uiA)).press
+  const ack = press?.stage === 'sending' ? snap?.acks.find(a => a.command_id === press.id) : undefined
+  if (!press || !ack) return
+  let stopping = false
+  await update($, uiA, (u: UiState): UiState => {
+    if (u.press?.id !== press.id || u.press.stage !== 'sending') return u
+    stopping = ack.status === 'applied'
+    return { ...u, press: stopping ? { ...u.press, stage: 'stopping', abortAt: now, switchAt: ack.at } : null }
+  })
+  if (!stopping) return
+  // A hook above may answer the call and never pass it on: only the turn's end says it stopped.
+  void $.turn.abort({ turnId: press.turnId }).catch(() => undefined)
+  redrawAt($, now + PRESS_WAIT_MS)
+}
+
+/**
+ * Switch now: sends a press's switch with how long the turn had waited and what the band saw when
+ * its step began, unless the press went void meanwhile (the step answered or ended, or another
+ * press is under way). It goes void too when no acknowledgement comes within 5 s.
+ */
+async function sendPress($: $T, op: Press): Promise<void> {
+  const [sess, snap, bandError, cache, live] = await Promise.all([read($, sessA), read($, snapA), read($, bandErrorA), read($, cacheA), read($, liveA)])
+  if (!snap || bandError || live.step?.turnId !== op.turnId || live.step.index !== op.index) return
+  const id = crypto.randomUUID()
+  const at = await $.clock.now()
+  const doc = {
+    command_id: id, session: sess.id, boot_id: snap.boot_id, created_at: new Date(at).toISOString(), action: 'switch', auth_id: op.to,
+    waited_ms: Math.max(0, Math.round(at - op.startedAt)), generation: op.generation, step_started_at: new Date(op.startedAt - live.skew).toISOString(),
+  }
+  // The reader chose the cold turn this move makes, as with a switch from the menu.
+  const chosen = movedKey(cache, op.to)
+  let sent = false
+  await update($, uiA, (u: UiState): UiState => {
+    sent = !u.press || (u.press.stage === 'asking' && u.press.turnId === op.turnId && u.press.index === op.index)
+    if (!sent) return u
+    return {
+      ...u, confirm: '', switchStep: '', move: null, coldOk: chosen, coldDismissed: chosen,
+      press: { ...op, id, stage: 'sending', sentAt: at },
+      pending: [...u.pending, { id, text: W.switchTo(op.label), boot: snap.boot_id, at, press: op.label }],
+    }
+  })
+  if (!sent) return
+  outbox.push(doc)
+  $.clock.after(PRESS_WAIT_MS, async () => {
+    const now = await $.clock.now()
+    const text = W.pressUnanswered
+    await update($, uiA, (u: UiState): UiState => (u.press?.id === id && u.press.stage === 'sending'
+      ? { ...u, press: null, notice: text, noticeIsError: false, noticeLife: { text, short: '', until: now + 10_000 } }
+      : u))
+    redrawAt($, now + 10_000)
+  })
+  await refresh($, false)
+}
+
+/** A press asking or sending goes void, with nothing more done, at an event of its step or turn. */
+async function voidPress($: $T, mine: (p: Press) => boolean): Promise<void> {
+  if (!(await read($, uiA)).press) return
+  await update($, uiA, (u: UiState): UiState => (u.press && u.press.stage !== 'stopping' && mine(u.press) ? { ...u, press: null } : u))
+}
+
+/**
+ * The end of a main turn a press was for: one asking or sending goes void; one stopping it says
+ * what came of it, `aborted` meaning the turn stopped, any other reason that it ended by itself.
+ */
+async function endPress($: $T, turnId: string, reason: string): Promise<void> {
+  if ((await read($, uiA)).press?.turnId !== turnId) return
+  await update($, uiA, (u: UiState): UiState => {
+    const p = u.press
+    if (p?.turnId !== turnId) return u
+    if (p.stage !== 'stopping') return { ...u, press: null }
+    return { ...u, press: null, pressed: { at: p.switchAt, stopped: reason === 'aborted', since: p.since } }
+  })
+}
+
+/** Draws the band again at `at`, on the band's clock: a row that goes or changes by itself then. */
+function redrawAt($: $T, at: number): void {
+  void $.clock.now().then(now =>
+    $.clock.after(Math.max(0, at - now), async () => {
+      const t = await $.clock.now()
+      await update($, nowA, () => t)
+    }))
 }
 
 /** The account a move takes the session to, as its cold spell's key names it: `*` when the proxy picks it. */
@@ -690,6 +787,7 @@ function actsOf($: $T): Do {
     quota: () => $.ui.open({ id: PANE, title: 'Accounts and quota' }),
     auto: (feature, value) => choose($, feature, value),
     settings: () => $.ui.open({ id: PANE, title: 'quota-band settings' }),
+    press: op => sendPress($, op),
   }
 }
 
@@ -723,11 +821,11 @@ export const register: Register = (on, options) => {
     })
     // While the plugin retries this session's account the band reads every 2 s, so the countdown,
     // the running seconds and the outcome show promptly; while its own step waits with no answer,
-    // it redraws to count.
+    // or a press is under way, it redraws to count.
     $.clock.every(2_000, async () => {
-      const [snap, sess, live] = await Promise.all([read($, snapA), read($, sessA), read($, liveA)])
-      if (snap?.sessions[sess.id]?.retry) void refresh($, false)
-      else if (live.step && live.step.contentAt === 0) {
+      const [snap, sess, live, ui] = await Promise.all([read($, snapA), read($, sessA), read($, liveA), read($, uiA)])
+      if (snap?.sessions[sess.id]?.retry || ui.press?.stage === 'sending') void refresh($, false)
+      else if ((live.step && live.step.contentAt === 0) || ui.press) {
         const now = await $.clock.now()
         await update($, nowA, () => now)
       }
@@ -803,11 +901,19 @@ export const register: Register = (on, options) => {
   // A turn of the reader's: the cache is not kept warm while it runs, a new idle stretch starts
   // after it, and a question about a held message is settled. A prompt starts it; the band's own
   // model calls start no turn.
+  // A subagent's turn is not the reader's: the main loop's alone is followed.
   on('turn.start', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
     mainTurn = e.turnId
     stopWarm()
     await update($, cacheA, c => (c.warmed || c.warmStop ? { ...c, warmed: 0, warmStop: false } : c))
-    await update($, uiA, (u: UiState): UiState => (u.confirm === 'send' ? { ...u, confirm: '', held: '' } : u))
+    await update($, uiA, (u: UiState): UiState => {
+      // After a press stopped a turn, how to go on is told until another main turn starts.
+      const press = u.press?.stage === 'stopping' && u.press.turnId !== e.turnId && !u.press.since ? { ...u.press, since: true } : u.press
+      const pressed = u.pressed && !u.pressed.since ? { ...u.pressed, since: true } : u.pressed
+      if (u.confirm !== 'send' && press === u.press && pressed === u.pressed) return u
+      return { ...u, ...(u.confirm === 'send' ? { confirm: '', held: '' } : {}), press, pressed }
+    })
     return next(e)
   })
 
@@ -821,9 +927,11 @@ export const register: Register = (on, options) => {
     // items, such as its retry marker).
     const watched = !ownStep(e) && (!mainTurn || e.turnId === mainTurn)
     const mine = (l: Live) => l.step?.turnId === e.turnId && l.step.index === e.index
+    const ofStep = (p: Press) => p.turnId === e.turnId && p.index === e.index
     if (watched) {
-      const startedAt = await asked
-      await update($, liveA, l => ({ ...l, step: { turnId: e.turnId, index: e.index, startedAt, contentAt: 0 } }))
+      const [startedAt, snap, sess] = await Promise.all([asked, read($, snapA), read($, sessA)])
+      const generation = snap?.sessions[sess.id]?.generation
+      await update($, liveA, l => ({ ...l, step: { turnId: e.turnId, index: e.index, startedAt, contentAt: 0, generation } }))
     }
     const inner = next(e)
     let r: Awaited<ReturnType<typeof inner.next>>['value'] | undefined
@@ -839,16 +947,22 @@ export const register: Register = (on, options) => {
         const chunk = item.value
         if (watched && chunk.kind !== 'engine' && chunk.kind !== 'stop') {
           const at = await $.clock.now()
+          let answered = false
           await update($, liveA, l => {
             const step = mine(l) ? stepAfter(l.step, chunk, at) : l.step
-            return step === l.step ? l : { ...l, step }
+            answered = step !== l.step
+            return answered ? { ...l, step } : l
           })
+          if (answered) await voidPress($, ofStep)
         }
         yield chunk
       }
     } finally {
       if (!done) await inner.return?.(undefined as never)
-      if (watched) await update($, liveA, l => (mine(l) ? { ...l, step: null } : l))
+      if (watched) {
+        await update($, liveA, l => (mine(l) ? { ...l, step: null } : l))
+        await voidPress($, ofStep)
+      }
     }
     const started = await asked
     // A step of another conversation (one a /clear or a resume left) is not this one's.
@@ -878,6 +992,7 @@ export const register: Register = (on, options) => {
     if (!ownStep(e)) {
       await update($, cacheA, c => ({ ...c, lastAnswer: e.answer }))
       await update($, uiA, (u: UiState): UiState => ({ ...u, turns: u.turns + 1 }))
+      await endPress($, e.turnId, e.reason)
       // The end of the reader's turn, or of one the band did not hear start (it reloaded).
       if (!mainTurn || e.turnId === mainTurn) {
         mainTurn = ''

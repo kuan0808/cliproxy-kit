@@ -239,7 +239,8 @@ function rowOf(els: Els, row: Row, width: number): RenderElement {
   const acts = [...row.acts, ...(row.close ? [row.close] : [])]
   // The detail in fewer words, else the whole row's short form, when the row, its controls
   // included, would not fit on one line.
-  const words = (detail: string) => (detail ? `${row.title}: ${detail}` : row.title)
+  // A question's title ends in `?`, which needs no colon after it.
+  const words = (detail: string) => (detail ? `${row.title}${row.title.endsWith('?') ? ' ' : ': '}${detail}` : row.title)
   const controls = row.busy ? 'working…'.length : acts.reduce((n, a) => n + a.label.length + 2, 0)
   const fits = (text: string) => 4 + mark.length + text.length + 2 + controls <= width
   const text = fits(words(row.detail)) ? words(row.detail)

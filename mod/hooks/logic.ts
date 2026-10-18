@@ -1,5 +1,5 @@
 // Pure helpers for the band: no `$`, so the tests call them directly.
-import type { Auto, BandError, CacheInfo, ModelInfo, Pending, Snap, SnapCred, SnapProvider, SnapSession, SnapWindow, StepInfo } from '../types'
+import type { Auto, BandError, CacheInfo, ModelInfo, Pending, Pressed, Snap, SnapCred, SnapProvider, SnapSession, SnapWindow, StepInfo } from '../types'
 import { fmtDuration, moveWhy, W } from './wording'
 
 export { bandErrorText, fmtDuration, fmtWait, moveWhy } from './wording'
@@ -312,7 +312,7 @@ const movesNextTurn = (s: SnapSession | undefined): boolean =>
  * The single alert the band shows, most important first. Confirmations and notices are drawn
  * by the caller before this.
  */
-export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxied: boolean, now: number, dismissed = ''): Alert | null {
+export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxied: boolean, now: number, dismissed = '', pressed: Pressed | null = null): Alert | null {
   if (proxied && snap) {
     const age = now - Date.parse(snap.generated_at)
     if (age > 3 * MIN) return { level: 'warn', ...W.stale(fmtDuration(age)) }
@@ -350,11 +350,13 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
   }
   // A move shows for 15 minutes, or until dismissed, and says why the session left, from its
   // record; `switch back` while quota-pilot says the account it left can take the session again.
+  // After a press that stopped the waiting turn, how to go on, until a main turn starts.
   if (sw && sw.at !== dismissed && now - Date.parse(sw.at) < 15 * MIN) {
     const from = view.credentials.find(c => c.id === sw.from)?.label ?? 'previous account'
     const to = view.credentials.find(c => c.id === sw.to)?.label ?? 'another account'
     const back = session.switch_back && session.switch_back === sw.from && sw.kind !== 'user' ? sw.from : undefined
-    return { level: 'info', ...W.moved(from, to, moveWhy(sw, from, now)), action: 'dismiss', key: sw.at, back }
+    const goOn = sw.kind === 'user' && pressed?.at === sw.at && pressed.stopped && !pressed.since
+    return { level: 'info', ...W.moved(from, to, moveWhy(sw, from, now), goOn), action: 'dismiss', key: sw.at, back }
   }
   return null
 }
@@ -413,12 +415,19 @@ const PENDING_MS = MIN
  */
 export function settlePending(pending: readonly Pending[], snap: Snap | null, now: number): {
   left: Pending[]
-  notice: { text: string; isError: boolean } | null
+  notice: { text: string; isError: boolean; short?: string; lifeMs?: number } | null
 } {
   const left: Pending[] = []
-  let notice: { text: string; isError: boolean } | null = null
+  let notice: { text: string; isError: boolean; short?: string; lifeMs?: number } | null = null
   for (const p of pending) {
     const ack = snap?.acks.find(a => a.command_id === p.id)
+    if (p.press !== undefined) {
+      // Switch now words its own outcome: an applied switch by the move's note, a refusal for 10 s.
+      // The proxy's silence it told at 5 s.
+      if (ack?.status === 'rejected') notice = { ...W.pressRefused(p.press, ack.reason ?? 'rejected'), isError: false, lifeMs: 10_000 }
+      else if (!ack && !(snap && snap.boot_id !== p.boot) && now - p.at <= PENDING_MS) left.push(p)
+      continue
+    }
     if (ack) {
       notice = ack.status === 'applied' ? { text: W.done(p.text), isError: false } : { text: W.refused(p.text, ack.reason), isError: true }
     } else if (snap && snap.boot_id !== p.boot) {

@@ -237,7 +237,7 @@ Claude 等待時顯示方塊，工作時縮成一行：
 
 ### 帳號失敗時
 
-失敗的請求會先在 session 原本的帳號上重試，保住它的 prompt 快取；重試也失敗，session 才換帳號，額度列會依 quota-pilot 看到的情況說明原因。一直失敗的帳號會暫停使用。這些都不用設定；規則和數字寫在 [docs/architecture.md](docs/architecture.md#when-an-account-fails)。
+失敗的請求會先在 session 原本的帳號上重試，保住它的 prompt 快取；重試也失敗，session 才換帳號，額度列會依 quota-pilot 看到的情況說明原因。這一輪還在等的時候，按額度列上的 `switch to k•••` 隨時可以不再等：session 換到 k•••，這一輪停下，你的下一則訊息就在那裡接著做。一直失敗的帳號會暫停使用。這些都不用設定；規則和數字寫在 [docs/architecture.md](docs/architecture.md#when-an-account-fails)。
 
 | 情況 | 會發生什麼 | 額度列顯示 |
 | --- | --- | --- |
@@ -351,10 +351,12 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex 說 hook 以代碼 7 或 22 結束 | hook 的位址沒有 proxy 回應（7），或那個 proxy 上沒有 quota-pilot（22）。 |
 | Codex 帳號沒有 5 小時視窗 | 它的方案本來就沒有；頁面和額度列都會標明。 |
 | 額度列顯示 `Switched d••• → k••• · reason not recorded` | quota-pilot 比額度列舊，不會記錄 session 換帳號的原因：到面板的插件商店更新它。 |
-| 額度列顯示 `retrying it in about 50s` | quota-pilot 讓請求留在 session 原本的帳號重試，保住 prompt 快取。重試有回應後這一輪就在原帳號繼續，最多 75 秒後改由它寫的那個帳號接手；按 `switch` 可以立刻換。 |
-| Claude Code 顯示 `API error · Retrying`，附上 `quota-pilot: … retrying it in about 50s` | quota-pilot 讓請求留在原本的帳號重試，保住 prompt 快取。最多 75 秒後就換到它寫的那個帳號；按 `switch` 可以立刻換。 |
+| 額度列顯示 `retrying it in about 50s` | quota-pilot 讓請求留在 session 原本的帳號重試，保住 prompt 快取。重試有回應後這一輪就在原帳號繼續，最多 75 秒後改由它寫的那個帳號接手；按 `switch to k•••` 可以立刻不再等。 |
+| 額度列顯示 `retrying it, 2m so far` | 重試也卡住了。按 `switch to k•••` 立刻不再等；或按 Esc 再送一次，session 就會換帳號。 |
+| 按了 `switch to k•••` 之後額度列顯示 `send a message to go on` | 這一輪是刻意停下的：送出任何訊息，就會在 k••• 上接著做，這一輪做過的事都還在。 |
+| Claude Code 顯示 `API error · Retrying`，附上 `quota-pilot: … retrying it in about 50s` | quota-pilot 讓請求留在原本的帳號重試，保住 prompt 快取。最多 75 秒後就換到它寫的那個帳號；按額度列上的 `switch to k•••` 可以立刻不再等。 |
 | 額度列說 `got no answer · moves to k••• on the next turn` | 沒有回應之後的重試也沒有回應；你的下一則訊息會送到 k•••。不用做什麼。 |
-| 請求卡住好幾分鐘 | 經過 proxy 時，Claude Code 沒有等待第一個位元組的上限，只有請求逾時 `API_TIMEOUT_MS`（預設 600 秒）。設短一點能更早結束卡住的請求，但也會切掉大型冷啟動 prompt 比較慢的第一個回覆。按 Esc 再送一次會換帳號；`switch` 隨時都能換。 |
+| 請求卡住好幾分鐘 | 經過 proxy 時，Claude Code 沒有等待第一個位元組的上限，只有請求逾時 `API_TIMEOUT_MS`（預設 600 秒）。設短一點能更早結束卡住的請求，但也會切掉大型冷啟動 prompt 比較慢的第一個回覆。按 Esc 再送一次會換帳號；額度列上的 `switch to k•••` 隨時都能換。 |
 | 重試出現在 Claude Code 的訊息上，而不是藏在同一個請求裡 | proxy 的 `request-retry` 是 0：要設為 1 以上，proxy 才會自己重試。 |
 | Account 卡片顯示 `resting, back in 4m` | 那個帳號連續失敗兩次，正在暫停使用：session 會在下一輪換到能服務的帳號，暫停到顯示的時間結束，或在它第一次成功時結束。不用做什麼。 |
 | 切換提示附上 `switch back` | session 離開的帳號現在又能接手。按 `switch back` 換回去，快取還熱著時會先問；quota-pilot 不會自己把 session 換回去，因為新帳號的快取才是熱的。 |

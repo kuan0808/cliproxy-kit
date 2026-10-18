@@ -133,6 +133,22 @@ another account, that moment is the binding's takeover boundary: a failure of an
 before it never starts a retry, as its request has moved on. A switch, a route and a move advance
 the session's generation, which ends any episode, and a record sent before says nothing of it.
 
+**Switch now.** While a turn waits (the band's hang watch, waiting and running rows), the band
+offers `switch to k•••`, k••• being the account a failover would take now (the snapshot's
+`takeover`), only while the step's request is surely still on the bound account: no pick of the
+binding for its model has answered another account since a second before the step began
+(`elsewhere_at`), and the session's generation is the one the step began under. A press asks first
+by today's rule for a switch, then sends today's switch with how long the turn had waited, the
+generation and the step's start; quota-pilot checks all three again under its lock and refuses with
+`k••• cannot take the session now`, `the session moved meanwhile` or `the request may already be on
+k•••`. Applied, the switch is the user's (kind `user`, with `waited_ms` and the episode's cause and
+try), the episode ends, a try still running writes its `retry` line when its record comes, and only
+then does the band stop the waiting turn (`$.turn.abort`), once, waiting for the turn's own end. It
+sends nothing for the user: their next message, any text, goes to k•••, the stopped turn's finished
+tool steps included. A press that the step's first content, the turn's end, a refusal or 5 s without
+an acknowledgement overtakes goes void and stops nothing; a switch it sent that lands later is told
+as any move.
+
 A worked timeline, the hang of 2026-10-11 under these rules: at 22:04:17 d••• has hung for 2m 15s
 and its connection drops; the proxy's next round offers d••• at once and quota-pilot answers it,
 so Claude Code still waits on its first request. Had the retry answered, the session would have
@@ -152,6 +168,7 @@ back in 5m`.
 | Second moment | within 15 min | Two separate failures close together; one failure is not a pattern |
 | First rest | 5 min | Longer than the proxy's 60 s pause after a 529, short enough to lose little |
 | Rest after a failed trial | doubled, 60 min at most | An account that fails again at once is still unwell |
+| Switch now's waits | 5 s for the acknowledgement; 5 s after the stop before saying it is not confirmed | The proxy answers within one read; a turn's end comes at once unless a hook holds it |
 
 ### Moving a session to another provider
 
@@ -330,7 +347,8 @@ character cells in a terminal (`terminal.tsx`), and as cards in the desktop app 
 whose font is proportional, whose widths are CSS lengths and whose colours follow its light or dark
 theme. Both show cards while Claude waits and one line while it works (also when another mod draws
 beneath it), and the row says one thing at a time: a question, what came of an action, or an alert
-(the proxy's, a cold next turn, a session moved or kept, a full context), in that order.
+(the proxy's, a cold next turn, a session moved or kept, a full context), in that order. The
+waiting rows carry `switch to k•••` (Switch now, in [When an account fails](#when-an-account-fails)).
 
 Everything it shows of accounts comes from `/band`, read every 10 seconds at `ANTHROPIC_BASE_URL`
 with `ANTHROPIC_AUTH_TOKEN` (else `ANTHROPIC_API_KEY`, else no key, for a proxy without `api-keys`),
@@ -380,7 +398,11 @@ the session leaves a note for 15 minutes, `↪ Stayed on d••• after HTTP 5
 worked; cache kept` (`cache kept` only when the retry read the cache); one that ended in a move
 shows the move. An imminent move off a resting account or a binding whose retry got no answer reads
 `! d••• got no answer · moves to k••• (3% used) on the next turn`, and a held message counts that
-turn as cold. Of the proxy's alerts, a retry waiting or running goes first (unless quota data is
+turn as cold. After a press of `switch to k•••` that stopped the turn, the move reads `↪ Switched
+d••• → k••• · by you after waiting 2m 55s; send a message to go on` until a main turn starts (the
+band keeps what it saw in its state, so a reload says the same); with nothing stopped, without the
+tail. A refusal and no answer within 5 s are told for 10 s, after which the waiting row and its
+control come back. Of the proxy's alerts, a retry waiting or running goes first (unless quota data is
 old), then the plugin's warnings, then the hang watch. Every row's text and short form come from one
 table, `wording.ts`, checked against the same fixture.
 
@@ -541,6 +563,14 @@ the wait for a first byte (its first-byte watchdog runs only against Anthropic's
 request timeout, `API_TIMEOUT_MS`, is 600 s by default, counted from sending the request until the
 response headers arrive; and it retries a 408, 409, 429, 5xx or 529 up to 10 times.
 
+What Switch now relies on, checked against Claude Code 2.1.302 by `mod/tests/claude-check/run.sh`,
+run by hand (a stub upstream on localhost and a throwaway config folder; no account is reached):
+`$.turn.abort` closes the stalled request at once; the stopped turn's `turn.complete` reports
+`aborted`; the next message's request carries the stopped turn's finished tool call and its result;
+a background task started before the stop keeps running; and a message queued during the wait is
+sent next, after the stop. A hook above the band may answer the abort itself or hold the turn's end
+back, so the band takes only that end as proof the turn stopped.
+
 ## Limitations
 
 - Rests and trials live in memory, like refusals: a proxy restart forgets them. An account that
@@ -550,6 +580,9 @@ response headers arrive; and it retries a 408, 409, 429, 5xx or 529 up to 10 tim
 - Through a proxy Claude Code has no first-byte limit, so a retry that hangs too waits until the
   upstream ends it or Claude Code's request timeout (`API_TIMEOUT_MS`, 600 s); a cancel never
   counts against the account.
+- Switch now applies the switch before it stops the turn: if the proxy picks the waiting request
+  again in that moment, it goes to the new account too, and the next message may follow before it
+  answered, so the cold write may happen twice.
 - Crossing providers changes the model and rewrites the prompt cache; Claude Code does not know a
   non-Claude model's context size, so its auto-compact timing may be off.
 - Remote Control, voice dictation and claude.ai connectors do not work through a proxy.

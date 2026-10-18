@@ -188,6 +188,10 @@ func moveWhy(sw core.Switch, from string, now time.Time) (why, short string) {
 		}
 		return said("reason not recorded")
 	case core.MoveUser:
+		if c.WaitedMs > 0 {
+			// From a waiting turn (the band's Switch now): how long it had waited.
+			return "by you after waiting " + core.WaitText(time.Duration(c.WaitedMs)*time.Millisecond), "by you"
+		}
 		return said("switched by you")
 	case core.MoveQuota:
 		reason := c.Reason

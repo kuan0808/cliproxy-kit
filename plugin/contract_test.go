@@ -963,3 +963,63 @@ func TestQuotaPilotRetriesADroppedConnectionOnItsAccount(t *testing.T) {
 		t.Fatalf("attempts %v", attempts)
 	}
 }
+
+// Switch now's known risk: the user presses `switch to k•••` while a request waits on A, and the
+// switch applies before the stop reaches the proxy. The proxy's next round picks that request
+// again, now for k•••, and the next message follows before it began answering: both requests reach
+// k•••, the cold write twice at worst (docs/architecture.md, Limitations). Nothing is sent again by
+// the band; the second request is the user's own.
+func TestAPressBeforeTheStopSendsTheWaitingRequestToTheNewAccount(t *testing.T) {
+	saved := state
+	state = core.New(newBootID(), nil)
+	defer func() { state = saved }()
+	state.UpdateInventory([]core.CredInfo{{ID: "A", Provider: "claude"}, {ID: "B", Provider: "claude"}, {ID: "C", Provider: "claude"}})
+	slow := attempt{after: 100 * time.Millisecond}
+	p := newContractProxy(t, contractSetup{retry: 3, script: map[string][]attempt{"A": {{}, {err: errEOF}}, "B": {slow, slow}, "C": {slow, slow}}})
+	p.manager.SetPluginScheduler(&pilotScheduler{})
+	var start time.Time
+	var gen uint64
+	to := ""
+	p.claude.observed = func(auth string, failed bool) {
+		u := core.Usage{Provider: "claude", Model: contractModel, SessionID: "claude:s1", AuthID: auth, RequestedAt: time.Now(), Output: 5}
+		if failed {
+			u = core.Usage{Provider: "claude", Model: contractModel, SessionID: "claude:s1", AuthID: auth, RequestedAt: time.Now(),
+				Failed: true, ErrorText: errEOF.Error(), Latency: time.Millisecond}
+		}
+		state.Observe(u)
+		if failed {
+			// The press lands between the failure and the proxy's next round.
+			to = state.Build().Sessions["s1"].Takeover
+			snap := state.Build()
+			if a := state.Apply(core.Command{CommandID: "p1", Session: "s1", BootID: snap.BootID, CreatedAt: time.Now(), Action: "switch",
+				AuthID: to, WaitedMs: time.Since(start).Milliseconds(), Generation: gen, StepStartedAt: start}); a.Status != "applied" {
+				t.Errorf("press = %+v", a)
+			}
+		}
+	}
+	if _, err := contractExecute(p.manager, contractModel); err != nil {
+		t.Fatal(err)
+	}
+	start, gen = time.Now(), state.Build().Sessions["s1"].Generation
+	var wg sync.WaitGroup
+	var first, second cliproxyexecutor.Response
+	var err1, err2 error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		first, err1 = contractExecute(p.manager, contractModel)
+	}()
+	// The next message, once the old request is on the new account and before it answered.
+	for deadline := time.Now().Add(2 * time.Second); len(p.claude.accounts()) < 3 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	second, err2 = contractExecute(p.manager, contractModel)
+	wg.Wait()
+	want := `{"ok":"` + to + `"}`
+	if to == "" || err1 != nil || err2 != nil || string(first.Payload) != want || string(second.Payload) != want {
+		t.Fatalf("to %q: first %s %v, second %s %v", to, first.Payload, err1, second.Payload, err2)
+	}
+	if attempts := p.claude.accounts(); !slices.Equal(attempts, []string{"A", "A", to, to}) {
+		t.Fatalf("attempts %v", attempts)
+	}
+}

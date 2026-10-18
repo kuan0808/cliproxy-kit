@@ -63,6 +63,13 @@ type episode struct {
 
 func (e *episode) giveUp() time.Time { return e.firstEnd.Add(retryWindow) }
 
+// stoppedTry is a try that was running when the user switched the session away (Switch now), and
+// when they did.
+type stoppedTry struct {
+	e  *episode
+	at time.Time
+}
+
 // RetryView is an episode as the snapshot shows it.
 type RetryView struct {
 	Account        string    `json:"account"`
@@ -238,6 +245,21 @@ func (s *State) retryLineLocked(ek episodeKey, root string, u Usage, e *episode,
 		line.F, line.St, line.W, line.Answered = e.last.Kind, e.last.Status, e.last.WaitMs, e.last.Answered
 	}
 	s.log = append(s.log, line)
+}
+
+// stoppedTryLocked takes the record of a try the user switched away from (Switch now), sent before
+// the switch: it writes that try's retry line (`retry cancelled after 40s with no answer`, or what
+// else it came to) and nothing more, as its episode ended at the switch.
+func (s *State) stoppedTryLocked(ek episodeKey, root string, u Usage, kind string, at time.Time) {
+	st, ok := s.stopped[ek]
+	if !ok || u.AuthID != st.e.account || at.Before(st.e.firstEnd) || !at.Before(st.at) {
+		return
+	}
+	delete(s.stopped, ek)
+	if u.Failed {
+		st.e.last = &Cause{Kind: kind, Status: u.StatusCode, WaitMs: u.Latency.Milliseconds(), Answered: u.TTFT > 0 && kind != FailHang}
+	}
+	s.retryLineLocked(ek, root, u, st.e, at, !u.Failed)
 }
 
 // endEpisodesOfLocked ends every episode and mark of a session's bindings: a switch or a route.

@@ -1,6 +1,6 @@
 // What the band shows, whichever surface draws it: the terminal's cells and the desktop app's
 // cards read the same facts and the same row above them, with the same actions behind them.
-import type { Auto, BandError, CacheInfo, Live, ModelInfo, Move, SessionInfo, Snap, UiState } from '../types'
+import type { Auto, BandError, CacheInfo, Live, ModelInfo, Move, Press, SessionInfo, Snap, UiState } from '../types'
 import { W, type Words } from './wording'
 import {
   autoState,
@@ -85,6 +85,8 @@ export type Do = {
   auto: (feature: keyof Auto, value: boolean | null) => unknown
   /** The band's settings, for a session with no proxy accounts to list. */
   settings: () => unknown
+  /** Switch now: send the switch of a press, and stop the waiting turn once it applies. */
+  press: (op: Press) => unknown
 }
 
 export type BandInput = {
@@ -229,8 +231,8 @@ export function bandFacts(i: BandInput, act: Do): Facts {
 
   // A move ends what is cached: from the reader's size (Hold above; 0 any), the band says what it
   // costs first, whether holding is on or not, as the reader pressed for it.
+  const asks = cache.prompt >= settings.confirmAbove && !cold && cs.state !== 'unknown'
   const pick = (move: Move) => {
-    const asks = cache.prompt >= settings.confirmAbove && !cold && cs.state !== 'unknown'
     if (asks) act.ui({ confirm: 'move', move, switchStep: '' })
     else act.send(move)
   }
@@ -261,11 +263,11 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     },
     top: null,
   }
-  facts.top = topRow(i, facts, act, { pick, unroute, switchProviders, canSend, original })
+  facts.top = topRow(i, facts, act, { pick, unroute, switchProviders, canSend, original, asks })
   return facts
 }
 
-type Menu = { pick: (move: Move) => void; unroute: Move; switchProviders: string[]; canSend: boolean; original: string }
+type Menu = { pick: (move: Move) => void; unroute: Move; switchProviders: string[]; canSend: boolean; original: string; asks: boolean }
 
 /** The one row above the band: a question first, then what came of an action, then an alert. */
 function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
@@ -329,21 +331,40 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
       ...menu.switchProviders.map((p): Act => ({ key: `prov-${p}`, label: `${providerTitle(p)} ›`, main: true, run: () => act.ui({ switchStep: p }) })),
     ])
   }
-  if (ui.notice) {
+  // Switch now: its question, then the press under way until the turn it stops has ended.
+  const press = ui.press
+  if (press?.stage === 'asking') {
+    const cost = turnCost(f.model, cache.prompt, cache.ttlMs)
+    const q = W.pressAsk(press.label, rewriteText(cache.prompt, cost))
     return {
-      key: 'notice', tone: ui.noticeIsError ? 'warn' : 'info', title: ui.notice, detail: '', acts: [], busy: ui.busy,
+      ...ask(q.title, q.detail, [{ key: 'switch-now', label: 'switch now', main: true, run: () => act.press(press) }],
+        { key: 'keep-waiting', label: 'keep waiting', run: () => act.ui({ press: null }) }),
+      short: q.short,
+    }
+  }
+  if (press) {
+    const unconfirmed = press.stage === 'stopping' && now - press.abortAt >= PRESS_WAIT_MS
+    return { key: 'notice', tone: 'info', title: unconfirmed ? W.stopUnconfirmed(press.label) : W.sending(W.switchTo(press.label)), detail: '', acts: [] }
+  }
+  // A notice with a life of its own goes by itself, so a waiting row and its control come back.
+  const life = ui.noticeLife?.text === ui.notice ? ui.noticeLife : null
+  if (ui.notice && !(life && now >= life.until)) {
+    return {
+      key: 'notice', tone: ui.noticeIsError ? 'warn' : 'info', title: ui.notice, detail: '', short: life?.short || undefined, acts: [], busy: ui.busy,
       close: ui.busy ? undefined : { key: 'dismiss', label: 'ok', run: () => act.ui({ notice: '' }) },
     }
   }
   const handoff: Act = { key: 'alert-handoff', label: 'hand off', main: true, run: () => act.ui({ confirm: 'handoff' }) }
   // Without quota data from the proxy, the reason it gave goes first.
   if (bandError) return { key: 'alert', tone: 'warn', title: bandErrorText(bandError), detail: '', acts: [] }
-  const alert = pickAlert(snap, acct, i.sess.proxied, now, ui.dismissedSwitch)
+  const alert = pickAlert(snap, acct, i.sess.proxied, now, ui.dismissedSwitch, ui.pressed)
   const live = liveRows(i, acct)
   // The proxy's alerts go before a cold turn: a retry of the session's account, waiting or running,
   // first; then the plugin's warnings; then the band's own hang watch. That the session moved, or
   // stayed, comes after the cold turn.
-  if (live?.kind === 'retry' && !alert?.text.startsWith('quota data is')) return liveRow(live)
+  // Each live row offers `switch to k•••` while a press could stop the waiting turn (pressAct).
+  const liveAct = live && pressAct(i, acct, menu, act)
+  if (live?.kind === 'retry' && !alert?.text.startsWith('quota data is')) return liveRow(live, liveAct)
   if (alert && alert.action !== 'dismiss') {
     const fallback = acct ? snap?.config.fallback_map[acct.provider] : undefined
     const [fbProvider, fbModel] = (fallback ?? ':').split(':')
@@ -352,7 +373,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
       : alert.action === 'handoff' && !working ? [handoff] : []
     return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts }
   }
-  if (live?.kind === 'watch') return liveRow(live)
+  if (live?.kind === 'watch') return liveRow(live, liveAct)
   const cold = c.cold
   if (cold && !working && cold.tokens >= COLD_NOTICE_FLOOR && !coldConfirmed(cold, ui.coldDismissed)) {
     return {
@@ -405,8 +426,31 @@ function liveRows(i: BandInput, acct: SessionAccount | null): (Words & { kind: '
   return null
 }
 
-/** A live row: a warning, which goes when it stops being true. */
-const liveRow = (w: Words): Row => ({ key: 'alert', tone: 'warn', title: w.text, detail: '', short: w.short, acts: [] })
+/** A live row: a warning, which goes when it stops being true; its only control is `switch to k•••`. */
+const liveRow = (w: Words, act: Act | null): Row => ({ key: 'alert', tone: 'warn', title: w.text, detail: '', short: w.short, acts: act ? [act] : [] })
+
+/** How long a press waits for the proxy's acknowledgement, and then for the turn it stopped to end. */
+export const PRESS_WAIT_MS = 5_000
+
+/**
+ * The live rows' control, `switch to k•••` (Switch now), k••• being the account quota-pilot says
+ * would take over: offered only while the step's request is surely still on the bound account (no
+ * pick of its binding answered another account since a second before the step began, and the
+ * session not moved since: its generation is the one the step began under), the band can send
+ * commands, and no press is under way. A press asks first by today's rule for a switch.
+ */
+function pressAct(i: BandInput, acct: SessionAccount | null, menu: Menu, act: Do): Act | null {
+  const step = i.live.step
+  const s = acct?.session
+  const to = s?.takeover && acct?.view.credentials.find(c => c.id === s.takeover)
+  if (!step || !s || !to || !menu.canSend || i.ui.press || step.generation === undefined || s.generation !== step.generation) return null
+  if (s.elsewhere_at && Date.parse(s.elsewhere_at) + i.live.skew >= step.startedAt - 1000) return null
+  const op: Press = {
+    id: '', turnId: step.turnId, index: step.index, startedAt: step.startedAt, generation: step.generation, to: to.id, label: to.label,
+    stage: 'asking', sentAt: 0, abortAt: 0, switchAt: '', since: false,
+  }
+  return { key: 'switch-now', label: W.switchNow(to.label), run: () => (menu.asks ? act.ui({ press: op }) : act.press(op)) }
+}
 
 /** How long the band's main step goes with no content before it says so. */
 const HANG_WATCH_MS = 30_000

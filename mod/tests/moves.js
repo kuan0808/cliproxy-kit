@@ -15,7 +15,13 @@ export default {
     { "name": "a retry that worked after a lost connection", "row": "kept", "args": ["d•••", { "kind": "connection" }, 100, 400000], "text": "Stayed on d••• after a lost connection · the retry worked; cache kept", "short": "Stayed on d••• · retry worked" },
     { "name": "a retry that worked after a hang, reading no cache", "row": "kept", "args": ["d•••", { "kind": "hang", "wait_ms": 135000 }, 300, 0], "text": "Stayed on d••• after a 2m 15s hang · the retry worked", "short": "Stayed on d••• · retry worked" },
     { "name": "resting, a move next turn", "row": "movesNext", "args": ["d•••", "resting after 2 failures", "k•••", "3% used"], "text": "d••• resting after 2 failures · moves to k••• (3% used) on the next turn", "short": "d••• resting · moves to k••• next turn" },
-    { "name": "no answer, a move next turn", "row": "movesNext", "args": ["d•••", "got no answer", "k•••", "3% used"], "text": "d••• got no answer · moves to k••• (3% used) on the next turn", "short": "d••• got no answer · moves next turn" }
+    { "name": "no answer, a move next turn", "row": "movesNext", "args": ["d•••", "got no answer", "k•••", "3% used"], "text": "d••• got no answer · moves to k••• (3% used) on the next turn", "short": "d••• got no answer · moves next turn" },
+    { "name": "switch now, asked", "row": "pressAsk", "args": ["k•••", "rewrites 160k tokens, ≈$1.28 at API prices ($0.03 warm)"], "text": "Switch to k••• now? This turn stops; your next message starts cold there: it rewrites 160k tokens, ≈$1.28 at API prices ($0.03 warm)", "short": "Switch to k•••? Stops turn; cold" },
+    { "name": "moved by you while waiting, the turn stopped", "row": "moved", "args": ["d•••", "k•••", { "why": "by you after waiting 2m 55s", "short": "by you" }, true], "text": "Switched d••• → k••• · by you after waiting 2m 55s; send a message to go on", "short": "Switched d••• → k••• · send a message to go on" },
+    { "name": "moved by you while waiting, nothing stopped", "row": "moved", "args": ["d•••", "k•••", { "why": "by you after waiting 2m 55s", "short": "by you" }], "text": "Switched d••• → k••• · by you after waiting 2m 55s", "short": "Switched d••• → k••• · by you" },
+    { "name": "a press whose stop is not confirmed yet", "row": "stopUnconfirmed", "args": ["k•••"], "text": "Switched to k•••; the turn's stop is not confirmed yet" },
+    { "name": "a refused press", "row": "pressRefused", "args": ["k•••", "k••• cannot take the session now"], "text": "Could not switch to k•••: k••• cannot take the session now", "short": "Could not switch to k•••" },
+    { "name": "a press with no answer", "row": "pressUnanswered", "args": [], "text": "No answer from the proxy within 5s; the turn keeps waiting" }
   ],
   "moves": [
     {
@@ -298,6 +304,16 @@ export default {
       },
       "why": "switched by you",
       "short": "switched by you"
+    },
+    {
+      "name": "the user's own switch from a waiting turn (Switch now)",
+      "switch": {
+        "kind": "user",
+        "reason": "switched by user",
+        "cause": { "kind": "hang", "wait_ms": 135000, "retries": 1, "waited_ms": 175000 }
+      },
+      "why": "by you after waiting 2m 55s",
+      "short": "by you"
     },
     {
       "name": "an older plugin's user switch",

@@ -1,0 +1,6 @@
+{
+  "name": "quota-band-press-check",
+  "version": "0.1.0",
+  "description": "The Claude Code check for Switch now: stops a stalled main turn as quota-band does on a press",
+  "author": { "name": "kuan0808" }
+}

@@ -9,7 +9,7 @@ import type { Engine, FoundElement, MockClock, TestBody, TestOptions } from 'cla
 const test = (name: string, a: TestOptions | TestBody, b?: TestBody) =>
   typeof a === 'function' ? kitTest(name, { timeoutMs: 120_000 }, a) : kitTest(name, { timeoutMs: 120_000, ...a }, b!)
 
-import type { SessionInfo, Snap, SnapSwitch, UiState } from '../types'
+import type { BandError, SessionInfo, Snap, SnapSwitch, UiState } from '../types'
 import { settingsOf, stepAfter } from '../hooks/logic'
 import { bandFacts } from '../hooks/view'
 import { W } from '../hooks/wording'
@@ -54,7 +54,7 @@ const SNAP: Snap = {
   sessions: {
     s1: {
       provider: 'claude', model: 'claude-opus-5-5', auth_id: 'claude-d', auth_label: 'd•••', binding_reason: 'weekly quota resets soonest',
-      switch_imminent: false, totals: { input: 0, output: 0, cache_read: 0, cache_creation: 0 },
+      switch_imminent: false, totals: { input: 0, output: 0, cache_read: 0, cache_creation: 0 }, generation: 3,
       last: { input: 10, output: 5, cache_read: 400_000, cache_creation: 12_000 }, last_seen: iso(-10_000),
     },
   },
@@ -82,6 +82,8 @@ const TITLED = '"aiTitle":"Login page"\n"customTitle":"Fix the \\"login\\" page"
 let transcript = TITLED
 /** What the proxy's /band answers; a test sets it after `stubSession`. */
 let snapshot: Snap
+/** Whether each read of /band stamps the snapshot with the test clock's time, as a live proxy does. */
+let stampReads = false
 /** When set, how /band fails instead: refused, or not reached. */
 let failure: OpEventResult<'http.fetch'> | undefined
 /** How many times the band read /band. */
@@ -138,6 +140,7 @@ function stubSession(
   transcript = TITLED
   snapshot = snap
   failure = undefined
+  stampReads = false
   models = []
   sentTo = ''
   sent = {}
@@ -209,7 +212,7 @@ function stubSession(
     sentTo = e.url
     sent = { ...(e.init?.headers as Record<string, string> | undefined) }
     if (sent['X-Band-Command']) commands.push(JSON.parse(decodeURIComponent(sent['X-Band-Command'])))
-    return failure ?? ok(snapshot)
+    return failure ?? ok(stampReads ? { ...snapshot, generated_at: new Date(clock.now()).toISOString() } : snapshot)
   })
   on('session.root', () => ({ value: root }))
   on('session.repo', () => ({ value: repo as never }))
@@ -772,7 +775,7 @@ test('a switch while the cache is warm says what it costs, and can hand off firs
   const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
   await ui.press({ key: 'switch' })
   await ui.press({ key: 'to-claude-k' })
-  expect((await ui.find({ key: 'ask' }))?.text).toMatch(/Switch to k•••\?: The next turn then starts cold: it rewrites 412k tokens, ≈\$3\.30/)
+  expect((await ui.find({ key: 'ask' }))?.text).toMatch(/Switch to k•••\? The next turn then starts cold: it rewrites 412k tokens, ≈\$3\.30/)
   expect(commands).toHaveLength(0) // nothing sent yet
   await ui.press({ key: 'yes-move' })
   expect(commands).toMatchObject([{ action: 'switch', auth_id: 'claude-k' }])
@@ -1233,12 +1236,13 @@ test('a held question left in the band draws only while holding is on', () => {
   const ui: UiState = {
     switchStep: '', confirm: 'send', move: null, held: 'the login page next', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
     pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: '',
+    noticeLife: null, press: null, pressed: null,
   }
   const input = (holdColdDefault: boolean) => ({
     snap: SNAP, bandError: null, now: NOW, sess: SESSION, cache, ui, models: [], working: false,
     settings: settingsOf({ holdColdDefault }), auto: { holdCold: null, keepWarm: null }, unattended: false, live: { step: null, skew: 0 },
   })
-  const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined }
+  const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined, press: () => undefined }
   expect(bandFacts(input(true), act).top?.title).toBe('Message held')
   expect(bandFacts(input(false), act).top?.title).not.toBe('Message held')
 })
@@ -1440,10 +1444,10 @@ test('a session whose retry got no answer is warned of its move, which counts as
 
 const TEXT = { kind: 'text', index: 0, text: 'Looking' }
 
-/** The row while Claude works, at `cols` columns. */
-const liveText = async ($: Engine, cols = 200, surface: 'terminal' | 'desktop' = 'terminal') => {
+/** The row while Claude works, at `cols` columns: an alert, or the row of another `key`. */
+const liveText = async ($: Engine, cols = 200, surface: 'terminal' | 'desktop' = 'terminal', key = 'alert') => {
   const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(cols, true) })
-  const row = await ui.find({ key: 'alert' })
+  const row = await ui.find({ key })
   await ui.unmount()
   return row?.text ?? ''
 }
@@ -1535,10 +1539,11 @@ test('while the plugin retries the account the band reads every 2 s, then every 
 
 // The live rows at the view, with the clocks set as a step would leave them.
 describe('the live rows', () => {
-  const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined }
+  const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined, press: () => undefined }
   const ui: UiState = {
     switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
     pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: '',
+    noticeLife: null, press: null, pressed: null,
   }
   const cache = { lastAt: NOW - 60_000, prompt: 160_000, read: 150_000, creation: 10_000, input: 10, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
   /** The row at band time NOW, the band's clock `skew` ahead of the proxy's, its step as given. */
@@ -1618,19 +1623,24 @@ describe('the live rows', () => {
   })
 })
 
-// Every live row and note in the wording table reads as the shared fixture says, and fits one line
-// at 80 columns (a 79-column row: padding, the mark, its words, and the control `switch to k•••`
-// that ticket 06 puts on the live rows, or `ok` on a note).
+// Every live row, note and question in the wording table reads as the shared fixture says, and
+// fits one line at 80 columns, in full or short, as the terminal counts it: padding, the mark, its
+// words and its controls (`switch to k•••` on the live rows, `ok` on a note).
 test('the wording table reads as the shared fixture, and each row fits 80 columns', () => {
+  const controls: Record<string, string[]> = {
+    kept: ['ok'], moved: ['ok'], pressRefused: ['ok'], pressUnanswered: ['ok'], movesNext: [], stopUnconfirmed: [], pressAsk: ['switch now', 'keep waiting'],
+  }
   expect(rows.length).toBeGreaterThan(0)
   for (const r of rows) {
-    const words = (W[r.row] as (...a: unknown[]) => { text: string; short?: string })(...r.args.map(a => (a === null ? undefined : a)))
+    // A row's words, a question's title and detail, or a notice's text alone.
+    const entry = W[r.row] as unknown
+    const out = (typeof entry === 'function' ? entry(...r.args.map(a => (a === null ? undefined : a))) : entry) as string | { text?: string; title?: string; detail?: string; short?: string }
+    const words = typeof out === 'string' ? { text: out, short: undefined } : out.title ? { text: `${out.title} ${out.detail}`, short: out.short } : { text: out.text!, short: out.short }
     expect(words.text, r.name).toBe(r.text)
     expect(words.short, r.name).toBe(r.short)
-    const control = r.row === 'kept' ? 'ok' : r.row === 'movesNext' ? '' : 'switch to k•••'
-    const fits = (t: string) => 4 + 2 + t.length + (control ? 2 + control.length + 2 : 2) <= 79
+    const acts = controls[r.row] ?? ['switch to k•••']
+    const fits = (t: string) => 4 + 2 + t.length + 2 + acts.reduce((n, a) => n + a.length + 2, 0) <= 80
     expect(fits(words.text) || fits(words.short ?? ''), `${r.name} at 80 columns`).toBe(true)
-    expect(4 + 2 + words.text.length + 2 + control.length + 2 <= 159, `${r.name} at 160 columns`).toBe(true)
   }
 })
 
@@ -1667,13 +1677,13 @@ test('the live rows draw while a step waits, on the terminal and in the desktop 
   let step = await holdStep($, 't1', TEXT, steps)
   snapshot = { ...retrying(clock.now() + 10_000, 5_000), sequence: 8 }
   await clock.advance(10_000)
-  const waiting = 'd••• returned HTTP 529 · retrying it in about 55s; k••• is next if needed'
-  expect(await drawn()).toEqual([`! ${waiting}`, '! d••• returned HTTP 529 · retrying in 55s', waiting, waiting])
+  // In full at 160 columns, with its control (ticket 06); at 80 the short form, the control kept.
+  const live = (full: string, short: string) => [`! ${full}switch to k•••`, `! ${short}switch to k•••`, `${full}Switch to k•••`, `${short}Switch to k•••`]
+  expect(await drawn()).toEqual(live('d••• returned HTTP 529 · retrying it in about 55s; k••• is next if needed', 'd••• returned HTTP 529 · retrying in 55s'))
   // The try runs: the running row, counting.
   snapshot = { ...retrying(clock.now() + 2_000, 7_000, { cause: { kind: 'hang', wait_ms: 135_000 }, try: 1, try_started_at: new Date(clock.now() - 4_000).toISOString() }), sequence: 9 }
   await clock.advance(2_000)
-  const running = 'd••• hung for 2m 15s · retrying it, 6s so far; k••• is next if needed'
-  expect(await drawn()).toEqual([`! ${running}`, `! ${running}`, running, running])
+  expect(await drawn()).toEqual(live('d••• hung for 2m 15s · retrying it, 6s so far; k••• is next if needed', 'd••• hung · retrying it, 6s so far'))
   // Content from the retry clears it.
   expect((await step.next()).done).toBe(true)
   expect(await drawn()).toEqual(['', '', '', ''])
@@ -1685,8 +1695,413 @@ test('the live rows draw while a step waits, on the terminal and in the desktop 
   expect(await drawn()).toEqual(['', '', '', ''])
   // It counts at each redraw, every 2 s.
   await clock.advance(3_000)
-  const watch = 'no answer for 32s · if it fails, a retry or another account takes over'
-  expect(await drawn()).toEqual([`! ${watch}`, `! ${watch}`, watch, watch])
+  expect(await drawn()).toEqual(live('no answer for 32s · if it fails, a retry or another account takes over', 'no answer for 32s'))
   await step.next()
   expect(await drawn()).toEqual(['', '', '', ''])
+})
+
+// ---- Switch now: `switch to k•••` on a waiting row stops the turn once the switch applies. ----
+
+/** Each main step: its first chunk, where a test may hold it, the chunks after, then its end with `usage`. */
+const heldSteps = (on: On) => {
+  const steps = { first: NO_CONTENT as unknown, then: [] as unknown[], usage: WARM_STEP as Record<string, number> }
+  on('turn.step', async function* (_$, e) {
+    yield steps.first as never
+    for (const c of steps.then) yield c as never
+    return { turnId: e.turnId, index: e.index, answer: 'Done.', toolUses: [], stopReason: 'end_turn', usage: steps.usage } as never
+  })
+  return steps
+}
+
+/**
+ * Main turn `turnId` waits: its step has had no content, and quota-pilot retries d••• after a 529
+ * that ended 5 s into it, with k••• to take over. Each read is stamped with the test clock's time.
+ */
+const waitingOn = async ($: Engine, clock: MockClock, steps: { first: unknown }, turnId: string, s1: Record<string, unknown> = {}) => {
+  const step = await holdStep($, turnId, NO_CONTENT, steps)
+  const t0 = clock.now()
+  stampReads = true
+  const r = retrying(t0 + 10_000, 5_000)
+  snapshot = { ...r, sequence: snapshot.sequence + 1, sessions: { s1: { ...r.sessions.s1!, ...s1 } } }
+  await clock.advance(10_000)
+  return { step, t0 }
+}
+
+/**
+ * The proxy's answer to a command with its next read: applied (the session on k•••, its record the
+ * user's switch, with the wait) or refused.
+ */
+const acknowledge = (clock: MockClock, status: 'applied' | 'rejected', reason?: string, cmd = commands[commands.length - 1]!) => {
+  const at = new Date(clock.now()).toISOString()
+  const s1 = snapshot.sessions.s1!
+  snapshot = {
+    ...snapshot, sequence: snapshot.sequence + 1, acks: [...snapshot.acks, { command_id: cmd.command_id!, session: 's1', status, reason, at }],
+    sessions: status === 'rejected' ? snapshot.sessions : {
+      s1: {
+        ...s1, auth_id: 'claude-k', auth_label: 'k•••', generation: 4, retry: undefined, takeover: 'claude-d',
+        last_switch: { from: 'claude-d', to: 'claude-k', at, reason: 'switched by user', kind: 'user', cause: { waited_ms: Number(cmd.waited_ms) } },
+      },
+    },
+  }
+}
+
+/** The turn's aborts the band asked for; a hook above may hold one back (`hold`) or answer it alone. */
+const recordAborts = (on: On, hold?: () => Promise<unknown> | undefined) => {
+  const aborts: string[] = []
+  on('turn.abort', async (_$, e) => {
+    aborts.push(e.turnId)
+    await hold?.()
+    return { value: undefined } as never
+  })
+  return aborts
+}
+
+/** Presses the waiting row's `switch to k•••` on the drawn band. */
+const pressSwitchNow = async ($: Engine, surface: 'terminal' | 'desktop' = 'terminal') => {
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, true) })
+  await ui.press({ key: 'switch-now' })
+  await ui.unmount()
+}
+
+const aborted = (turnId: string) => ({ turnId, answer: '', durationMs: 1, isAborted: true, reason: 'aborted' }) as never
+
+test('switch to k••• on a waiting row sends the switch, stops the turn once it applies, and says how to go on', async ($, on) => {
+  const steps = heldSteps(on)
+  const aborts = recordAborts(on)
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const { step, t0 } = await waitingOn($, clock, steps, 't1')
+  expect(await liveText($)).toBe('! d••• returned HTTP 529 · retrying it in about 55s; k••• is next if neededswitch to k•••')
+  // The cache is unknown before any reply: the press goes at once.
+  await pressSwitchNow($)
+  expect(commands).toEqual([expect.objectContaining({
+    action: 'switch', session: 's1', auth_id: 'claude-k', waited_ms: 10_000, generation: 3, step_started_at: new Date(t0).toISOString(),
+  })])
+  expect(await liveText($, 200, 'terminal', 'notice')).toBe('· Switch to k•••… ')
+  expect(aborts).toEqual([]) // nothing stopped before the proxy applied it
+  acknowledge(clock, 'applied')
+  await clock.advance(2_000)
+  expect(aborts).toEqual(['t1'])
+  // The abort cancels the step; the turn's end says it stopped.
+  await step.return(undefined as never)
+  await $.turn.complete(aborted('t1'))
+  await clock.advance(2_000)
+  expect(aborts).toEqual(['t1'])
+  expect(await rowText($)).toBe('↪ Switched d••• → k••• · by you after waiting 10s; send a message to go onok')
+  expect(submitted).toEqual([]) // the band sends nothing for the reader
+  expect(filled).toEqual([])
+  // The reader's next message starts the next turn: the note no longer says how to go on.
+  await $.turn.start({ text: 'carry on', turnId: 't2' } as never)
+  expect(await rowText($)).toBe('↪ Switched d••• → k••• · by you after waiting 10sok')
+})
+
+/** A reply's usage with a prompt of `k` thousand tokens, nearly all read from the cache. */
+const promptOf = (k: number) => ({ input_tokens: 10, output_tokens: 5, cache_read_input_tokens: (k - 10) * 1000, cache_creation_input_tokens: 10_000 })
+
+test('a press asks first, by the switch rule, while a large cache is warm; else it goes at once', async ($, on) => {
+  const steps = heldSteps(on)
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  steps.usage = promptOf(160)
+  await reply($)
+  let { step } = await waitingOn($, clock, steps, 'w1')
+  await pressSwitchNow($)
+  expect(commands).toEqual([])
+  const asked = await liveText($, 200, 'terminal', 'ask')
+  expect(asked).toMatch(/^\? Switch to k••• now\? This turn stops; your next message starts cold there: it rewrites 160k tokens, ≈\$\d+\.\d\d at API prices \(\$\d+\.\d\d warm\)switch nowkeep waiting$/)
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, true) })
+  await ui.press({ key: 'switch-now' })
+  await ui.unmount()
+  expect(commands).toEqual([expect.objectContaining({ action: 'switch', auth_id: 'claude-k' })])
+  await step.return(undefined as never)
+  await $.turn.complete({ turnId: 'w1', answer: 'Done.', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+  // 40k tokens: at once.
+  commands = []
+  steps.usage = promptOf(40)
+  await reply($)
+  ;({ step } = await waitingOn($, clock, steps, 'w2'))
+  await pressSwitchNow($)
+  expect(commands).toEqual([expect.objectContaining({ action: 'switch', auth_id: 'claude-k' })])
+  await step.return(undefined as never)
+  await $.turn.complete({ turnId: 'w2', answer: 'Done.', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+  // 160k gone cold: at once.
+  commands = []
+  steps.usage = promptOf(160)
+  await reply($)
+  await clock.advance(61 * 60_000)
+  ;({ step } = await waitingOn($, clock, steps, 'w3'))
+  await pressSwitchNow($)
+  expect(commands).toEqual([expect.objectContaining({ action: 'switch', auth_id: 'claude-k' })])
+  await step.return(undefined as never)
+})
+
+test('the question closes, with nothing sent, when the step answers first; keep waiting closes it too', async ($, on) => {
+  const steps = heldSteps(on)
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  steps.usage = promptOf(160)
+  await reply($)
+  steps.then = [TEXT]
+  const { step } = await waitingOn($, clock, steps, 'w1')
+  await pressSwitchNow($)
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, true) })
+  await ui.press({ key: 'keep-waiting' })
+  expect(await ui.find({ key: 'ask' })).toBeUndefined()
+  await ui.unmount()
+  await pressSwitchNow($)
+  expect(await liveText($, 200, 'terminal', 'ask')).toMatch(/^\? Switch to k••• now\?/)
+  expect((await step.next()).value).toEqual(TEXT) // content comes
+  expect(await liveText($, 200, 'terminal', 'ask')).toBe('')
+  expect(commands).toEqual([])
+})
+
+test('a press goes void when the step answers, or the turn ends, before the switch applies: nothing stops, and the switch is told', async ($, on) => {
+  const steps = heldSteps(on)
+  const aborts = recordAborts(on)
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  steps.then = [TEXT]
+  let { step } = await waitingOn($, clock, steps, 'w1')
+  await pressSwitchNow($)
+  expect((await step.next()).value).toEqual(TEXT) // the retry answers before the acknowledgement
+  acknowledge(clock, 'applied')
+  await clock.advance(2_000)
+  expect(aborts).toEqual([])
+  await step.next()
+  await $.turn.complete({ turnId: 'w1', answer: 'Done.', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+  expect(await rowText($)).toBe('↪ Switched d••• → k••• · by you after waiting 10sok')
+  // The turn ends and the next starts before the acknowledgement: the next is never stopped.
+  steps.then = []
+  snapshot = { ...SNAP, sequence: snapshot.sequence + 1 }
+  await clock.advance(10_000)
+  ;({ step } = await waitingOn($, clock, steps, 'w2'))
+  await pressSwitchNow($)
+  await step.return(undefined as never)
+  await $.turn.complete({ turnId: 'w2', answer: '', durationMs: 1, isAborted: false, reason: 'error' } as never)
+  ;({ step } = await waitingOn($, clock, steps, 'w3'))
+  acknowledge(clock, 'applied')
+  await clock.advance(2_000)
+  expect(aborts).toEqual([])
+  await step.return(undefined as never)
+})
+
+test('a refused press says why for 10 s, then the waiting row and its control come back', async ($, on) => {
+  const steps = heldSteps(on)
+  const aborts = recordAborts(on)
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const { step } = await waitingOn($, clock, steps, 'w1')
+  await pressSwitchNow($)
+  acknowledge(clock, 'rejected', 'the session moved meanwhile')
+  await clock.advance(2_000)
+  expect(await liveText($, 200, 'terminal', 'notice')).toBe('· Could not switch to k•••: the session moved meanwhileok')
+  expect(await liveText($, 60, 'terminal', 'notice')).toBe('· Could not switch to k•••ok')
+  await clock.advance(10_000)
+  expect(await liveText($)).toBe('! d••• returned HTTP 529 · retrying it in about 43s; k••• is next if neededswitch to k•••')
+  expect(aborts).toEqual([])
+  await step.return(undefined as never)
+})
+
+test('no answer within 5 s: the turn keeps waiting; a second press is a new one, and the first switch arriving late is only told', async ($, on) => {
+  const steps = heldSteps(on)
+  const aborts = recordAborts(on)
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const { step } = await waitingOn($, clock, steps, 'w1')
+  await pressSwitchNow($)
+  await clock.advance(5_000)
+  expect(await liveText($, 200, 'terminal', 'notice')).toBe('· No answer from the proxy within 5s; the turn keeps waitingok')
+  await clock.advance(10_000)
+  expect(await liveText($, 200, 'terminal', 'notice')).toBe('')
+  await pressSwitchNow($) // through the drawn band, its control back
+  expect(commands).toHaveLength(2)
+  expect(commands[1]!.command_id).not.toBe(commands[0]!.command_id)
+  // The first switch lands late, and the second is refused for it.
+  acknowledge(clock, 'applied', undefined, commands[0])
+  acknowledge(clock, 'rejected', 'the session moved meanwhile', commands[1])
+  await clock.advance(2_000)
+  expect(aborts).toEqual([])
+  expect(await liveText($, 200, 'terminal', 'notice')).toBe('· Could not switch to k•••: the session moved meanwhileok')
+  await step.return(undefined as never)
+  await $.turn.complete({ turnId: 'w1', answer: '', durationMs: 1, isAborted: false, reason: 'error' } as never)
+  await clock.advance(10_000)
+  expect(await rowText($)).toMatch(/^↪ Switched d••• → k••• · by you after waiting 10sok$/)
+})
+
+test('a stop not confirmed within 5 s says so until the turn ends: held back by a hook, its end late, or answered by a hook alone', async ($, on) => {
+  let release: () => void = () => undefined
+  let holding = false
+  const steps = heldSteps(on)
+  const aborts = recordAborts(on, () => (holding ? new Promise<void>(r => { release = r }) : undefined))
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const stopped = async (turnId: string, why: 'aborted' | 'answer', s: { return: (v: never) => unknown }) => {
+    await s.return(undefined as never)
+    await $.turn.complete({ turnId, answer: '', durationMs: 1, isAborted: why === 'aborted', reason: why } as never)
+  }
+  const fresh = async () => {
+    snapshot = { ...SNAP, sequence: snapshot.sequence + 1 }
+    commands = []
+    await clock.advance(10_000)
+  }
+  // The turn's end comes 6 s after the abort.
+  let { step } = await waitingOn($, clock, steps, 'w1')
+  await pressSwitchNow($)
+  acknowledge(clock, 'applied')
+  await clock.advance(2_000)
+  await clock.advance(6_000)
+  expect(await liveText($, 200, 'terminal', 'notice')).toBe("· Switched to k•••; the turn's stop is not confirmed yet ")
+  await stopped('w1', 'aborted', step)
+  expect(await rowText($)).toMatch(/send a message to go onok$/)
+  expect(aborts).toEqual(['w1'])
+  // A hook holds the abort back 6 s, then lets it through.
+  await fresh()
+  holding = true
+  ;({ step } = await waitingOn($, clock, steps, 'w2'))
+  await pressSwitchNow($)
+  acknowledge(clock, 'applied')
+  await clock.advance(2_000)
+  await clock.advance(6_000)
+  expect(await liveText($, 200, 'terminal', 'notice')).toBe("· Switched to k•••; the turn's stop is not confirmed yet ")
+  release()
+  holding = false
+  await stopped('w2', 'aborted', step)
+  expect(await rowText($)).toMatch(/send a message to go onok$/)
+  expect(aborts).toEqual(['w1', 'w2'])
+  // A hook answers the abort itself, and the turn later ends by itself.
+  await fresh()
+  ;({ step } = await waitingOn($, clock, steps, 'w3'))
+  await pressSwitchNow($)
+  acknowledge(clock, 'applied')
+  await clock.advance(8_000)
+  expect(await liveText($, 200, 'terminal', 'notice')).toBe("· Switched to k•••; the turn's stop is not confirmed yet ")
+  await stopped('w3', 'answer', step)
+  expect(await rowText($)).toMatch(/by you after waiting 10sok$/)
+  expect(aborts).toEqual(['w1', 'w2', 'w3'])
+})
+
+test('a message queued during the wait starts the next turn before the stopped one ends: no tail', async ($, on) => {
+  const steps = heldSteps(on)
+  recordAborts(on)
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const { step } = await waitingOn($, clock, steps, 'w1')
+  await pressSwitchNow($)
+  acknowledge(clock, 'applied')
+  await clock.advance(2_000)
+  await $.turn.start({ text: 'queued', turnId: 'w2' } as never)
+  await step.return(undefined as never)
+  await $.turn.complete(aborted('w1'))
+  expect(await rowText($)).toBe('↪ Switched d••• → k••• · by you after waiting 10sok')
+})
+
+test("a subagent's turn inside the reader's is not the reader's: keep-warm is scheduled once, at the main turn's end", { options: { keepWarmDefault: true } }, async ($, on) => {
+  const clock = stubSession(on, SNAP, { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await $.turn.start({ text: 'go on', turnId: 'm1' } as never)
+  // A subagent runs a turn of its own inside it, then the main loop replies.
+  await $.turn.start({ text: 'look around', turnId: 'a1', agentId: 'agent-1' } as never)
+  for await (const chunk of $.turn.step({ turnId: 'a1', index: 0, model: 'claude-opus-5-5', agentId: 'agent-1' } as never)) void chunk
+  await $.turn.complete({ turnId: 'a1', agentId: 'agent-1', answer: 'Found it.', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+  for await (const chunk of $.turn.step({ turnId: 'm1', index: 0, model: 'claude-opus-5-5' } as never)) void chunk
+  await $.turn.complete({ turnId: 'm1', answer: 'Done.', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+  await minutes(clock, 3)
+  expect(forks).toHaveLength(0)
+  await minutes(clock, 1) // a minute before the cache would expire
+  expect(forks).toHaveLength(1)
+})
+
+// What the band says of a press comes from its own state and the snapshot, so a reload says the same.
+describe('switch now at the view', () => {
+  const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined, press: () => undefined }
+  const ui: UiState = {
+    switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
+    pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: '',
+    noticeLife: null, press: null, pressed: null,
+  }
+  const cache = { lastAt: 0, prompt: 0, read: 0, creation: 0, input: 0, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
+  const STEP = { turnId: 't1', index: 0, startedAt: NOW - 60_000, contentAt: 0, generation: 3 }
+  const top = (snap: Snap, extra: { step?: Record<string, unknown> | null; ui?: Partial<UiState>; bandError?: BandError | null } = {}) =>
+    bandFacts({
+      snap, bandError: extra.bandError ?? null, now: NOW, sess: SESSION, cache, ui: { ...ui, ...extra.ui }, models: [], working: true, settings: settingsOf({}),
+      auto: { holdCold: null, keepWarm: null }, unattended: false,
+      live: { step: extra.step === null ? null : { ...STEP, ...extra.step } as never, skew: 0 },
+    }, act).top
+  const control = (snap: Snap, extra = {}) => top(snap, extra)?.acts.map(a => a.label) ?? []
+  const s1 = (snap: Snap, patch: Record<string, unknown>): Snap => ({ ...snap, sessions: { s1: { ...snap.sessions.s1!, ...patch } } })
+
+  test('the waiting, running and hang rows offer switch to the account that would take over, and nothing else does', () => {
+    const waiting = retrying(NOW, 10_000)
+    const running = retrying(NOW, 45_000, { cause: { kind: 'hang', wait_ms: 135_000 }, try: 1, try_started_at: new Date(NOW - 40_000).toISOString() })
+    const watch = s1(SNAP, { takeover: 'claude-k' })
+    for (const snap of [waiting, running, watch]) {
+      expect(control(snap)).toEqual(['switch to k•••'])
+      expect(control(s1(snap, { takeover: undefined }))).toEqual([])
+      // Always the account the takeover names.
+      const claude = snap.providers.claude!
+      const third: Snap = { ...snap, providers: { ...snap.providers, claude: { ...claude, credentials: [...claude.credentials, { ...claude.credentials[1]!, id: 'claude-m', label: 'm•••' }] } } }
+      expect(control(s1(third, { takeover: 'claude-m' }))).toEqual(['switch to m•••'])
+      expect(top(snap, { bandError: { kind: 'network', message: 'refused' } })?.acts.some(a => a.key === 'switch-now')).toBe(false)
+    }
+  })
+
+  test("only while the step's request is surely on the bound account", () => {
+    const snap = retrying(NOW, 10_000)
+    // A pick of the binding answered elsewhere since a second before the step began: hidden.
+    expect(control(s1(snap, { elsewhere_at: new Date(STEP.startedAt - 500).toISOString() }))).toEqual([])
+    expect(control(s1(snap, { elsewhere_at: new Date(STEP.startedAt + 20_000).toISOString() }))).toEqual([])
+    expect(control(s1(snap, { elsewhere_at: new Date(STEP.startedAt - 2_000).toISOString() }))).toEqual(['switch to k•••'])
+    // The session moved since the step began (a switch of the reader's, any move): hidden.
+    expect(control(s1(snap, { generation: 4 }))).toEqual([])
+    expect(control(snap, { step: { generation: undefined } })).toEqual([])
+    // A press under way: hidden.
+    const press = { id: 'c1', turnId: 't1', index: 0, startedAt: STEP.startedAt, generation: 3, to: 'claude-k', label: 'k•••', stage: 'sending', sentAt: NOW, abortAt: 0, switchAt: '', since: false } as const
+    expect(top(snap, { ui: { press } })?.title).toBe('Switch to k•••…')
+    expect(top(snap, { ui: { press: { ...press, stage: 'stopping', abortAt: NOW - 5_000 } } })?.title).toBe("Switched to k•••; the turn's stop is not confirmed yet")
+  })
+
+  test('after a reload the note reads as the band saw the press: stopped, how to go on until a turn starts', () => {
+    const at = new Date(NOW - 30_000).toISOString()
+    const moved = s1(SNAP, {
+      auth_id: 'claude-k', retry: undefined,
+      last_switch: { from: 'claude-d', to: 'claude-k', at, reason: 'switched by user', kind: 'user', cause: { kind: 'hang', wait_ms: 135_000, retries: 1, waited_ms: 175_000 } },
+    })
+    const idle = (pressed: UiState['pressed']) => top(moved, { step: null, ui: { pressed } })
+    expect(idle({ at, stopped: true, since: false })).toMatchObject({ title: 'Switched d••• → k••• · by you after waiting 2m 55s; send a message to go on', short: 'Switched d••• → k••• · send a message to go on' })
+    expect(idle({ at, stopped: true, since: true })).toMatchObject({ title: 'Switched d••• → k••• · by you after waiting 2m 55s', short: 'Switched d••• → k••• · by you' })
+    expect(idle({ at, stopped: false, since: false })?.title).toBe('Switched d••• → k••• · by you after waiting 2m 55s')
+    expect(idle(null)?.title).toBe('Switched d••• → k••• · by you after waiting 2m 55s')
+    expect(idle({ at, stopped: true, since: false })?.acts).toEqual([]) // ok alone, never switch back
+  })
+})
+
+test('every row of a press fits one line at 80 columns, on the terminal and in the desktop app, whatever the label', async ($, on) => {
+  const steps = heldSteps(on)
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  steps.usage = promptOf(160)
+  await reply($)
+  for (const label of ['kuan•••12', 'kuan•••100']) {
+    const creds = SNAP.providers.claude!.credentials.map(c => (c.id === 'claude-k' ? { ...c, label } : c))
+    const named = (snap: Snap): Snap => ({ ...snap, providers: { ...snap.providers, claude: { ...snap.providers.claude!, credentials: creds } } })
+    const step = await holdStep($, `f-${label}`, NO_CONTENT, steps)
+    stampReads = true
+    snapshot = { ...named(retrying(clock.now() + 10_000, 5_000)), sequence: snapshot.sequence + 1 }
+    await clock.advance(10_000)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(80, true) })
+      const cap = surface === 'terminal' ? 's' : 'S'
+      expect((await ui.find({ key: 'alert' }))?.text, `${label} ${surface}`).toMatch(new RegExp(`^!? ?d••• returned HTTP 529 · retrying in \\d+s${cap}witch to ${label}$`))
+      await ui.press({ key: 'switch-now' })
+      expect((await ui.find({ key: 'ask' }))?.text, `${label} ${surface}`).toMatch(new RegExp(`^\\?? ?Switch to ${label}\\? Stops turn; cold${cap}witch now(K|k)eep waiting$`))
+      await ui.press({ key: 'keep-waiting' })
+      await ui.unmount()
+    }
+    // The terminal's row, whose width it counts: within 80 columns, its controls included.
+    const short = `Switch to ${label}? Stops turn; cold`
+    expect(4 + 2 + short.length + 2 + 'switch now'.length + 2 + 'keep waiting'.length + 2, label).toBeLessThanOrEqual(80)
+    await step.return(undefined as never)
+    await $.turn.complete({ turnId: `f-${label}`, answer: '', durationMs: 1, isAborted: false, reason: 'error' } as never)
+  }
 })

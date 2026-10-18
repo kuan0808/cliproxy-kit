@@ -290,8 +290,9 @@ cache warm, whatever the defaults or a command say, so what it types always goes
 ### When an account fails
 
 A failure is retried on the session's own account first, so its prompt cache stays; only if that
-fails does the session move, and the band says why, from what quota-pilot saw of that account. An
-account that keeps failing rests. There is nothing to set; the rules and numbers are in
+fails does the session move, and the band says why, from what quota-pilot saw of that account.
+While a turn waits, `switch to k•••` on the band's row stops waiting at any time: the session moves
+to k•••, the turn stops, and your next message goes on there. An account that keeps failing rests. There is nothing to set; the rules and numbers are in
 [docs/architecture.md](docs/architecture.md#when-an-account-fails).
 
 | Situation | What happens | What the band shows |
@@ -433,10 +434,12 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
 | A Codex account has no 5-hour window | Its plan has none; the page and the band say so. |
 | The band says `Switched d••• → k••• · reason not recorded` | quota-pilot is older than the band and does not record why a session moved: update it from the panel's Plugin Store. |
-| The band says `retrying it in about 50s` | quota-pilot keeps the request on the session's own account for a retry, so the prompt cache stays. The turn goes on there once the retry answers, or on the account named after 75 s at most; `switch` moves it now. |
-| Claude Code shows `API error · Retrying` with `quota-pilot: … retrying it in about 50s` | quota-pilot keeps the request on its own account for a retry, so the prompt cache stays. It moves on to the account named after 75 s at most; `switch` moves it now. |
+| The band says `retrying it in about 50s` | quota-pilot keeps the request on the session's own account for a retry, so the prompt cache stays. The turn goes on there once the retry answers, or on the account named after 75 s at most; `switch to k•••` stops waiting now. |
+| The band says `retrying it, 2m so far` | The retry hangs too. `switch to k•••` stops waiting now; or Esc and send again, and the session moves. |
+| The band says `send a message to go on` after `switch to k•••` | The turn was stopped on purpose: any message continues it on k•••, with what the turn had done. |
+| Claude Code shows `API error · Retrying` with `quota-pilot: … retrying it in about 50s` | quota-pilot keeps the request on its own account for a retry, so the prompt cache stays. It moves on to the account named after 75 s at most; `switch to k•••` on the band stops waiting now. |
 | The band says `got no answer · moves to k••• on the next turn` | The retry after a hang got no answer; your next message goes to k•••. Nothing to do. |
-| A request hangs for minutes | Through a proxy Claude Code has no first-byte limit, only its request timeout, `API_TIMEOUT_MS` (600 s by default). A shorter one ends a hang sooner, but also cuts off a slow first reply to a large cold prompt. Esc and send again moves the session; `switch` moves it at any time. |
+| A request hangs for minutes | Through a proxy Claude Code has no first-byte limit, only its request timeout, `API_TIMEOUT_MS` (600 s by default). A shorter one ends a hang sooner, but also cuts off a slow first reply to a large cold prompt. Esc and send again moves the session; `switch to k•••` on the band's row moves it at any time. |
 | Retries happen on Claude Code's line, not inside one request | The proxy's `request-retry` is 0: the retry needs 1 or more for the proxy to carry it. |
 | The Account card says `resting, back in 4m` | That account failed twice in a row and rests: the session moves at its next turn to an account that can serve, and the rest ends at the time shown, or at its first success. Nothing to do. |
 | A move offers `switch back` | The account the session left can take it again. `switch back` returns, asking first while the cache is warm; quota-pilot never moves a session back on its own, as the new account's cache is the warm one. |

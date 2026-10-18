@@ -100,6 +100,8 @@ export type SnapCause = {
   retries?: number
   last_retry?: SnapCause
   answered?: boolean
+  /** On the user's own switch from a waiting turn (Switch now): how long it had waited. */
+  waited_ms?: number
 }
 
 /** An account that kept failing rests until `until`, then is on trial until it serves. */
@@ -194,7 +196,14 @@ export type CacheInfo = {
 }
 
 /** A command sent and not yet acknowledged: the proxy run (boot id) it was sent to, and when. */
-export type Pending = { id: string; text: string; boot: string; at: number }
+export type Pending = {
+  id: string
+  text: string
+  boot: string
+  at: number
+  /** A press of `switch to k•••` (Switch now), by the account's label: its outcome is worded apart. */
+  press?: string
+}
 
 /**
  * Why the band read no snapshot from the proxy's `/band`: an error status (401 before the proxy
@@ -218,9 +227,42 @@ export type Move = { action: string; fields: Record<string, string>; text: strin
 
 /**
  * The band's own main step while it streams: when it began and its latest content chunk (text,
- * thinking, a tool call or its input; 0 for none yet), on the band's clock.
+ * thinking, a tool call or its input; 0 for none yet), on the band's clock, and the session's
+ * generation in the snapshot then (none when the snapshot did not name the session).
  */
-export type StepInfo = { turnId: string; index: number; startedAt: number; contentAt: number }
+export type StepInfo = { turnId: string; index: number; startedAt: number; contentAt: number; generation?: number }
+
+/**
+ * A press of `switch to k•••` while a turn waits (Switch now): one operation, by its command id, for
+ * the main turn and step it stops. It asks first (asking), sends the switch (sending, 5 s at most for
+ * the acknowledgement), and once the switch is applied stops the turn (stopping) and waits for the
+ * turn's own end. Until it stops the turn it goes void at the step's first content, the step's or
+ * the turn's end, a refusal or 5 s.
+ */
+export type Press = {
+  id: string
+  turnId: string
+  index: number
+  /** The step's start on the band's clock, and the session's generation then. */
+  startedAt: number
+  generation: number
+  /** The account it moves to, and its label. */
+  to: string
+  label: string
+  stage: 'asking' | 'sending' | 'stopping'
+  /** When it was sent and when the turn's abort was called, on the band's clock; the switch's record time. */
+  sentAt: number
+  abortAt: number
+  switchAt: string
+  /** A main turn of another id started while it stopped this one (a queued message). */
+  since: boolean
+}
+
+/**
+ * What came of a press that switched the session, from what the band saw: the switch (`at`, its
+ * record's time), whether the turn stopped, and whether a main turn has started since.
+ */
+export type Pressed = { at: string; stopped: boolean; since: boolean }
 
 /** What the band sees live: its main step (null when none runs), and how far its clock is ahead of the proxy's at the last read. */
 export type Live = { step: StepInfo | null; skew: number }
@@ -259,6 +301,14 @@ export type UiState = {
   turns: number
   /** The account switch whose notice the reader dismissed, by its time. */
   dismissedSwitch: string
+  /**
+   * For the notice whose words are `text` (Switch now's refusal and no answer): when it goes by
+   * itself, on the band's clock, and its short form. Any other notice stays until `ok`.
+   */
+  noticeLife: { text: string; short: string; until: number } | null
+  /** A press of `switch to k•••` under way, and what came of the last one that switched. */
+  press: Press | null
+  pressed: Pressed | null
 }
 
 declare module 'claude-code' {

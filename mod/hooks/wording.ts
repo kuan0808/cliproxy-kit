@@ -56,7 +56,8 @@ export function moveWhy(sw: SnapSwitch, from: string, now: number): { why: strin
       if (sw.reason.includes('by user')) return said('switched by you')
       return said(sw.reason.startsWith('moved while idle') ? 'moved while idle' : 'reason not recorded')
     case 'user':
-      return said('switched by you')
+      // From a waiting turn (the band's Switch now): how long it had waited.
+      return c.waited_ms ? { why: `by you after waiting ${fmtWait(c.waited_ms)}`, short: 'by you' } : said('switched by you')
     case 'quota':
       return said(`${from} ${c.reason || 'quota used up'}`)
     case 'idle':
@@ -190,7 +191,10 @@ export const W = {
     ? { text: `no answer for ${fmtWait(forMs)} · if it fails, a retry or another account takes over`, short: `no answer for ${fmtWait(forMs)}` }
     : { text: `no answer for ${fmtWait(forMs)}` }),
   // Notes.
-  moved: (from: string, to: string, why: { why: string; short: string }): Words => ({ text: `Switched ${from} → ${to} · ${why.why}`, short: `Switched ${from} → ${to} · ${why.short}` }),
+  /** A move; after a press that stopped the turn, until a main turn starts, how to go on. */
+  moved: (from: string, to: string, why: { why: string; short: string }, goOn = false): Words => (goOn
+    ? { text: `Switched ${from} → ${to} · ${why.why}; send a message to go on`, short: `Switched ${from} → ${to} · send a message to go on` }
+    : { text: `Switched ${from} → ${to} · ${why.why}`, short: `Switched ${from} → ${to} · ${why.short}` }),
   // What came of an action: a move the band sent (named by `switchTo`, `routeTo` or `backTo`), a
   // handoff, a held message.
   switchTo: (to: string) => `Switch to ${to}`,
@@ -214,6 +218,14 @@ export const W = {
   handoffReloaded: 'The band reloaded during a handoff; the conversation is kept',
   sendFromBox: 'Press Enter to send it: a message that names files with @ goes from the prompt box',
   notSent: (drop: string | undefined) => `Not sent${drop ? `: ${drop}` : ''}; the message is back in the prompt`,
+  // Switch now: the live rows' control while a turn waits, its question and what came of it.
+  switchNow: (to: string) => `switch to ${to}`,
+  pressAsk: (to: string, rewrite: string) => ({
+    title: `Switch to ${to} now?`, detail: `This turn stops; your next message starts cold there: it ${rewrite}`, short: `Switch to ${to}? Stops turn; cold`,
+  }),
+  stopUnconfirmed: (to: string) => `Switched to ${to}; the turn's stop is not confirmed yet`,
+  pressRefused: (to: string, reason: string): Words => ({ text: `Could not switch to ${to}: ${reason}`, short: `Could not switch to ${to}` }),
+  pressUnanswered: 'No answer from the proxy within 5s; the turn keeps waiting',
   /** A retry that worked: the session stayed, with its cache when the request read it. */
   kept: (from: string, cause: SnapCause, afterMs: number, cacheRead: number): Words => {
     const later = cause.status && afterMs >= 1000 ? ` ${Math.round(afterMs / 1000)}s later` : ''

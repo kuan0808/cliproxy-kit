@@ -247,6 +247,8 @@ type Cause struct {
 	Retries   int    `json:"retries,omitempty"`
 	LastRetry *Cause `json:"last_retry,omitempty"`
 	Answered  bool   `json:"answered,omitempty"`
+	// WaitedMs, on the user's own switch from a waiting turn (Switch now), is how long it had waited.
+	WaitedMs int64 `json:"waited_ms,omitempty"`
 }
 
 // leaving is why a pick did not answer a binding's account for a model: a move kind and reason.
@@ -283,12 +285,13 @@ type State struct {
 	failedAt map[string]time.Time
 	// The retry rule (retry.go), by binding and model: the episodes running; the bindings marked
 	// `hung`, whose account a pick skips; when a pick last answered another account (the takeover
-	// boundary); when a pick last answered the bound account with no record of that attempt yet.
-	// In memory only.
+	// boundary); when a pick last answered the bound account with no record of that attempt yet;
+	// the try running when the user switched away, whose record is still to come. In memory only.
 	episodes  map[episodeKey]*episode
 	hung      map[episodeKey]bool
 	elsewhere map[episodeKey]time.Time
 	inflight  map[episodeKey]time.Time
+	stopped   map[episodeKey]stoppedTry
 	// recorded is closed at each usage record and made anew: a pick waiting for one wakes.
 	recorded     chan struct{}
 	log          []LogEntry // usage log lines not yet written to disk
@@ -333,6 +336,7 @@ func New(bootID string, now func() time.Time) *State {
 		hung:       map[episodeKey]bool{},
 		elsewhere:  map[episodeKey]time.Time{},
 		inflight:   map[episodeKey]time.Time{},
+		stopped:    map[episodeKey]stoppedTry{},
 		recorded:   make(chan struct{}),
 		identities: map[string]Identity{},
 		clients:    map[string]time.Time{},
@@ -863,6 +867,9 @@ func (s *State) Observe(u Usage) {
 	kind := ""
 	if u.Failed && u.AuthID != "" && supported {
 		kind = s.failedLocked(u, provider, root, model, tr.Compact, at, now)
+	}
+	if u.SessionID == root && u.AuthID != "" && supported {
+		s.stoppedTryLocked(episodeKey{provider + "|" + root, modelKey(model)}, root, u, kind, at)
 	}
 	// The binding the request's pick resolved to: its episode hears of a success on its account.
 	if u.SessionID != "" && u.AuthID != "" && supported {

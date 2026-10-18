@@ -22,6 +22,12 @@ type Command struct {
 	AuthID    string    `json:"auth_id,omitempty"`
 	Provider  string    `json:"provider,omitempty"`
 	Model     string    `json:"model,omitempty"`
+	// A press of the band's `switch to k•••` (Switch now) says how long the turn had waited, and the
+	// session's generation and the main step's start, on the proxy's clock, as the band saw them:
+	// quota-pilot checks them again before it switches.
+	WaitedMs      int64     `json:"waited_ms,omitempty"`
+	Generation    uint64    `json:"generation,omitempty"`
+	StepStartedAt time.Time `json:"step_started_at,omitzero"`
 	// Client is who sent it, as the proxy knows its key (see State.Client); never the band's say.
 	Client string `json:"-"`
 }
@@ -85,13 +91,20 @@ func (s *State) applyLocked(cmd Command, root string, sess *session, now time.Ti
 			return "account cannot serve now: " + r.Reason
 		}
 		key := c.Provider + "|" + root
+		var cause *Cause
+		if !cmd.StepStartedAt.IsZero() {
+			var refused string
+			if cause, refused = s.pressLocked(cmd, root, sess, key, s.lookupModelLocked(sess, model), now); refused != "" {
+				return refused
+			}
+		}
 		from := ""
 		if b := s.bindings[key]; b != nil {
 			from = b.AuthID
 		} else if served := s.creds[sess.ServedAuth]; served != nil && served.Provider == c.Provider {
 			from = served.ID
 		}
-		s.bindings[key] = &Binding{AuthID: c.ID, Reason: switchedReason, LastUsed: now, At: now, Kind: MoveUser}
+		s.bindings[key] = &Binding{AuthID: c.ID, Reason: switchedReason, LastUsed: now, At: now, Kind: MoveUser, Cause: cause}
 		delete(s.failures, key)
 		// A switch ends any retry episode and mark, and a record sent before it says nothing of them.
 		s.endEpisodesOfLocked(root)
@@ -99,7 +112,7 @@ func (s *State) applyLocked(cmd Command, root string, sess *session, now time.Ti
 		// The switch record is written when the switch is applied, not at the new account's first
 		// answer, so it says when and why it was made.
 		if from != "" && from != c.ID {
-			s.movedLocked(c.Provider, root, root, from, c.ID, model, switchedReason, MoveUser, nil, now)
+			s.movedLocked(c.Provider, root, root, from, c.ID, model, switchedReason, MoveUser, cause, now)
 		}
 	case "route":
 		if cmd.Provider == "" || cmd.Model == "" {
@@ -127,6 +140,34 @@ func (s *State) applyLocked(cmd Command, root string, sess *session, now time.Ti
 
 // switchedReason marks a binding the user chose.
 const switchedReason = "switched by user"
+
+// pressLocked checks again, under the lock, what the band saw when the user pressed `switch to k•••`
+// while a turn waited (Switch now): the session has not moved since the main step began, no pick of
+// its binding for the model has answered another account since (the step's request may be there
+// already), and the target is still the account that would take over. It gives the switch's cause:
+// the wait, and the retry episode running, whose running try is kept so that its record, when it
+// comes, says how it ended (stoppedTryLocked).
+func (s *State) pressLocked(cmd Command, root string, sess *session, key, model string, now time.Time) (*Cause, string) {
+	label := s.labelsLocked()[cmd.AuthID]
+	ek := episodeKey{key, modelKey(model)}
+	b := s.bindings[key]
+	switch {
+	case sess.Generation != cmd.Generation:
+		return nil, "the session moved meanwhile"
+	case !s.elsewhere[ek].Before(cmd.StepStartedAt.Add(-time.Second)):
+		return nil, "the request may already be on " + label
+	case b == nil || s.creds[b.AuthID] == nil || s.takeoverLocked(s.creds[b.AuthID], model, now) != cmd.AuthID:
+		return nil, label + " cannot take the session now"
+	}
+	cause := &Cause{WaitedMs: max(0, cmd.WaitedMs)}
+	if e := s.episodeLocked(ek, root, b, now); e != nil {
+		cause.Kind, cause.Status, cause.WaitMs, cause.Retries = e.cause.Kind, e.cause.Status, e.cause.WaitMs, e.tries
+		if !e.tryAt.IsZero() {
+			s.stopped[ek] = stoppedTry{e: e, at: now}
+		}
+	}
+	return cause, ""
+}
 
 func (s *State) addAckLocked(a Ack) {
 	s.acks = append(s.acks, a)
