@@ -335,6 +335,66 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296:
   threads; an expired thread is answered `404 thread_not_found`, which CLIProxyAPI 8.0.14 and later
   pass through so Claude Code replays the conversation.
 
+What CLIProxyAPI does around a failed attempt is pinned by the proxy contract test, which runs the
+proxy's own account manager, API handlers and, in `plugin/contract_service_test.go`, its real
+executors against a stub upstream, all in-process (`go test ./...` in `plugin/`; checked against
+8.0.15 and 8.0.16). A proxy update that changes any of this fails that test:
+
+- When quota-pilot declines the next pick of the same round after an attempt on A failed
+  (`TestADeclineAfterAFailureWithThreeRetryRounds`): after a dropped or reset connection the proxy
+  runs another request-retry round in which A is offered at once, so the retry stays inside the
+  request; after a 408, 429, 500, 502, 503 or 504 the next round runs without A, which is cooling,
+  so the client gets A's failure with its status; after a 520, a 529, another status such as 418,
+  or a bare deadline (a 504 to the client) no round follows and the client gets the failure. With
+  `request-retry: 0`, or the rounds spent, every failure goes back to the client; with A's own
+  `request_retry` of 0 the rounds run without A; with `max-retry-credentials: 1` no pick follows the
+  failure in its round and the next round decides (the tests named `...WithNoRetryRounds`,
+  `...WhenAccountAOverridesRetryToZero`, `...WhenTheRoundsAreSpent` and
+  `...WhenTheCredentialCapIsSpent`).
+  Without a decline the request moves to another account in the same round.
+- A decline on a request's first pick fails it with a 503 carrying the scheduler's reason
+  (`TestADeclineOnARequestsFirstPickFailsItWith503AndTheReason`).
+- The pick after a failed attempt names that account in `selected_auth_id`; the next round's first
+  pick does not (`TestThePickAfterAFailedAttemptNamesTheAccountJustTried`; nothing relies on it).
+- A request's usage records reach the usage plugin in the order they were published, one at a time:
+  a failed attempt's before its retry's success, both with the request's trace id
+  (`TestUsageRecordsReachThePluginInOrderOneAtATime`).
+- A pick carries no request or trace id of the proxy's, only the client's own headers
+  (`TestAPickCarriesNoRequestOrTraceID`), so a retry is scoped to the session's binding.
+- What the proxy reads as the request's own fault, a model the account does not serve and a refused
+  sign-in, ported in `plugin/core/faults.go`, agrees with the proxy on one corpus
+  (`TestTheRequestFaultAndSignInPortsAgreeWithTheProxy`, `TestTheModelPortAgreesWithTheProxy`). The
+  proxy reads a failure without the requested model, so a not-found error naming the model is a
+  generic 404 to it, which cools that model for 12 hours like a model it does not serve.
+- A pick lists an account for a model only while the proxy would serve that model with it
+  (`TestAPickListsAnAccountOnlyWhileTheProxyWouldServeTheModelWithIt`): after a 529 it is left out
+  for 60 s, after a 503 with `Retry-After: 120` for 120 s, after a 401 for 30 minutes, and after a
+  connection error or a bare deadline not at all; an account cooling for one model is still listed
+  for another; an Anthropic 429 with a unified rate-limit rejection leaves it out for every model
+  (`TestAUnifiedRateLimitRejectionLeavesTheAccountOutForEveryModel`, through the real executor).
+- Intercept sees the model the pick names, for a model alias (`team-opus`, which the record names
+  `claude-opus-5-5`) and for a request routed to another provider (whose record's `Alias` is the
+  client's model), and every usage record of the request carries the trace id Intercept saw
+  (`TestInterceptSeesTheModelThePickNames`). A compact request reaches Intercept with its path in
+  the metadata; after its 404 or 500 the account is left alone, after its 401 or any 429 it cools
+  (`TestACompactRequestReachesInterceptWithItsPath`,
+  `TestACompactFailureLeavesTheAccountAloneOnlyFor404And500`).
+- A broken stream's failure record (`TestABrokenStreamsRecordTellsABrokenAnswerFromAHang`): a Claude
+  stream dropped after its text keeps the usage seen so far and a `ttft` from its start; a Codex
+  stream dropped after its text is a 408 with no tokens and an early `ttft`; a 504 after silence has
+  its `ttft` at the 504; a connection dropped after silence has none.
+- Request-retry rounds have no time limit: a connection lost 135 s into an attempt still leads to a
+  round that offers A at once (`TestAHangsRetryRunsInsideTheSameRequest`), and the Claude handler
+  writes no response headers before the first chunk, so the client sees a hang and its retry as one
+  response (`TestTheClaudeHandlerWritesNoHeadersBeforeTheFirstChunk`).
+- A client's cancel during an attempt records a 499 with its wait, with no `ttft` when nothing came
+  and one once the stream had started (`TestAClientCancelRecords499WithItsWait`).
+
+Claude Code, checked against 2.1.296 and again against 2.1.302: through a proxy it sets no limit on
+the wait for a first byte (its first-byte watchdog runs only against Anthropic's own API); its
+request timeout, `API_TIMEOUT_MS`, is 600 s by default, counted from sending the request until the
+response headers arrive; and it retries a 408, 409, 429, 5xx or 529 up to 10 times.
+
 ## Limitations
 
 - Crossing providers changes the model and rewrites the prompt cache; Claude Code does not know a
