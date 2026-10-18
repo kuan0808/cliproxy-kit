@@ -43,6 +43,12 @@ type LogEntry struct {
 	W    int64  `json:"w,omitempty"`
 	TTFT int64  `json:"ttft,omitempty"`
 	FW   int64  `json:"fw,omitempty"`
+	// A retry event (EventRetry): the try's number, ms since the first failure ended, whether it
+	// worked, and when it failed its kind, status, wait and whether it had answered.
+	Try      int   `json:"try,omitempty"`
+	Since    int64 `json:"since,omitempty"`
+	OK       bool  `json:"ok,omitempty"`
+	Answered bool  `json:"ans,omitempty"`
 	// A binding event (EventMove): the session's thread left From for Account; its kind and cause.
 	Ev    string `json:"ev,omitempty"`
 	From  string `json:"from,omitempty"`

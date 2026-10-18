@@ -64,6 +64,13 @@ export type SnapSession = {
   switch_back?: string
   /** Advances whenever where the session's next turn goes changes. */
   generation?: number
+  /** The account a failover of the session would take now, by evidence only. */
+  takeover?: string
+  /** When a pick of its binding for its model last answered another account. */
+  elsewhere_at?: string
+  /** Its retry on its own account while one runs, and the last that kept it there. */
+  retry?: SnapRetry
+  retry_outcome?: { account: string; cause: SnapCause; tries: number; after_ms: number; cache_read: number; at: string }
   switch_imminent: boolean
   switch_reason?: string
   next_auth_id?: string
@@ -81,10 +88,34 @@ export type SnapSession = {
 export type SnapSwitch = { from: string; to: string; at: string; reason: string; kind?: string; cause?: SnapCause }
 
 /** What quota-pilot saw of why a session left an account. */
-export type SnapCause = { kind?: string; status?: number; wait_ms?: number; count?: number; reason?: string; model?: string; until?: string }
+export type SnapCause = {
+  kind?: string
+  status?: number
+  wait_ms?: number
+  count?: number
+  reason?: string
+  model?: string
+  until?: string
+  /** Retries of the account before the session left it, how the last one failed, and whether it had answered. */
+  retries?: number
+  last_retry?: SnapCause
+  answered?: boolean
+}
 
 /** An account that kept failing rests until `until`, then is on trial until it serves. */
 export type SnapRest = { until: string; moments: number; last_kind?: string; trial?: boolean }
+
+/** A retry episode: why, when the first failure ended, the try, when the account is likely back, the give-up. */
+export type SnapRetry = {
+  account: string
+  cause: SnapCause
+  first_failure_at: string
+  try: number
+  next_try_at: string
+  give_up_at: string
+  /** Set while a try runs that has no record yet. */
+  try_started_at?: string
+}
 
 export type SnapAck = { command_id: string; session?: string; status: string; reason?: string; at: string }
 

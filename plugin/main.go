@@ -304,12 +304,24 @@ func pick(raw []byte) (out []byte, err error) {
 			out, err = okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 		}
 	}()
-	result := state.Pick(core.PickInput{
+	in := core.PickInput{
 		Provider: req.Provider, Providers: req.Providers, Model: req.Model,
 		Canonical: canonical, Parent: parent, Candidates: cands,
-	})
-	if !result.Handled {
+	}
+	// While the binding's retry waits for its account, the account list is read again when old,
+	// so an account removed or disabled meanwhile ends the wait.
+	if state.NeedsAccountList(in) {
+		if infos, ok := readInventory(); ok && len(infos) > 0 {
+			state.UpdateInventory(infos)
+		}
+	}
+	result := state.Pick(in)
+	switch {
+	case !result.Handled:
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
+	case result.Reject:
+		// Kept for the retry on its own account: the reason reaches Claude Code's retry line.
+		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: true, Reject: true, RejectReason: result.Reason})
 	}
 	return okEnvelope(pluginapi.SchedulerPickResponse{AuthID: result.AuthID, Handled: true})
 }

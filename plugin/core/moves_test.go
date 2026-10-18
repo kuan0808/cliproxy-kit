@@ -330,8 +330,12 @@ func TestAMoveSaysWhy(t *testing.T) {
 		kind   string
 		cause  Cause
 	}{
-		{"a hang", func(s *State, c *clock) { failed(s, c, "claude-a", "", 0, "EOF", 135*time.Second, 0) },
-			MoveFailed, Cause{Kind: FailHang, WaitMs: 135000, Count: 1}},
+		// A hang that ended at the connection is retried on the account (retry.go): the move follows
+		// once its retry window passed.
+		{"a hang", func(s *State, c *clock) {
+			failed(s, c, "claude-a", "", 0, "EOF", 135*time.Second, 0)
+			c.add(76 * time.Second)
+		}, MoveFailed, Cause{Kind: FailHang, WaitMs: 135000, Count: 1}},
 		{"two 529s", func(s *State, c *clock) {
 			failed(s, c, "claude-a", "", 529, "", time.Second, time.Second)
 			failed(s, c, "claude-a", "", 529, "", time.Second, time.Second)
@@ -445,7 +449,10 @@ func TestSwitchBackNeedsAListingSinceTheLastFailure(t *testing.T) {
 		}
 	})
 	t.Run("after a lost connection at the next pick that lists it", func(t *testing.T) {
-		s, _ := moved(t, func(s *State, c *clock) { failed(s, c, "claude-a", "", 0, "EOF", time.Second, 0) })
+		s, _ := moved(t, func(s *State, c *clock) {
+			failed(s, c, "claude-a", "", 0, "EOF", time.Second, 0)
+			c.add(76 * time.Second) // past its retry window
+		})
 		listing(s, opus)
 		if back(s) != "claude-a" {
 			t.Fatal("absent once listed")

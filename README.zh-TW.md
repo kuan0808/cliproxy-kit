@@ -237,12 +237,18 @@ Claude 等待時顯示方塊，工作時縮成一行：
 
 ### 帳號失敗時
 
-帳號處理 session 的請求失敗時，proxy 會把請求交給另一個帳號，之後 session 就留在那個帳號上；額度列會依 quota-pilot 看到的情況說明原因：沒有回應、連線中斷、回傳某個狀態碼、拒絕登入、不支援這個模型、額度用完。這些都不用設定；規則和每種失敗的名稱寫在 [docs/architecture.md](docs/architecture.md#where-quota-went)。
+失敗的請求會先在 session 原本的帳號上重試，保住它的 prompt 快取；重試也失敗，session 才換帳號，額度列會依 quota-pilot 看到的情況說明原因。一直失敗的帳號會暫停使用。這些都不用設定；規則和數字寫在 [docs/architecture.md](docs/architecture.md#when-an-account-fails)。
 
 | 情況 | 會發生什麼 | 額度列顯示 |
 | --- | --- | --- |
-| 帳號失敗 | session 換到另一個帳號，之後留在那裡 | `↪ Switched d••• → k••• · d••• hung for 2m 15s`，等 proxy 再次提供 d••• 時附上 `switch back` |
+| 很快就失敗（連線中斷、HTTP 529） | 在同一個帳號上重試，75 秒內最多兩次 | Claude Code 的重試訊息寫著 `quota-pilot: d••• returned HTTP 529; retrying it in about 50s` |
+| 沒有回應 | 在同一個帳號上重試一次 | 重試期間沒有新提示：請求只是等比較久 |
+| 重試也失敗 | session 換到另一個帳號，之後留在那裡 | `↪ Switched d••• → k••• · d••• hung for 2m 15s; the retry got no answer`，等 proxy 再次提供 d••• 時附上 `switch back` |
+| 重試沒有回應 | 下一則訊息送到另一個帳號 | `! d••• got no answer · moves to k••• (3% used) on the next turn` |
 | 帳號一直失敗 | 它暫停使用：只有其他帳號都無法服務時，新 session 才會分到它；它上面的 session 在下一輪換走 | `! d••• resting after 2 failures · moves to k••• (3% used) on the next turn`；Account 卡片顯示 `resting, back in 4m` |
+
+> [!NOTE]
+> 不會重試的情況：登入、額度、模型或請求本身的錯誤、其他狀態碼、暫停中的帳號，以及 Codex 的 session。不到 100k token 的 session 不會等 proxy 在狀態碼之後的暫停結束，而是立刻換帳號。proxy 的 `request-retry` 至少為 1（範例設定是 3）時，重試才會藏在同一個請求裡；設為 0 時由 Claude Code 自己的重試接手。
 
 在桌面版裡，額度列畫成卡片，跟著 app 的淺色或深色主題，顯示那個帳號自己的額度（見[不經過 proxy 時](#有沒有裝額度列)）：
 
@@ -345,6 +351,10 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex 說 hook 以代碼 7 或 22 結束 | hook 的位址沒有 proxy 回應（7），或那個 proxy 上沒有 quota-pilot（22）。 |
 | Codex 帳號沒有 5 小時視窗 | 它的方案本來就沒有；頁面和額度列都會標明。 |
 | 額度列顯示 `Switched d••• → k••• · reason not recorded` | quota-pilot 比額度列舊，不會記錄 session 換帳號的原因：到面板的插件商店更新它。 |
+| Claude Code 顯示 `API error · Retrying`，附上 `quota-pilot: … retrying it in about 50s` | quota-pilot 讓請求留在原本的帳號重試，保住 prompt 快取。最多 75 秒後就換到它寫的那個帳號；按 `switch` 可以立刻換。 |
+| 額度列說 `got no answer · moves to k••• on the next turn` | 沒有回應之後的重試也沒有回應；你的下一則訊息會送到 k•••。不用做什麼。 |
+| 請求卡住好幾分鐘 | 經過 proxy 時，Claude Code 沒有等待第一個位元組的上限，只有請求逾時 `API_TIMEOUT_MS`（預設 600 秒）。設短一點能更早結束卡住的請求，但也會切掉大型冷啟動 prompt 比較慢的第一個回覆。按 Esc 再送一次會換帳號；`switch` 隨時都能換。 |
+| 重試出現在 Claude Code 的訊息上，而不是藏在同一個請求裡 | proxy 的 `request-retry` 是 0：要設為 1 以上，proxy 才會自己重試。 |
 | Account 卡片顯示 `resting, back in 4m` | 那個帳號連續失敗兩次，正在暫停使用：session 會在下一輪換到能服務的帳號，暫停到顯示的時間結束，或在它第一次成功時結束。不用做什麼。 |
 | 切換提示附上 `switch back` | session 離開的帳號現在又能接手。按 `switch back` 換回去，快取還熱著時會先問；quota-pilot 不會自己把 session 換回去，因為新帳號的快取才是熱的。 |
 

@@ -21,10 +21,6 @@ const (
 	FailOther      = "other"      // any other status
 )
 
-// hangAfter is how long an attempt goes without any response before it is a hang: longer than any
-// first response Claude or Codex gives a large cold prompt, far shorter than a stuck connection.
-const hangAfter = 30 * time.Second
-
 // Attempt is a failed attempt as its usage record tells it, and what the classifier needs besides.
 type Attempt struct {
 	Status  int

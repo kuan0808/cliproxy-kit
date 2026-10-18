@@ -289,16 +289,25 @@ cache warm, whatever the defaults or a command say, so what it types always goes
 
 ### When an account fails
 
-When an account fails a session's request, the proxy gives the request to another account, which
-then keeps the session, and the band says why, from what quota-pilot saw of that account: a hang, a
-lost connection, a status, a refused sign-in, a model it does not serve, a used-up quota. There is
-nothing to set; the rules and what each failure is called are in
-[docs/architecture.md](docs/architecture.md#where-quota-went).
+A failure is retried on the session's own account first, so its prompt cache stays; only if that
+fails does the session move, and the band says why, from what quota-pilot saw of that account. An
+account that keeps failing rests. There is nothing to set; the rules and numbers are in
+[docs/architecture.md](docs/architecture.md#when-an-account-fails).
 
 | Situation | What happens | What the band shows |
 | --- | --- | --- |
-| An account fails | The session moves to another account, which keeps it | `↪ Switched d••• → k••• · d••• hung for 2m 15s`, with `switch back` once the proxy offers d••• again |
+| A quick failure (a lost connection, HTTP 529) | Retried on the same account, up to twice within 75 s | Claude Code's retry line says `quota-pilot: d••• returned HTTP 529; retrying it in about 50s` |
+| A hang | One retry on the same account | Nothing new while the retry runs: the request just takes longer |
+| A retry that fails too | The session moves to another account, which keeps it | `↪ Switched d••• → k••• · d••• hung for 2m 15s; the retry got no answer`, with `switch back` once the proxy offers d••• again |
+| A retry that got no answer | The next message goes to another account | `! d••• got no answer · moves to k••• (3% used) on the next turn` |
 | An account keeps failing | It rests: new sessions get it only when nothing else can, and its sessions move at their next turn | `! d••• resting after 2 failures · moves to k••• (3% used) on the next turn`; the Account card reads `resting, back in 4m` |
+
+> [!NOTE]
+> Never retried: a sign-in, quota, model or request failure, any other status, an account at rest,
+> and Codex sessions. A session under 100k tokens is not kept waiting through the proxy's pause
+> after a status; it moves at once. The retry stays invisible inside one request only with the
+> proxy's `request-retry` at 1 or more (3 in its example config); at 0, Claude Code's own retry
+> carries it.
 
 In the desktop app the band draws cards in the app's own light or dark theme, with that account's
 own quota (see [without the proxy](#with-and-without-the-band)):
@@ -424,6 +433,10 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
 | A Codex account has no 5-hour window | Its plan has none; the page and the band say so. |
 | The band says `Switched d••• → k••• · reason not recorded` | quota-pilot is older than the band and does not record why a session moved: update it from the panel's Plugin Store. |
+| Claude Code shows `API error · Retrying` with `quota-pilot: … retrying it in about 50s` | quota-pilot keeps the request on its own account for a retry, so the prompt cache stays. It moves on to the account named after 75 s at most; `switch` moves it now. |
+| The band says `got no answer · moves to k••• on the next turn` | The retry after a hang got no answer; your next message goes to k•••. Nothing to do. |
+| A request hangs for minutes | Through a proxy Claude Code has no first-byte limit, only its request timeout, `API_TIMEOUT_MS` (600 s by default). A shorter one ends a hang sooner, but also cuts off a slow first reply to a large cold prompt. Esc and send again moves the session; `switch` moves it at any time. |
+| Retries happen on Claude Code's line, not inside one request | The proxy's `request-retry` is 0: the retry needs 1 or more for the proxy to carry it. |
 | The Account card says `resting, back in 4m` | That account failed twice in a row and rests: the session moves at its next turn to an account that can serve, and the rest ends at the time shown, or at its first success. Nothing to do. |
 | A move offers `switch back` | The account the session left can take it again. `switch back` returns, asking first while the cache is warm; quota-pilot never moves a session back on its own, as the new account's cache is the warm one. |
 

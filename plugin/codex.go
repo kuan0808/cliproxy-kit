@@ -217,9 +217,26 @@ func moveWhy(sw core.Switch, from string, now time.Time) (why, short string) {
 		return "the proxy left " + from + " out; no failure recorded", "reason unknown"
 	}
 	if c.Kind == core.FailHang {
-		return failedWhy(c, from), from + " hung"
+		return failedWhy(c, from) + retryTail(c), from + " hung"
 	}
-	return said(failedWhy(c, from))
+	return said(failedWhy(c, from) + retryTail(c))
+}
+
+// retryTail is how the last retry failed, when that says more than its count: "; the retry got no
+// answer".
+func retryTail(c core.Cause) string {
+	r := c.LastRetry
+	switch {
+	case r == nil, r.Kind == c.Kind && r.Kind != core.FailRequest:
+		return ""
+	case r.Kind == core.FailRequest && r.Answered:
+		return "; the retry was cancelled"
+	case r.Kind == core.FailRequest:
+		return "; the retry got no answer"
+	}
+	once := *r
+	once.Count = 1
+	return "; " + failedWhy(once, "the retry")
 }
 
 // failedWhy is what a failure, or a run of failures of one kind, did: "d••• returned HTTP 529 twice".
@@ -236,7 +253,7 @@ func failedWhy(c core.Cause, from string) string {
 		if n != "" {
 			return from + " hung" + n
 		}
-		return from + " hung for " + waitText(time.Duration(c.WaitMs)*time.Millisecond)
+		return from + " hung for " + core.WaitText(time.Duration(c.WaitMs)*time.Millisecond)
 	case core.FailConnection:
 		return from + " lost its connection" + n
 	case core.FailTimeout:
@@ -256,24 +273,6 @@ func failedWhy(c core.Cause, from string) string {
 		return fmt.Sprintf("%s failed (HTTP %d)%s", from, c.Status, n)
 	}
 	return from + " failed" + n
-}
-
-// waitText is a wait as long as its seconds matter: "45s", "2m 15s", "2m", "1h 5m".
-func waitText(d time.Duration) string {
-	s := max(1, int(math.Round(d.Seconds())))
-	switch {
-	case s < 60:
-		return fmt.Sprintf("%ds", s)
-	case s < 3600 && s%60 != 0:
-		return fmt.Sprintf("%dm %ds", s/60, s%60)
-	case s < 3600:
-		return fmt.Sprintf("%dm", s/60)
-	}
-	m := int(math.Round(float64(s) / 60))
-	if m%60 != 0 {
-		return fmt.Sprintf("%dh %dm", m/60, m%60)
-	}
-	return fmt.Sprintf("%dh", m/60)
 }
 
 // levelOf is how far a window is used: 0 below 80%, 1 from 80%, 2 used up.

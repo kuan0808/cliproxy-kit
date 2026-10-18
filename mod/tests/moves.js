@@ -18,6 +18,30 @@ export default {
       "short": "d••• hung"
     },
     {
+      "name": "a hang whose retry got no answer",
+      "switch": { "kind": "failed", "reason": "previous account unavailable; weekly quota resets soonest", "cause": { "kind": "hang", "wait_ms": 135000, "count": 1, "retries": 1, "last_retry": { "kind": "request", "status": 499, "wait_ms": 45000 } } },
+      "why": "d••• hung for 2m 15s; the retry got no answer",
+      "short": "d••• hung"
+    },
+    {
+      "name": "a hang whose retry answered, then was cancelled",
+      "switch": { "kind": "failed", "reason": "previous account unavailable; weekly quota resets soonest", "cause": { "kind": "hang", "wait_ms": 135000, "count": 1, "retries": 1, "last_retry": { "kind": "request", "status": 499, "wait_ms": 45000, "answered": true } } },
+      "why": "d••• hung for 2m 15s; the retry was cancelled",
+      "short": "d••• hung"
+    },
+    {
+      "name": "a hang whose retry lost its connection",
+      "switch": { "kind": "failed", "reason": "previous account unavailable; weekly quota resets soonest", "cause": { "kind": "hang", "wait_ms": 135000, "count": 1, "retries": 1, "last_retry": { "kind": "connection", "wait_ms": 300 } } },
+      "why": "d••• hung for 2m 15s; the retry lost its connection",
+      "short": "d••• hung"
+    },
+    {
+      "name": "a 503 whose retry returned 529",
+      "switch": { "kind": "failed", "reason": "previous account unavailable; weekly quota resets soonest", "cause": { "kind": "server", "status": 503, "wait_ms": 400, "count": 1, "retries": 1, "last_retry": { "kind": "overloaded", "status": 529, "wait_ms": 900 } } },
+      "why": "d••• returned HTTP 503; the retry returned HTTP 529",
+      "short": "d••• returned HTTP 503"
+    },
+    {
       "name": "two hangs",
       "switch": {
         "kind": "failed",

@@ -1408,3 +1408,24 @@ test('a session on a resting account is warned of its move, which counts as cold
   expect(await pane.find({ text: /^Max 20x · resting after 2 failures, back in 4m$/ })).toBeDefined()
   await pane.unmount()
 })
+
+test('a session whose retry got no answer is warned of its move, which counts as cold and is held', { options: { holdColdDefault: true } }, async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  snapshot = {
+    ...SNAP,
+    generated_at: new Date(clock.now()).toISOString(),
+    sessions: { s1: { ...SNAP.sessions.s1!, switch_imminent: true, switch_reason: 'got no answer', next_auth_id: 'claude-k', takeover: 'claude-k' } },
+  }
+  await clock.advance(10_000)
+  expect(await rowText($)).toMatch(/^! d••• got no answer · moves to k••• \(7% used\) on the next turn/)
+  // It fits 80 columns; narrower, its short form.
+  const narrow = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(60, false) })
+  expect((await narrow.find({ key: 'alert' }))?.text).toMatch(/^! d••• got no answer · moves next turn/)
+  await narrow.unmount()
+  const held = await $.prompt.submit(composer('try the login page again'))
+  expect(held).toMatchObject({ drop: expect.stringMatching(/held by quota-band/) })
+  expect(await rowText($, 'ask')).toMatch(/^\? Message held: next turn starts cold \(moves to k•••, d••• got no answer\): rewrites 412k tokens/)
+})

@@ -53,8 +53,9 @@ window used up, as Opus's), and ties break by account id. The threshold is compa
 to the whole percent the provider reports. A binding moves only after a success elsewhere: when its
 account stops being offered (removed, used up), not on a failed retry, a side request or a
 subagent; a cooldown the host already took into account when it offered the candidates does not
-count again. Only a 429 is a quota refusal, and a refusal moves only the model it was for: a
-session refused for Opus keeps its account for Sonnet. A request's send time goes with its
+count again. Only a 429 is a quota refusal. A failure marks only its model, but the success
+elsewhere that follows moves the whole thread binding: a session that left its account for Opus has
+left it for Sonnet too. A request's send time goes with its
 binding, and moves on with each later request its account serves, so an answer sent before
 either and arriving late does not take the thread elsewhere.
 An account read as used up often answers a while longer, so its sessions stay until it turns a
@@ -73,17 +74,43 @@ offered, and quota-pilot chooses among them. What it adds:
 
 1. **Classify.** Each failed attempt gets a kind from its status, error body, time to first
    response and wait (see [Where quota went](#where-quota-went)).
-2. **Move.** The proxy gives a failed request to another account; the success there moves the
-   session, and its switch record says why (see [quota-band](#quota-band)). quota-pilot never moves
-   a session back on its own: the new account's cache is the warm one.
-3. **Rest.** An account that keeps failing rests, what other proxies call a circuit breaker:
+2. **Retry on the bound account.** For a failure something retries, quota-pilot keeps a Claude
+   Code session's request on its own account by declining the proxy's pick of any other: the proxy's
+   next request-retry round retries a lost connection and 408, 429, 500, 502, 503 and 504; Claude
+   Code retries what the proxy hands back (520 to 526, 529, other 5xx, a bare deadline, and
+   everything when no further round runs). Up to 2 retries, 1 after a hang, each starting within
+   75 s of when the first failure ended; the retry stays inside the same request when the account
+   is not cooling (a lost connection: Claude Code sees one long request), and comes with Claude
+   Code's next try when it is. Waiting through the proxy's pause after a status happens only for a
+   session whose last main prompt was 100k tokens or more: below that a cold start elsewhere costs
+   less, and only the retries that need no wait run. A success on the account ends the episode,
+   kept; so do its retries spent, 75 s with none started, a retry that hangs, a quota, sign-in,
+   model or request failure, and the account resting, removed or disabled (while an episode runs
+   the account list is read again when older than 5 s). Ending stops the declines and nothing
+   more: the next pick follows the ranking, the bound account first whenever it is offered. The
+   decline's reason, which Claude Code shows on its retry line, says what is happening:
+   `quota-pilot: d••• returned HTTP 529; retrying it in about 50s; k••• is next if needed`.
+   Never retried: quota, sign-in, model and request failures, any other status, an account at rest,
+   and Codex sessions, whose own retries are not pinned.
+3. **The `hung` mark.** When an episode that began with a hang ends with no retry answered, or any
+   retry in it hung, the binding is marked: its picks skip the account while another that can serve
+   is offered, until a success elsewhere moves the session, a success on the account by another
+   request, or a switch or route. The band announces the move before the next turn (`got no
+   answer`), as for a resting account. A cancel (Esc) of the hang's running retry before any answer
+   leaves the mark, so the next message goes to the other account; at any other time Esc only stops
+   the turn.
+4. **Move.** The proxy gives a failed request to another account; the success there moves the
+   session, and its switch record says why, with the last retry's failure when retries ran (see
+   [quota-band](#quota-band)). quota-pilot never moves a session back on its own: the new
+   account's cache is the warm one.
+5. **Rest.** An account that keeps failing rests, what other proxies call a circuit breaker:
    failures that end within 10 s of a moment's first failure are one failure moment (requests that
    hung from different times and failed together, or several sessions at once), and only hang,
    connection, timeout, overloaded and server failures count, the ones the proxy cools no account
    for, or only briefly; after the others (rate, quota, sign-in, model, request, other) the proxy
    holds the account back itself, for as long as it judges. A second moment within 15 minutes, with
    no success on the account between, rests it for 5 minutes.
-4. **Trial.** After a rest the account is on trial until it serves: one failure moment rests it
+6. **Trial.** After a rest the account is on trial until it serves: one failure moment rests it
    again at once, for twice as long (10, 20, 40, then 60 minutes at most). One success ends a rest
    or a trial, and the count starts over.
 
@@ -97,8 +124,30 @@ the band warns and counts that turn as cold, toward the account a failover would
 best-ranked other account, not resting, not used up, that a pick has listed for the session's model
 since that account last failed (`switch_back`'s evidence); with none known, no warning.
 
+Each pick carries no request identity, so an episode belongs to the binding and model: the main
+request, its side requests and parent-following subagents all take part, and a success of any of
+them on the account ends it. quota-pilot learns of a failure from its usage record, which the proxy
+delivers a moment after the attempt ends: a pick that does not offer the bound account while an
+attempt it was just answered with has no record waits up to 200 ms for it. When a pick answers
+another account, that moment is the binding's takeover boundary: a failure of an attempt sent
+before it never starts a retry, as its request has moved on. A switch, a route and a move advance
+the session's generation, which ends any episode, and a record sent before says nothing of it.
+
+A worked timeline, the hang of 2026-10-11 under these rules: at 22:04:17 d••• has hung for 2m 15s
+and its connection drops; the proxy's next round offers d••• at once and quota-pilot answers it,
+so Claude Code still waits on its first request. Had the retry answered, the session would have
+stayed on d••• with its cache. It hung again and failed at 22:06:32: d••• rests 5 minutes, and the
+session's next request goes to k•••, worded `↪ Switched d••• → k••• · d••• hung twice; resting,
+back in 5m`.
+
 | Constant | Value | Why |
 | --- | --- | --- |
+| Retries | 2, 1 after a hang | Enough to ride out a brief error; a second wait as long as a hang costs more than a cold start |
+| Retry window | 75 s from the first failure's end | About as far as Claude Code's own retries reach; longer is worse than a cold start |
+| Waiting through a pause | from 100k tokens | Below it a cold start elsewhere costs less than the wait |
+| Hang | no response in 30 s, after waiting 30 s | Longer than any first response to a large cold prompt, far shorter than a stuck connection |
+| Record wait | 200 ms | The proxy delivers an attempt's record a moment after the attempt ends |
+| Account list age | 5 s while an episode runs | An account removed or disabled ends the wait within seconds |
 | Failure moment | 10 s | Requests that hung together, or several sessions at once, are one event, not several |
 | Second moment | within 15 min | Two separate failures close together; one failure is not a pattern |
 | First rest | 5 min | Longer than the proxy's 60 s pause after a 529, short enough to lose little |
@@ -473,6 +522,11 @@ response headers arrive; and it retries a 408, 409, 429, 5xx or 529 up to 10 tim
 
 - Rests and trials live in memory, like refusals: a proxy restart forgets them. An account that
   alternates failure and success never rests, as each success starts the count over.
+- A failure's record that reaches quota-pilot later than 200 ms after the next pick costs that
+  failure its retry; the takeover boundary keeps the late record from starting one.
+- Through a proxy Claude Code has no first-byte limit, so a retry that hangs too waits until the
+  upstream ends it or Claude Code's request timeout (`API_TIMEOUT_MS`, 600 s); a cancel never
+  counts against the account.
 - Crossing providers changes the model and rewrites the prompt cache; Claude Code does not know a
   non-Claude model's context size, so its auto-compact timing may be off.
 - Remote Control, voice dictation and claude.ai connectors do not work through a proxy.

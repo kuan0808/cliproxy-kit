@@ -187,8 +187,12 @@ type session struct {
 	// RoutedModel is the model its last main turn was picked for, which the proxy's picks name (an
 	// alias as the client named it, a route's model); Model is the one the executor ran.
 	RoutedModel string
-	// Generation advances whenever where its next turn goes changes: a move, a switch, a route.
-	Generation uint64
+	// Generation advances whenever where its next turn goes changes: a move, a switch, a route;
+	// GenerationAt is when it last did, in memory only. A record sent before says nothing of now.
+	Generation   uint64
+	GenerationAt time.Time
+	// RetryOutcome is its last retry episode that kept it on its account (retry.go). In memory only.
+	RetryOutcome *RetryOutcome
 }
 
 // Tokens are summed or single-request token counts of a session's main thread.
@@ -222,6 +226,7 @@ const (
 	MoveLeftOut = "left-out" // the proxy left it out, and no failure of it was seen
 	MoveFailed  = "failed"   // it failed
 	MoveRest    = "rest"     // it kept failing, and rests
+	MoveHung    = "hung"     // a pick skipped it: its retry after a hang got no answer
 )
 
 // Cause is what quota-pilot saw of why a session left an account; only what it has evidence of.
@@ -236,6 +241,12 @@ type Cause struct {
 	Model  string `json:"model,omitempty"` // a model move's model
 	// Until is when a rest move's account is tried again.
 	Until time.Time `json:"until,omitzero"`
+	// Retries is how many retries of the account ran before the session left it, and LastRetry how
+	// the last one failed. Answered, on a retry, says it had begun answering (a time to first
+	// response, not a hang) before it failed.
+	Retries   int    `json:"retries,omitempty"`
+	LastRetry *Cause `json:"last_retry,omitempty"`
+	Answered  bool   `json:"answered,omitempty"`
 }
 
 // leaving is why a pick did not answer a binding's account for a model: a move kind and reason.
@@ -268,8 +279,18 @@ type State struct {
 	// failed on any model: a pick lists only the accounts the proxy would serve the model with now,
 	// and any failure may cool an account, so only a listing since the failure says it can take the
 	// model. In memory only.
-	listed       map[string]map[string]time.Time
-	failedAt     map[string]time.Time
+	listed   map[string]map[string]time.Time
+	failedAt map[string]time.Time
+	// The retry rule (retry.go), by binding and model: the episodes running; the bindings marked
+	// `hung`, whose account a pick skips; when a pick last answered another account (the takeover
+	// boundary); when a pick last answered the bound account with no record of that attempt yet.
+	// In memory only.
+	episodes  map[episodeKey]*episode
+	hung      map[episodeKey]bool
+	elsewhere map[episodeKey]time.Time
+	inflight  map[episodeKey]time.Time
+	// recorded is closed at each usage record and made anew: a pick waiting for one wakes.
+	recorded     chan struct{}
 	log          []LogEntry // usage log lines not yet written to disk
 	acks         []Ack
 	lastActivity time.Time
@@ -308,6 +329,11 @@ func New(bootID string, now func() time.Time) *State {
 		failures:   map[string]map[string]*Cause{},
 		listed:     map[string]map[string]time.Time{},
 		failedAt:   map[string]time.Time{},
+		episodes:   map[episodeKey]*episode{},
+		hung:       map[episodeKey]bool{},
+		elsewhere:  map[episodeKey]time.Time{},
+		inflight:   map[episodeKey]time.Time{},
+		recorded:   make(chan struct{}),
 		identities: map[string]Identity{},
 		clients:    map[string]time.Time{},
 	}
@@ -800,6 +826,8 @@ func (s *State) StartedOver(authID string) time.Time {
 func (s *State) Observe(u Usage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A pick waiting for this record wakes once the state is unlocked.
+	defer func() { close(s.recorded); s.recorded = make(chan struct{}) }()
 	now := s.now()
 	s.lastActivity = now
 	provider := strings.ToLower(u.Provider)
@@ -835,6 +863,16 @@ func (s *State) Observe(u Usage) {
 	kind := ""
 	if u.Failed && u.AuthID != "" && supported {
 		kind = s.failedLocked(u, provider, root, model, tr.Compact, at, now)
+	}
+	// The binding the request's pick resolved to: its episode hears of a success on its account.
+	if u.SessionID != "" && u.AuthID != "" && supported {
+		if key, b := s.boundLocked([]string{provider}, u.SessionID, root); b != nil && b.AuthID == u.AuthID {
+			ek := episodeKey{key, modelKey(model)}
+			delete(s.inflight, ek)
+			if !u.Failed {
+				s.episodeSuccessLocked(ek, root, b, u, at, now)
+			}
+		}
 	}
 	if u.AuthID != "" {
 		var windows []Window
@@ -939,14 +977,18 @@ func (s *State) failedLocked(u Usage, provider, root, model string, compact bool
 	if c != nil && restCounts(kind) {
 		c.health.failed(kind, u.StatusCode, u.Latency, end)
 	}
-	if u.SessionID == "" || !healthFailure(kind) {
-		return kind
+	if u.SessionID == "" || c == nil {
+		return kind // no session, or a record of an account the proxy no longer holds: history
 	}
 	key, b := s.boundLocked([]string{provider}, u.SessionID, root)
 	if b == nil || b.AuthID != u.AuthID {
 		return kind
 	}
 	m := modelKey(model)
+	if !healthFailure(kind) {
+		s.episodeFailureLocked(episodeKey{key, m}, root, b, u, kind, at, now)
+		return kind
+	}
 	if s.failures[key] == nil {
 		s.failures[key] = map[string]*Cause{}
 	}
@@ -955,9 +997,11 @@ func (s *State) failedLocked(u Usage, provider, root, model string, compact bool
 		if prev.Kind == kind {
 			prev.Count++
 		}
+		s.episodeFailureLocked(episodeKey{key, m}, root, b, u, kind, at, now)
 		return kind
 	}
 	s.failures[key][m] = &Cause{Kind: kind, Status: u.StatusCode, WaitMs: u.Latency.Milliseconds(), Count: 1}
+	s.episodeFailureLocked(episodeKey{key, m}, root, b, u, kind, at, now)
 	return kind
 }
 
@@ -999,6 +1043,10 @@ func (s *State) commitLocked(provider, canonical, root, authID, model string, th
 		return
 	}
 	reason = "previous account unavailable; " + reason
+	// An episode the move ends gives the move its retries.
+	if e := s.episodes[episodeKey{key, m}]; e != nil {
+		s.endEpisodeLocked(episodeKey{key, m}, root, e, nil, now)
+	}
 	kind, cause := s.moveCauseLocked(key, m, b.AuthID, why, displaced, model, now)
 	if c := s.creds[b.AuthID]; c != nil && (kind == MoveRest || kind == MoveFailed && c.health.resting(now)) {
 		// It failed and now rests: the move says both.
@@ -1006,6 +1054,16 @@ func (s *State) commitLocked(provider, canonical, root, authID, model string, th
 	}
 	s.bindings[key] = &Binding{AuthID: authID, Reason: reason, LastUsed: now, At: at, Kind: kind, Cause: cause}
 	delete(s.failures, key)
+	for ek := range s.episodes {
+		if ek.binding == key {
+			delete(s.episodes, ek)
+		}
+	}
+	for ek := range s.hung {
+		if ek.binding == key {
+			delete(s.hung, ek)
+		}
+	}
 	s.movedLocked(provider, canonical, root, b.AuthID, authID, model, reason, kind, cause, now)
 }
 
@@ -1013,7 +1071,7 @@ func (s *State) commitLocked(provider, canonical, root, authID, model string, th
 // that left it out knew (a refusal, an idle move, an account gone), else the account's failure,
 // else nothing, which says so.
 func (s *State) moveCauseLocked(key, m, from string, why leaving, displaced bool, model string, now time.Time) (string, *Cause) {
-	if displaced && why.kind != "" && why.kind != MoveLeftOut && why.kind != MoveRest {
+	if displaced && why.kind != "" && why.kind != MoveLeftOut && why.kind != MoveRest && why.kind != MoveHung {
 		return why.kind, &Cause{Reason: why.reason}
 	}
 	if displaced && why.kind == MoveRest {
@@ -1047,6 +1105,7 @@ func (s *State) movedLocked(provider, canonical, root, from, to, model, reason, 
 	sess := s.sessionLocked(root, now)
 	sess.LastSwitch = &Switch{From: from, To: to, At: now, Reason: reason, Kind: kind, Cause: cause}
 	sess.Generation++
+	sess.GenerationAt = now
 }
 
 // canTakeLocked tells whether an account can take a session's model now, by evidence only: held,
@@ -1095,26 +1154,51 @@ type PickInput struct {
 	Candidates []Candidate
 }
 
-// PickResult is the core's decision. Handled false leaves the pick to the host.
+// PickResult is the core's decision. Handled false leaves the pick to the host; Reject declines
+// it, Reason saying why to the client.
 type PickResult struct {
 	Handled bool
 	AuthID  string
 	Reason  string
+	Reject  bool
 }
 
 // Pick chooses a credential for one attempt. Every pick with a session id is handled. It never
-// changes a binding: the host may still fail this attempt, and only a success moves a thread.
+// changes a binding: the host may still fail this attempt, and only a success moves a thread. While
+// the bound account's retry episode waits for it, a pick of another account is declined
+// (PickResult.Reject). A pick that does not offer the bound account while an attempt it was just
+// answered with has no record yet waits up to recordWait for that record, with the state unlocked.
 func (s *State) Pick(in PickInput) PickResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	deadline := time.Time{}
+	for {
+		r, wait := s.pickLocked(in, deadline.IsZero() || time.Now().Before(deadline))
+		if wait == nil {
+			return r
+		}
+		if deadline.IsZero() {
+			deadline = time.Now().Add(recordWait)
+		}
+		s.mu.Unlock()
+		select {
+		case <-wait:
+		case <-time.After(time.Until(deadline)):
+		}
+		s.mu.Lock()
+	}
+}
+
+// pickLocked decides a pick, or returns a channel to wait on for a usage record first.
+func (s *State) pickLocked(in PickInput, mayWait bool) (PickResult, chan struct{}) {
 	now := s.now()
 	s.lastActivity = now
 	if in.Canonical == "" || len(in.Candidates) == 0 {
-		return PickResult{}
+		return PickResult{}, nil
 	}
 	for _, c := range in.Candidates {
 		if !Supported(strings.ToLower(c.Provider)) {
-			return PickResult{}
+			return PickResult{}, nil
 		}
 	}
 	offered := map[string]bool{}
@@ -1129,15 +1213,45 @@ func (s *State) Pick(in PickInput) PickResult {
 	root := RootSession(in.Canonical, in.Parent)
 	s.sessionLocked(root, now)
 	key, b := s.boundLocked(pickProviders(in), in.Canonical, root)
-	best := s.rankLocked(in.Candidates, in.Model, now, true)[0]
+	ek := episodeKey{key, modelKey(in.Model)}
+	e := s.episodeLocked(ek, root, b, now)
+	ranked := s.rankLocked(in.Candidates, in.Model, now, true)
+	best := ranked[0]
 	bound := b != nil && offered[b.AuthID]
 	refused := bound && s.refusedLocked(b, best, in.Model, now)
-	// A resting account gives its sessions to one that can serve and is not resting, when offered.
-	resting := bound && !refused && s.creds[b.AuthID].health.resting(now) && best.ID != b.AuthID && !best.Resting && !best.Blocked
-	if bound && !refused && !resting && !s.moveIdleLocked(b, best, in.Model, now) {
+	// A resting account gives its sessions to one that can serve and is not resting, when offered;
+	// so does a binding marked `hung` (retry.go): another hang beats no answer only when alone.
+	var other *Ranked
+	for i := range ranked {
+		if r := ranked[i]; bound && r.ID != b.AuthID && !r.Resting && !r.Blocked {
+			other = &ranked[i]
+			break
+		}
+	}
+	resting := bound && !refused && other != nil && s.creds[b.AuthID].health.resting(now)
+	hung := bound && !refused && other != nil && !resting && s.hung[ek]
+	if resting || hung {
+		best = *other
+	}
+	if bound && !refused && !resting && !hung && !s.moveIdleLocked(b, best, in.Model, now) {
 		b.LastUsed = now
 		delete(s.displaced[key], modelKey(in.Model))
-		return PickResult{Handled: true, AuthID: b.AuthID, Reason: b.Reason}
+		if e != nil && e.tryAt.IsZero() && e.tries < e.budget {
+			e.tries++
+			e.tryAt = now
+		}
+		s.inflight[ek] = now
+		return PickResult{Handled: true, AuthID: b.AuthID, Reason: b.Reason}, nil
+	}
+	if b != nil && !bound {
+		// The episode keeps the request on its account until it is offered again.
+		if e != nil && e.tries < e.budget && now.Before(e.giveUp()) {
+			return PickResult{Handled: true, Reject: true, Reason: s.declineLocked(e, in.Model, now)}, nil
+		}
+		// The attempt just answered with it may have failed: its record decides.
+		if e == nil && mayWait && !s.inflight[ek].IsZero() {
+			return PickResult{}, s.recorded
+		}
 	}
 	reason := best.Reason
 	var why leaving
@@ -1148,6 +1262,9 @@ func (s *State) Pick(in PickInput) PickResult {
 	case resting:
 		reason = "previous account unavailable; " + reason
 		why = leaving{kind: MoveRest}
+	case hung:
+		reason = "previous account unavailable; " + reason
+		why = leaving{kind: MoveHung}
 	case b != nil && !bound:
 		reason = "previous account unavailable; " + reason
 		why = s.leftOutLocked(b.AuthID)
@@ -1160,8 +1277,12 @@ func (s *State) Pick(in PickInput) PickResult {
 			s.displaced[key] = map[string]leaving{}
 		}
 		s.displaced[key][modelKey(in.Model)] = why
+		// The takeover boundary: a failure of an attempt on the bound account sent before now says
+		// nothing of a retry, as its request has moved on.
+		s.elsewhere[ek] = now
+		delete(s.inflight, ek)
 	}
-	return PickResult{Handled: true, AuthID: best.ID, Reason: reason}
+	return PickResult{Handled: true, AuthID: best.ID, Reason: reason}, nil
 }
 
 // leftOutLocked is why a pick did not offer a bound account: removed from the proxy, disabled, or

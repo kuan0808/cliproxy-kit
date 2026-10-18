@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -103,9 +104,11 @@ type stubExecutor struct {
 	provider        string
 	firstChunkAfter time.Duration
 	usage           *cliusage.Manager
-	mu              sync.Mutex
-	script          map[string][]attempt
-	calls           []executorCall
+	// observed, when set, hears of each attempt as quota-pilot's usage plugin would.
+	observed func(auth string, failed bool)
+	mu       sync.Mutex
+	script   map[string][]attempt
+	calls    []executorCall
 }
 
 func (e *stubExecutor) Identifier() string { return e.provider }
@@ -127,6 +130,9 @@ func (e *stubExecutor) next(ctx context.Context, auth *coreauth.Auth, req clipro
 	}
 	if e.usage != nil {
 		e.usage.Publish(ctx, cliusage.Record{Provider: e.provider, AuthID: auth.ID, Model: req.Model, Alias: alias, Failed: a.err != nil})
+	}
+	if e.observed != nil {
+		e.observed(auth.ID, a.err != nil)
 	}
 	return a.err
 }
@@ -872,4 +878,88 @@ func TestTheClaudeHandlerWritesNoHeadersBeforeTheFirstChunk(t *testing.T) {
 			t.Fatalf("got %d %s, attempts %v", resp.StatusCode, body, p.claude.accounts())
 		}
 	})
+}
+
+// contractExecute runs a request of Claude Code session s1 through the manager alone.
+func contractExecute(m *coreauth.Manager, model string) (cliproxyexecutor.Response, error) {
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{"canonical_session_id": "claude:s1"}}
+	return m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model, Payload: []byte(`{}`)}, opts)
+}
+
+// pilotScheduler is quota-pilot's own scheduler in the stub's place: each pick goes through the
+// plugin's pick handler, as the host calls it.
+type pilotScheduler struct{ stubScheduler }
+
+func (s *pilotScheduler) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+	s.mu.Lock()
+	s.picks = append(s.picks, req)
+	s.mu.Unlock()
+	// As the host sends it: the metadata's plain values, not its callbacks.
+	plain := req
+	plain.Options.Metadata = map[string]any{}
+	for k, v := range req.Options.Metadata {
+		switch v.(type) {
+		case string, bool, int, int64, float64:
+			plain.Options.Metadata[k] = v
+		}
+	}
+	raw, err := json.Marshal(plain)
+	if err != nil {
+		return pluginapi.SchedulerPickResponse{}, false, err
+	}
+	out, err := pick(raw)
+	if err != nil {
+		return pluginapi.SchedulerPickResponse{}, false, err
+	}
+	var env struct {
+		Result pluginapi.SchedulerPickResponse
+	}
+	if err := json.Unmarshal(out, &env); err != nil {
+		return pluginapi.SchedulerPickResponse{}, false, err
+	}
+	return env.Result, env.Result.Handled, nil
+}
+
+// With quota-pilot's scheduler in the proxy's manager, a dropped connection on the bound account
+// is retried there inside the same request: the round's other pick is declined, and the next
+// round answers the bound account. Each attempt's record reaches the plugin a moment after the
+// attempt ends, as the proxy's usage queue delivers it.
+func TestQuotaPilotRetriesADroppedConnectionOnItsAccount(t *testing.T) {
+	saved := state
+	state = core.New(newBootID(), nil)
+	defer func() { state = saved }()
+	state.UpdateInventory([]core.CredInfo{{ID: "A", Provider: "claude"}, {ID: "B", Provider: "claude"}, {ID: "C", Provider: "claude"}})
+	p := newContractProxy(t, contractSetup{retry: 3, script: map[string][]attempt{"A": {{}, {err: errEOF}}}})
+	pilot := &pilotScheduler{}
+	p.manager.SetPluginScheduler(pilot)
+	var records sync.WaitGroup
+	p.claude.observed = func(auth string, failed bool) {
+		records.Add(1)
+		go func() {
+			defer records.Done()
+			time.Sleep(20 * time.Millisecond)
+			u := core.Usage{Provider: "claude", Model: contractModel, SessionID: "claude:s1", AuthID: auth, RequestedAt: time.Now(), Output: 5}
+			if failed {
+				u = core.Usage{Provider: "claude", Model: contractModel, SessionID: "claude:s1", AuthID: auth, RequestedAt: time.Now(),
+					Failed: true, ErrorText: errEOF.Error(), Latency: time.Millisecond}
+			}
+			state.Observe(u)
+		}()
+	}
+	if _, err := contractExecute(p.manager, contractModel); err != nil {
+		t.Fatal(err)
+	}
+	records.Wait()
+	pilot.picks = nil
+	resp, err := contractExecute(p.manager, contractModel)
+	records.Wait()
+	if err != nil || string(resp.Payload) != `{"ok":"A"}` {
+		t.Fatalf("got %s, %v", resp.Payload, err)
+	}
+	if got := pilot.offers(); !slices.Equal(got, []string{"ABC", "BC", "ABC"}) {
+		t.Fatalf("picks offered %v", got)
+	}
+	if attempts := p.claude.accounts(); !slices.Equal(attempts, []string{"A", "A", "A"}) {
+		t.Fatalf("attempts %v", attempts)
+	}
 }

@@ -93,6 +93,9 @@ func (s *State) applyLocked(cmd Command, root string, sess *session, now time.Ti
 		}
 		s.bindings[key] = &Binding{AuthID: c.ID, Reason: switchedReason, LastUsed: now, At: now, Kind: MoveUser}
 		delete(s.failures, key)
+		// A switch ends any retry episode and mark, and a record sent before it says nothing of them.
+		s.endEpisodesOfLocked(root)
+		sess.GenerationAt = now
 		// The switch record is written when the switch is applied, not at the new account's first
 		// answer, so it says when and why it was made.
 		if from != "" && from != c.ID {
@@ -105,11 +108,15 @@ func (s *State) applyLocked(cmd Command, root string, sess *session, now time.Ti
 		// No account is chosen until the first routed reply, so a route writes no switch record.
 		s.routes[root] = Route{Provider: strings.ToLower(cmd.Provider), Model: cmd.Model, At: now}
 		sess.Generation++
+		sess.GenerationAt = now
+		s.endEpisodesOfLocked(root)
 	case "unroute":
 		delete(s.routes, root)
 		if sess != nil {
 			s.noteLocked(sess, "")
 			sess.Generation++
+			sess.GenerationAt = now
+			s.endEpisodesOfLocked(root)
 		}
 	default:
 		return "unknown action " + cmd.Action
@@ -215,10 +222,18 @@ type SessionView struct {
 	// again (State.canTakeLocked); absent after the user's own switch.
 	SwitchBack string `json:"switch_back,omitempty"`
 	// Generation advances whenever where the session's next turn goes changes.
-	Generation     uint64 `json:"generation"`
-	SwitchImminent bool   `json:"switch_imminent"`
-	SwitchReason   string `json:"switch_reason,omitempty"`
-	NextAuthID     string `json:"next_auth_id,omitempty"`
+	Generation uint64 `json:"generation"`
+	// Takeover is the account a failover of the session would take now, by evidence only
+	// (State.takeoverLocked); ElsewhereAt when a pick of its binding for its model last answered
+	// another account. Retry is its retry episode while one runs, RetryOutcome the last that kept
+	// it on its account (retry.go).
+	Takeover       string        `json:"takeover,omitempty"`
+	ElsewhereAt    time.Time     `json:"elsewhere_at,omitzero"`
+	Retry          *RetryView    `json:"retry,omitempty"`
+	RetryOutcome   *RetryOutcome `json:"retry_outcome,omitempty"`
+	SwitchImminent bool          `json:"switch_imminent"`
+	SwitchReason   string        `json:"switch_reason,omitempty"`
+	NextAuthID     string        `json:"next_auth_id,omitempty"`
 	// Blocked names the accounts of its provider that cannot serve its next model (used up, also
 	// on a model's own window, or disabled): the band does not offer a switch to them.
 	Blocked  []string  `json:"blocked,omitempty"`
@@ -338,7 +353,7 @@ func (s *State) buildLocked() Snapshot {
 		if v.AuthID != "" && now.Sub(sess.LastSeen) <= activeAfter {
 			sessionsPerCred[v.AuthID]++
 		}
-		s.fillImminentLocked(v, sess, now)
+		s.fillImminentLocked(v, root, sess, now)
 		sessions[root] = v
 	}
 	byProvider := map[string][]Candidate{}
@@ -397,9 +412,12 @@ func (s *State) sessionViewLocked(root string, sess *session) *SessionView {
 		LastSwitch: sess.LastSwitch, Totals: sess.Totals, Last: sess.Last, LastSeen: sess.LastSeen, Generation: sess.Generation}
 	v.Provider, v.Model = s.nextLocked(root, sess)
 	now := s.now()
-	if sw := sess.LastSwitch; sw != nil && sw.Kind != "" && sw.Kind != MoveUser && s.canTakeLocked(sw.From, s.lookupModelLocked(sess, v.Model), now) {
+	model := s.lookupModelLocked(sess, v.Model)
+	if sw := sess.LastSwitch; sw != nil && sw.Kind != "" && sw.Kind != MoveUser && s.canTakeLocked(sw.From, model, now) {
 		v.SwitchBack = sw.From
 	}
+	v.Retry, v.RetryOutcome = s.retryViewLocked(v.Provider, root, model, now), sess.RetryOutcome
+	v.ElsewhereAt = s.elsewhere[episodeKey{v.Provider + "|" + root, modelKey(model)}]
 	if r, ok := s.routes[root]; ok {
 		rr := r
 		v.Route = &rr
@@ -408,6 +426,9 @@ func (s *State) sessionViewLocked(root string, sess *session) *SessionView {
 		v.AuthID, v.BindingReason, v.Switched = b.AuthID, b.Reason, b.Reason == switchedReason
 	} else if c := s.creds[sess.ServedAuth]; c != nil && c.Provider == v.Provider {
 		v.AuthID = sess.ServedAuth
+	}
+	if c := s.creds[v.AuthID]; c != nil {
+		v.Takeover = s.takeoverLocked(c, model, now)
 	}
 	for _, c := range s.creds {
 		if c.Provider == v.Provider && s.classifyLocked(c, v.Model, now).Blocked {
@@ -431,7 +452,7 @@ func (s *State) lookupModelLocked(sess *session, next string) string {
 // account it will most likely land on. An account read as used up often answers a while longer:
 // the session stays until it turns a request away, then moves. An account that is only running
 // low keeps serving the session it holds.
-func (s *State) fillImminentLocked(v *SessionView, sess *session, now time.Time) {
+func (s *State) fillImminentLocked(v *SessionView, root string, sess *session, now time.Time) {
 	c := s.creds[v.AuthID]
 	if c == nil {
 		return
@@ -441,11 +462,15 @@ func (s *State) fillImminentLocked(v *SessionView, sess *session, now time.Time)
 		model = v.RequestedModel
 	}
 	r := s.classifyLocked(c, model, now)
-	if r.Resting {
+	hung := s.hung[episodeKey{v.Provider + "|" + root, modelKey(s.lookupModelLocked(sess, model))}]
+	if r.Resting || hung {
 		// Its next turn goes to the account a failover would take now, when one is known to be
 		// offered: no warning without it.
-		if to := s.takeoverLocked(c, s.lookupModelLocked(sess, model), now); to != "" {
-			v.SwitchImminent, v.SwitchReason, v.NextAuthID = true, r.Reason, to
+		if v.Takeover != "" {
+			v.SwitchImminent, v.SwitchReason, v.NextAuthID = true, r.Reason, v.Takeover
+			if !r.Resting {
+				v.SwitchReason = "got no answer"
+			}
 		}
 		return
 	}
@@ -602,6 +627,17 @@ func (s *State) BuildForBand(session, model, client string) Snapshot {
 	}
 	for _, v := range snap.Sessions {
 		v.AuthID, v.ServedAuthID, v.NextAuthID, v.SwitchBack = opaqueID(v.AuthID), opaqueID(v.ServedAuthID), opaqueID(v.NextAuthID), opaqueID(v.SwitchBack)
+		v.Takeover = opaqueID(v.Takeover)
+		if v.Retry != nil {
+			r := *v.Retry
+			r.Account = opaqueID(r.Account)
+			v.Retry = &r
+		}
+		if v.RetryOutcome != nil {
+			o := *v.RetryOutcome
+			o.Account = opaqueID(o.Account)
+			v.RetryOutcome = &o
+		}
 		for i, id := range v.Blocked {
 			v.Blocked[i] = opaqueID(id)
 		}
