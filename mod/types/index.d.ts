@@ -216,6 +216,15 @@ export type Auto = { holdCold: boolean | null; keepWarm: boolean | null }
 /** A switch or a route as the band sends it: the command, its fields, and how it is told. */
 export type Move = { action: string; fields: Record<string, string>; text: string }
 
+/**
+ * The band's own main step while it streams: when it began and its latest content chunk (text,
+ * thinking, a tool call or its input; 0 for none yet), on the band's clock.
+ */
+export type StepInfo = { turnId: string; index: number; startedAt: number; contentAt: number }
+
+/** What the band sees live: its main step (null when none runs), and how far its clock is ahead of the proxy's at the last read. */
+export type Live = { step: StepInfo | null; skew: number }
+
 export type UiState = {
   /** '' for the first switch step, else the provider whose models are listed. */
   switchStep: string
@@ -265,6 +274,7 @@ declare module 'claude-code' {
       models: ModelInfo[]
       /** A mirror of the module's own record of the session's choice, for drawing and across a reload. */
       auto: Auto
+      live: Live
     }
   }
 }

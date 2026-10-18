@@ -217,7 +217,7 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | **Context** | 對話用了多少 context。 |
 | **Cache** | prompt 快取還剩多久變冷；保持快取打開時，用 `kept warm 0/3` 計算刷新次數；變冷後顯示下一輪要重寫多少、花多少。 |
 | **Accounts** | 所有帳號的每週用量，以及下次切換或新 session 會分到的帳號。 |
-| **上方那一列** | 一次一件事：要你決定的問題、剛做完的結果，或提醒（proxy 的狀況、下一輪會冷啟動、session 換了帳號、context 快滿了）。 |
+| **上方那一列** | 一次一件事：要你決定的問題、剛做完的結果，或提醒（proxy 正在 `retrying` 你的帳號、某個帳號 `resting`、還沒有回應、下一輪會冷啟動、session 換了帳號、context 快滿了）。 |
 
 | 按鈕 | 作用 |
 | --- | --- |
@@ -241,8 +241,8 @@ Claude 等待時顯示方塊，工作時縮成一行：
 
 | 情況 | 會發生什麼 | 額度列顯示 |
 | --- | --- | --- |
-| 很快就失敗（連線中斷、HTTP 529） | 在同一個帳號上重試，75 秒內最多兩次 | Claude Code 的重試訊息寫著 `quota-pilot: d••• returned HTTP 529; retrying it in about 50s` |
-| 沒有回應 | 在同一個帳號上重試一次 | 重試期間沒有新提示：請求只是等比較久 |
+| 很快就失敗（連線中斷、HTTP 529） | 在同一個帳號上重試，75 秒內最多兩次 | `! d••• returned HTTP 529 · retrying it in about 50s; k••• is next if needed`，成功後顯示 `↪ Stayed on d••• after HTTP 529 · the retry 61s later worked; cache kept` |
+| 沒有回應 | 在同一個帳號上重試一次 | 等待期間顯示 `! no answer for 45s`，接著是 `! d••• hung for 2m 15s · retrying it, 40s so far; k••• is next if needed` |
 | 重試也失敗 | session 換到另一個帳號，之後留在那裡 | `↪ Switched d••• → k••• · d••• hung for 2m 15s; the retry got no answer`，等 proxy 再次提供 d••• 時附上 `switch back` |
 | 重試沒有回應 | 下一則訊息送到另一個帳號 | `! d••• got no answer · moves to k••• (3% used) on the next turn` |
 | 帳號一直失敗 | 它暫停使用：只有其他帳號都無法服務時，新 session 才會分到它；它上面的 session 在下一輪換走 | `! d••• resting after 2 failures · moves to k••• (3% used) on the next turn`；Account 卡片顯示 `resting, back in 4m` |
@@ -351,6 +351,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex 說 hook 以代碼 7 或 22 結束 | hook 的位址沒有 proxy 回應（7），或那個 proxy 上沒有 quota-pilot（22）。 |
 | Codex 帳號沒有 5 小時視窗 | 它的方案本來就沒有；頁面和額度列都會標明。 |
 | 額度列顯示 `Switched d••• → k••• · reason not recorded` | quota-pilot 比額度列舊，不會記錄 session 換帳號的原因：到面板的插件商店更新它。 |
+| 額度列顯示 `retrying it in about 50s` | quota-pilot 讓請求留在 session 原本的帳號重試，保住 prompt 快取。重試有回應後這一輪就在原帳號繼續，最多 75 秒後改由它寫的那個帳號接手；按 `switch` 可以立刻換。 |
 | Claude Code 顯示 `API error · Retrying`，附上 `quota-pilot: … retrying it in about 50s` | quota-pilot 讓請求留在原本的帳號重試，保住 prompt 快取。最多 75 秒後就換到它寫的那個帳號；按 `switch` 可以立刻換。 |
 | 額度列說 `got no answer · moves to k••• on the next turn` | 沒有回應之後的重試也沒有回應；你的下一則訊息會送到 k•••。不用做什麼。 |
 | 請求卡住好幾分鐘 | 經過 proxy 時，Claude Code 沒有等待第一個位元組的上限，只有請求逾時 `API_TIMEOUT_MS`（預設 600 秒）。設短一點能更早結束卡住的請求，但也會切掉大型冷啟動 prompt 比較慢的第一個回覆。按 Esc 再送一次會換帳號；`switch` 隨時都能換。 |

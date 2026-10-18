@@ -14,6 +14,7 @@ import {
   kindLabel,
   likelyAccount,
   nextUp,
+  stepAfter,
   otherAccounts,
   coldTurn,
   fmtUsd,
@@ -439,5 +440,18 @@ describe('rest', () => {
     expect(nextUp(rested, 'claude-d', NOW)).toBe('next up: x••• 7% used')
     // Once its rest has ended it is as any other.
     expect(nextUp(rested, 'claude-d', NOW + 5 * 60_000)).toBe('next up: k••• 7% used')
+  })
+})
+
+describe('the main step', () => {
+  test('content moves its last content time at most once a second; the engine\'s items never do', () => {
+    const step = { turnId: 't1', index: 0, startedAt: NOW, contentAt: 0 }
+    expect(stepAfter(step, { kind: 'engine' }, NOW + 20_000)).toBe(step)
+    expect(stepAfter(step, { kind: 'stop' }, NOW + 20_000)).toBe(step)
+    const answered = stepAfter(step, { kind: 'text' }, NOW + 20_000)
+    expect(answered?.contentAt).toBe(NOW + 20_000)
+    expect(stepAfter(answered, { kind: 'thinking' }, NOW + 20_500)).toBe(answered)
+    expect(stepAfter(answered, { kind: 'tool' }, NOW + 21_000)?.contentAt).toBe(NOW + 21_000)
+    expect(stepAfter(null, { kind: 'text' }, NOW)).toBe(null)
   })
 })

@@ -1,4 +1,4 @@
-import { expect, mock, test as kitTest } from 'claude-code/testing'
+import { describe, expect, mock, test as kitTest } from 'claude-code/testing'
 import type { EngineInterface, On, OpEventResult, RenderElement, RenderInput } from 'claude-code'
 import type { Engine, FoundElement, MockClock, TestBody, TestOptions } from 'claude-code/testing'
 
@@ -10,12 +10,15 @@ const test = (name: string, a: TestOptions | TestBody, b?: TestBody) =>
   typeof a === 'function' ? kitTest(name, { timeoutMs: 120_000 }, a) : kitTest(name, { timeoutMs: 120_000, ...a }, b!)
 
 import type { SessionInfo, Snap, SnapSwitch, UiState } from '../types'
-import { settingsOf } from '../hooks/logic'
+import { settingsOf, stepAfter } from '../hooks/logic'
 import { bandFacts } from '../hooks/view'
+import { W } from '../hooks/wording'
 import MOVES from './moves.js'
 
 /** The expected wording of every move, which the plugin's Codex notice tests read too. */
 const moves = (MOVES as { moves: { name: string; switch: Omit<SnapSwitch, 'from' | 'to' | 'at'>; until_in?: number; why: string; short: string }[] }).moves
+/** The expected wording of the band's live rows and notes, by the wording table's row name. */
+const rows = (MOVES as unknown as { rows: { name: string; row: keyof typeof W; args: unknown[]; text: string; short?: string }[] }).rows
 
 const NOW = Date.parse('2026-10-04T12:00:00Z')
 const iso = (ms: number) => new Date(NOW + ms).toISOString()
@@ -81,6 +84,8 @@ let transcript = TITLED
 let snapshot: Snap
 /** When set, how /band fails instead: refused, or not reached. */
 let failure: OpEventResult<'http.fetch'> | undefined
+/** How many times the band read /band. */
+let bandReads = 0
 /** The proxy's model list. */
 let models: { id: string; owned_by: string; created: number }[]
 /** The URL and headers of the band's last read of /band, and every command its reads carried. */
@@ -200,6 +205,7 @@ function stubSession(
   const ok = (body: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } })
   on('http.fetch', (_$, e) => {
     if (!e.url.endsWith('/band')) return ok({ data: models })
+    bandReads++
     sentTo = e.url
     sent = { ...(e.init?.headers as Record<string, string> | undefined) }
     if (sent['X-Band-Command']) commands.push(JSON.parse(decodeURIComponent(sent['X-Band-Command'])))
@@ -1230,7 +1236,7 @@ test('a held question left in the band draws only while holding is on', () => {
   }
   const input = (holdColdDefault: boolean) => ({
     snap: SNAP, bandError: null, now: NOW, sess: SESSION, cache, ui, models: [], working: false,
-    settings: settingsOf({ holdColdDefault }), auto: { holdCold: null, keepWarm: null }, unattended: false,
+    settings: settingsOf({ holdColdDefault }), auto: { holdCold: null, keepWarm: null }, unattended: false, live: { step: null, skew: 0 },
   })
   const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined }
   expect(bandFacts(input(true), act).top?.title).toBe('Message held')
@@ -1428,4 +1434,259 @@ test('a session whose retry got no answer is warned of its move, which counts as
   const held = await $.prompt.submit(composer('try the login page again'))
   expect(held).toMatchObject({ drop: expect.stringMatching(/held by quota-band/) })
   expect(await rowText($, 'ask')).toMatch(/^\? Message held: next turn starts cold \(moves to k•••, d••• got no answer\): rewrites 412k tokens/)
+})
+
+// ---- while a turn waits: the live rows ----
+
+const TEXT = { kind: 'text', index: 0, text: 'Looking' }
+
+/** The row while Claude works, at `cols` columns. */
+const liveText = async ($: Engine, cols = 200, surface: 'terminal' | 'desktop' = 'terminal') => {
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(cols, true) })
+  const row = await ui.find({ key: 'alert' })
+  await ui.unmount()
+  return row?.text ?? ''
+}
+
+/** The snapshot while the plugin retries d••• after a 529 that ended `ago` ms before the proxy's now. */
+const retrying = (proxyNow: number, ago: number, extra: Record<string, unknown> = {}): Snap => ({
+  ...SNAP,
+  generated_at: new Date(proxyNow).toISOString(),
+  sessions: {
+    s1: {
+      ...SNAP.sessions.s1!, takeover: 'claude-k',
+      retry: {
+        account: 'claude-d', cause: { kind: 'overloaded', status: 529, wait_ms: 900 }, first_failure_at: new Date(proxyNow - ago).toISOString(), try: 0,
+        next_try_at: new Date(proxyNow - ago + 60_000).toISOString(), give_up_at: new Date(proxyNow - ago + 75_000).toISOString(), ...extra,
+      },
+    },
+  },
+})
+
+test('the band passes its main step through, every chunk in order, and keeps no step after it (an engine chunk is the engine\'s: tested at stepAfter)', async ($, on) => {
+  on('turn.step', async function* (_$, e) {
+    yield TEXT as never
+    yield { kind: 'text', index: 0, text: 'more' } as never
+    return { turnId: e.turnId, index: e.index, answer: 'Done.', toolUses: [], stopReason: 'end_turn', usage: WARM_STEP } as never
+  })
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  snapshot = retrying(clock.now(), 10_000)
+  await clock.advance(2_000)
+  await $.turn.start({ text: 'go on', turnId: 't1' } as never)
+  const seen: unknown[] = []
+  for await (const c of $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5' } as never)) seen.push(c)
+  expect(seen).toEqual([TEXT, { kind: 'text', index: 0, text: 'more' }])
+  // No step runs: no retry row, though the plugin still names one.
+  expect(await liveText($)).toBe('')
+})
+
+test('after a retry kept the session, a note says so for 15 minutes', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const kept = (cause: Record<string, unknown>, after: number, cacheRead: number): Snap => ({
+    ...SNAP, generated_at: new Date(clock.now()).toISOString(),
+    sessions: { s1: { ...SNAP.sessions.s1!, retry_outcome: { account: 'claude-d', cause, tries: 1, after_ms: after, cache_read: cacheRead, at: new Date(clock.now() - 1_000).toISOString() } } },
+  })
+  for (const [cause, after, read, row] of [
+    [{ kind: 'overloaded', status: 529 }, 61_000, 400_000, 'Stayed on d••• after HTTP 529 · the retry 61s later worked; cache kept'],
+    [{ kind: 'connection' }, 100, 400_000, 'Stayed on d••• after a lost connection · the retry worked; cache kept'],
+    [{ kind: 'hang', wait_ms: 135_000 }, 300, 400_000, 'Stayed on d••• after a 2m 15s hang · the retry worked; cache kept'],
+    [{ kind: 'overloaded', status: 529 }, 61_000, 0, 'Stayed on d••• after HTTP 529 · the retry 61s later worked'],
+  ] as const) {
+    snapshot = kept(cause, after, read)
+    await clock.advance(10_000)
+    expect(await rowText($)).toMatch(new RegExp(`^↪ ${row.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*ok$`))
+  }
+  await clock.advance(15 * 60_000)
+  snapshot = { ...snapshot, generated_at: new Date(clock.now()).toISOString() }
+  await clock.advance(10_000)
+  expect(await rowText($)).toBe('')
+})
+
+test('a held message has a short form for a narrow band', { options: { holdColdDefault: true } }, async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await reply($)
+  forkReply = { value: { isAnswered: false, reason: 'nothing-to-fork' } } as never
+  await minutes(clock, 61)
+  await $.prompt.submit(composer('the login page next'))
+  const narrow = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(80, false) })
+  expect((await narrow.find({ key: 'ask' }))?.text).toMatch(/^\? Message held: starts cold, ≈\$3\.30\s*send/)
+  await narrow.unmount()
+})
+
+test('while the plugin retries the account the band reads every 2 s, then every 10 s again', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  snapshot = retrying(clock.now(), 1_000)
+  await clock.advance(10_000)
+  bandReads = 0
+  await clock.advance(10_000)
+  expect(bandReads).toBeGreaterThanOrEqual(5)
+  snapshot = { ...SNAP, generated_at: new Date(clock.now()).toISOString() }
+  await clock.advance(10_000)
+  bandReads = 0
+  await clock.advance(20_000)
+  expect(bandReads).toBeLessThanOrEqual(3)
+})
+
+
+// The live rows at the view, with the clocks set as a step would leave them.
+describe('the live rows', () => {
+  const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined }
+  const ui: UiState = {
+    switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
+    pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: '',
+  }
+  const cache = { lastAt: NOW - 60_000, prompt: 160_000, read: 150_000, creation: 10_000, input: 10, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
+  /** The row at band time NOW, the band's clock `skew` ahead of the proxy's, its step as given. */
+  const row = (snap: Snap, step: { startedAt: number; contentAt: number } | null, skew = 0) =>
+    bandFacts({
+      snap, bandError: null, now: NOW, sess: SESSION, cache, ui, models: [], working: true, settings: settingsOf({}),
+      auto: { holdCold: null, keepWarm: null }, unattended: false, live: { step: step && { turnId: 't1', index: 0, ...step }, skew },
+    }, act).top
+  const proxy = (skew: number) => NOW - skew
+
+  test('waiting: what failed, when it is tried, and who takes over, in full and short', () => {
+    for (const skew of [0, 60_000, -60_000]) {
+      const step = { startedAt: NOW - 20_000, contentAt: 0 }
+      let r = row(retrying(proxy(skew), 12_000), step, skew)
+      expect(r?.title, `skew ${skew}`).toBe('d••• returned HTTP 529 · retrying it in about 48s; k••• is next if needed')
+      expect(r?.short).toBe('d••• returned HTTP 529 · retrying in 48s')
+      expect(row(retrying(proxy(skew), 61_000), step, skew)?.title).toBe('d••• returned HTTP 529 · retrying it now; k••• is next if needed')
+      const none = retrying(proxy(skew), 12_000)
+      r = row({ ...none, sessions: { s1: { ...none.sessions.s1!, takeover: undefined } } }, step, skew)
+      expect(r?.title).toBe('d••• returned HTTP 529 · retrying it in about 48s')
+      const usedUp = { ...none, providers: { claude: { ...none.providers.claude!, credentials: none.providers.claude!.credentials.map(c => (c.id === 'claude-k' ? { ...c, unavailable: true, tier: 3 } : c)) } }, sessions: { s1: { ...none.sessions.s1!, takeover: undefined } } }
+      expect(row(usedUp, step, skew)?.title).toBe('d••• returned HTTP 529 · retrying it in about 48s; no other account has quota')
+      const late = retrying(proxy(skew), 1_000, { cause: { kind: 'server', status: 503, wait_ms: 400 }, next_try_at: new Date(proxy(skew) - 1_000 + 120_000).toISOString() })
+      expect(row(late, step, skew)?.title).toBe('d••• returned HTTP 503 · waiting up to 75s for it; k••• is next if needed')
+    }
+  })
+
+  test('running: how long the retry has run', () => {
+    for (const skew of [0, 60_000, -60_000]) {
+      const snap = retrying(proxy(skew), 45_000, { cause: { kind: 'hang', wait_ms: 135_000 }, try: 1, try_started_at: new Date(proxy(skew) - 40_000).toISOString() })
+      const r = row(snap, { startedAt: NOW - 200_000, contentAt: 0 }, skew)
+      expect(r?.title, `skew ${skew}`).toBe('d••• hung for 2m 15s · retrying it, 40s so far; k••• is next if needed')
+      expect(r?.short).toBe('d••• hung · retrying it, 40s so far')
+    }
+  })
+
+  test('only while the main step has had no content since the failure, whatever the clocks', () => {
+    for (const skew of [0, 60_000, -60_000]) {
+      const snap = retrying(proxy(skew), 10_000) // the failure 10 s ago, on the band's clock
+      expect(row(snap, { startedAt: NOW - 60_000, contentAt: NOW - 9_500 }, skew)?.title, `skew ${skew}: content after`).not.toMatch(/HTTP 529/)
+      expect(row(snap, { startedAt: NOW - 60_000, contentAt: NOW - 30_000 }, skew)?.title, `skew ${skew}: content before`).toMatch(/^d••• returned HTTP 529/)
+      expect(row(snap, null, skew)?.title ?? '', `skew ${skew}: no step`).not.toMatch(/HTTP 529/)
+    }
+  })
+
+  test('the step\'s chunks as they come: an engine chunk is no answer, content is', () => {
+    const start = { turnId: 't1', index: 0, startedAt: NOW - 100_000, contentAt: 0 }
+    for (const skew of [0, 60_000, -60_000]) {
+      // Claude Code's retry marker 5 s after the failure, then content 60 s after the marker.
+      const snap = retrying(proxy(skew), 70_000)
+      const marker = stepAfter(start, { kind: 'engine' }, NOW - 65_000)
+      expect(row(snap, marker, skew)?.title, `skew ${skew}: the marker alone`).toMatch(/^d••• returned HTTP 529/)
+      expect(row(snap, stepAfter(marker, { kind: 'text' }, NOW - 5_000), skew)?.title ?? '', `skew ${skew}: content`).not.toMatch(/HTTP 529/)
+      // A side request's retry while the main step streams: content came after the failure.
+      let streaming = start
+      for (const at of [NOW - 60_000, NOW - 30_000, NOW - 2_000]) streaming = stepAfter(streaming, { kind: 'text' }, at)!
+      expect(row(retrying(proxy(skew), 10_000), streaming, skew)?.title ?? '', `skew ${skew}: streaming`).not.toMatch(/HTTP 529/)
+    }
+    // The hang watch: a retry marker at 20 s, and the row at 30 s.
+    const plain = { ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, takeover: 'claude-k' } } }
+    const watched = stepAfter({ ...start, startedAt: NOW - 30_000 }, { kind: 'engine' }, NOW - 10_000)
+    expect(row(plain, watched)?.title).toBe('no answer for 30s · if it fails, a retry or another account takes over')
+  })
+
+  test('the hang watch: no answer for 30 s, naming no account', () => {
+    const plain = { ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, takeover: 'claude-k' } } }
+    let r = row(plain, { startedAt: NOW - 46_000, contentAt: 0 })
+    expect(r?.title).toBe('no answer for 46s · if it fails, a retry or another account takes over')
+    expect(r?.short).toBe('no answer for 46s')
+    // No account known to take over: the short row alone. The provider's only account too.
+    r = row(SNAP, { startedAt: NOW - 46_000, contentAt: 0 })
+    expect(r?.title).toBe('no answer for 46s')
+    expect(row(plain, { startedAt: NOW - 29_000, contentAt: 0 })?.title ?? '').not.toMatch(/no answer/)
+    expect(row(plain, { startedAt: NOW - 46_000, contentAt: NOW - 40_000 })?.title ?? '').not.toMatch(/no answer/)
+    // A retry of this session's account replaces it.
+    expect(row(retrying(NOW, 10_000), { startedAt: NOW - 46_000, contentAt: 0 })?.title).toMatch(/^d••• returned HTTP 529/)
+  })
+})
+
+// Every live row and note in the wording table reads as the shared fixture says, and fits one line
+// at 80 columns (a 79-column row: padding, the mark, its words, and the control `switch to k•••`
+// that ticket 06 puts on the live rows, or `ok` on a note).
+test('the wording table reads as the shared fixture, and each row fits 80 columns', () => {
+  expect(rows.length).toBeGreaterThan(0)
+  for (const r of rows) {
+    const words = (W[r.row] as (...a: unknown[]) => { text: string; short?: string })(...r.args.map(a => (a === null ? undefined : a)))
+    expect(words.text, r.name).toBe(r.text)
+    expect(words.short, r.name).toBe(r.short)
+    const control = r.row === 'kept' ? 'ok' : r.row === 'movesNext' ? '' : 'switch to k•••'
+    const fits = (t: string) => 4 + 2 + t.length + (control ? 2 + control.length + 2 : 2) <= 79
+    expect(fits(words.text) || fits(words.short ?? ''), `${r.name} at 80 columns`).toBe(true)
+    expect(4 + 2 + words.text.length + 2 + control.length + 2 <= 159, `${r.name} at 160 columns`).toBe(true)
+  }
+})
+
+/**
+ * Starts main turn `turnId` and holds its step at its first chunk, as a step waiting on its request
+ * does: the step runs, with `chunk` its only one so far.
+ */
+const holdStep = async ($: Engine, turnId: string, chunk: unknown, steps: { first: unknown }) => {
+  steps.first = chunk
+  await $.turn.start({ text: 'go on', turnId } as never)
+  const it = $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5' } as never)[Symbol.asyncIterator]()
+  await it.next()
+  return it
+}
+
+/** A step's first chunk that is not content, as a test can yield one (the engine's own it cannot). */
+const NO_CONTENT = { kind: 'stop', stopReason: 'end_turn', usage: null }
+
+test('the live rows draw while a step waits, on the terminal and in the desktop app, in full or short at 80 columns', async ($, on) => {
+  const steps = { first: TEXT as unknown }
+  on('turn.step', async function* (_$, e) {
+    yield steps.first as never
+    return { turnId: e.turnId, index: e.index, answer: 'Done.', toolUses: [], stopReason: 'end_turn', usage: WARM_STEP } as never
+  })
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  /** The row at 160 and 80 columns, on the terminal then the desktop app. */
+  const drawn = async () => {
+    const out: string[] = []
+    for (const surface of ['terminal', 'desktop'] as const) for (const cols of [160, 80]) out.push((await liveText($, cols, surface)).trim())
+    return out
+  }
+  // Content, then the failure 5 s later: the waiting row.
+  let step = await holdStep($, 't1', TEXT, steps)
+  snapshot = { ...retrying(clock.now() + 10_000, 5_000), sequence: 8 }
+  await clock.advance(10_000)
+  const waiting = 'd••• returned HTTP 529 · retrying it in about 55s; k••• is next if needed'
+  expect(await drawn()).toEqual([`! ${waiting}`, '! d••• returned HTTP 529 · retrying in 55s', waiting, waiting])
+  // The try runs: the running row, counting.
+  snapshot = { ...retrying(clock.now() + 2_000, 7_000, { cause: { kind: 'hang', wait_ms: 135_000 }, try: 1, try_started_at: new Date(clock.now() - 4_000).toISOString() }), sequence: 9 }
+  await clock.advance(2_000)
+  const running = 'd••• hung for 2m 15s · retrying it, 6s so far; k••• is next if needed'
+  expect(await drawn()).toEqual([`! ${running}`, `! ${running}`, running, running])
+  // Content from the retry clears it.
+  expect((await step.next()).done).toBe(true)
+  expect(await drawn()).toEqual(['', '', '', ''])
+  // A step with no content for 30 s: the hang watch, until its end.
+  snapshot = { ...SNAP, sequence: 10, generated_at: new Date(clock.now()).toISOString(), sessions: { s1: { ...SNAP.sessions.s1!, takeover: 'claude-k' } } }
+  await clock.advance(10_000)
+  step = await holdStep($, 't2', NO_CONTENT, steps)
+  await clock.advance(29_000)
+  expect(await drawn()).toEqual(['', '', '', ''])
+  // It counts at each redraw, every 2 s.
+  await clock.advance(3_000)
+  const watch = 'no answer for 32s · if it fails, a retry or another account takes over'
+  expect(await drawn()).toEqual([`! ${watch}`, `! ${watch}`, watch, watch])
+  await step.next()
+  expect(await drawn()).toEqual(['', '', '', ''])
 })

@@ -261,7 +261,7 @@ Cards while Claude waits, one line while it works:
 | **Context** | How full the conversation is. |
 | **Cache** | Time left before the prompt cache goes cold, with `kept warm 0/3` counting refreshes while keeping it warm is on; once cold, what the next turn rewrites and costs. |
 | **Accounts** | Every account's weekly use, and the one a switch or a new session gets next. |
-| **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy, a cold next turn, a session moved, a context filling up). |
+| **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy `retrying` your account or an account `resting`, no answer yet, a cold next turn, a session moved, a context filling up). |
 
 | Control | What it does |
 | --- | --- |
@@ -296,8 +296,8 @@ account that keeps failing rests. There is nothing to set; the rules and numbers
 
 | Situation | What happens | What the band shows |
 | --- | --- | --- |
-| A quick failure (a lost connection, HTTP 529) | Retried on the same account, up to twice within 75 s | Claude Code's retry line says `quota-pilot: d••• returned HTTP 529; retrying it in about 50s` |
-| A hang | One retry on the same account | Nothing new while the retry runs: the request just takes longer |
+| A quick failure (a lost connection, HTTP 529) | Retried on the same account, up to twice within 75 s | `! d••• returned HTTP 529 · retrying it in about 50s; k••• is next if needed`, then `↪ Stayed on d••• after HTTP 529 · the retry 61s later worked; cache kept` |
+| A hang | One retry on the same account | `! no answer for 45s` while it hangs, then `! d••• hung for 2m 15s · retrying it, 40s so far; k••• is next if needed` |
 | A retry that fails too | The session moves to another account, which keeps it | `↪ Switched d••• → k••• · d••• hung for 2m 15s; the retry got no answer`, with `switch back` once the proxy offers d••• again |
 | A retry that got no answer | The next message goes to another account | `! d••• got no answer · moves to k••• (3% used) on the next turn` |
 | An account keeps failing | It rests: new sessions get it only when nothing else can, and its sessions move at their next turn | `! d••• resting after 2 failures · moves to k••• (3% used) on the next turn`; the Account card reads `resting, back in 4m` |
@@ -433,6 +433,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
 | A Codex account has no 5-hour window | Its plan has none; the page and the band say so. |
 | The band says `Switched d••• → k••• · reason not recorded` | quota-pilot is older than the band and does not record why a session moved: update it from the panel's Plugin Store. |
+| The band says `retrying it in about 50s` | quota-pilot keeps the request on the session's own account for a retry, so the prompt cache stays. The turn goes on there once the retry answers, or on the account named after 75 s at most; `switch` moves it now. |
 | Claude Code shows `API error · Retrying` with `quota-pilot: … retrying it in about 50s` | quota-pilot keeps the request on its own account for a retry, so the prompt cache stays. It moves on to the account named after 75 s at most; `switch` moves it now. |
 | The band says `got no answer · moves to k••• on the next turn` | The retry after a hang got no answer; your next message goes to k•••. Nothing to do. |
 | A request hangs for minutes | Through a proxy Claude Code has no first-byte limit, only its request timeout, `API_TIMEOUT_MS` (600 s by default). A shorter one ends a hang sooner, but also cuts off a slow first reply to a large cold prompt. Esc and send again moves the session; `switch` moves it at any time. |

@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Auto, BandError, CacheInfo, ModelInfo, Move, SessionAbout, SessionInfo, Snap, UiState } from '../types'
+import type { Auto, BandError, CacheInfo, Live, ModelInfo, Move, SessionAbout, SessionInfo, Snap, UiState } from '../types'
 import { desktopBand, lengthBar } from './desktop'
 import {
   C,
@@ -24,6 +24,7 @@ import {
   sessionAccount,
   settingsOf,
   settlePending,
+  stepAfter,
   unattendedOf,
   warmDueAt,
   type Settings,
@@ -31,6 +32,7 @@ import {
 import { accountsPart, quotaPane } from './pane'
 import { cellBar, terminalBand } from './terminal'
 import { bandFacts, nextTurn, settingsRows, type BandInput, type Do, type Handoff, type SettingRow } from './view'
+import { W } from './wording'
 
 const PANE = 'quota'
 
@@ -55,6 +57,7 @@ const cacheA = atom({ plugin: 'quota-band', key: 'cache' } as const, EMPTY_CACHE
 const uiA = atom({ plugin: 'quota-band', key: 'ui' } as const, EMPTY_UI)
 const modelsA = atom({ plugin: 'quota-band', key: 'models' } as const, [] as ModelInfo[])
 const autoA = atom({ plugin: 'quota-band', key: 'auto' } as const, { holdCold: null, keepWarm: null } as Auto)
+const liveA = atom({ plugin: 'quota-band', key: 'live' } as const, { step: null, skew: 0 } as Live)
 
 type $T = EngineInterface
 
@@ -86,13 +89,13 @@ const kitPath = (home: string, rest: string) => `${home}/.cache/cliproxy-kit/${r
  * (`fresh`) for a decision that cannot wait for one.
  */
 async function bandInput($: $T, working: boolean, fresh = false): Promise<BandInput> {
-  const [snap, bandError, polled, sess, cache, ui, models, auto] = await Promise.all([
-    read($, snapA), read($, bandErrorA), read($, nowA), read($, sessA), read($, cacheA), read($, uiA), read($, modelsA), read($, autoA),
+  const [snap, bandError, polled, sess, cache, ui, models, auto, live] = await Promise.all([
+    read($, snapA), read($, bandErrorA), read($, nowA), read($, sessA), read($, cacheA), read($, uiA), read($, modelsA), read($, autoA), read($, liveA),
   ])
   const now = fresh ? await $.clock.now() : polled || Date.now()
   // A decision takes the session's choice from the module; a drawing, from its mirror, which it
   // subscribes to.
-  return { snap, bandError, now, sess, cache, ui, models, settings, working, auto: fresh ? mine : auto, unattended }
+  return { snap, bandError, now, sess, cache, ui, models, settings, working, auto: fresh ? mine : auto, unattended, live }
 }
 
 // ---- data refresh ----
@@ -191,6 +194,10 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
     const old = await read($, snapA)
     if (snap && (snap.sequence !== old?.sequence || snap.boot_id !== old?.boot_id || snap.generated_at !== old?.generated_at)) {
       await update($, snapA, () => snap)
+      // How far the band's clock is ahead of the proxy's, which stamps the snapshot as it builds it:
+      // the plugin's times are compared on the band's clock shifted by it, to within the read's latency.
+      const skew = now - Date.parse(snap.generated_at)
+      if (Number.isFinite(skew)) await update($, liveA, l => (l.skew === skew ? l : { ...l, skew }))
     }
     if (JSON.stringify(error) !== JSON.stringify(await read($, bandErrorA))) await update($, bandErrorA, () => error)
     // Every read, changed or not: a command can also expire, or its proxy be gone.
@@ -359,7 +366,7 @@ const moveTarget = (move: Move) => (move.action === 'switch' ? move.fields.auth_
 async function sendCommand($: $T, move: Move, session?: string): Promise<void> {
   const [sess, snap, bandError, cache] = await Promise.all([read($, sessA), read($, snapA), read($, bandErrorA), read($, cacheA)])
   if (!snap || bandError) {
-    await setUi($, { notice: bandError ? bandErrorText(bandError) : 'The proxy plugin is not running', noticeIsError: true, confirm: '', move: null })
+    await setUi($, { notice: bandError ? bandErrorText(bandError) : W.pluginDown, noticeIsError: true, confirm: '', move: null })
     return
   }
   // The reader chose this move, with what it costs in front of them: its cold turn is neither
@@ -371,7 +378,7 @@ async function sendCommand($: $T, move: Move, session?: string): Promise<void> {
   const pending = { id, text: move.text, boot: snap.boot_id, at }
   await update($, uiA, (u: UiState): UiState => ({
     ...u, confirm: '', switchStep: '', move: null, coldOk: chosen, coldDismissed: chosen,
-    notice: `${move.text}…`, noticeIsError: false, pending: [...u.pending, pending],
+    notice: W.sending(move.text), noticeIsError: false, pending: [...u.pending, pending],
   }))
   outbox.push(doc)
   await refresh($, false)
@@ -458,7 +465,7 @@ const mentionsFile = (text: string) => /(^|\s)@\S/.test(text)
 async function handoffNow($: $T, given: Handoff = {}): Promise<void> {
   const ran = await exclusive(() => runHandoff($, given))
   // Pressed again while one runs, its row says so already; else the cache was being kept warm.
-  if (!ran && !(await read($, uiA)).busy) await setUi($, { notice: 'The band was busy: try the handoff again in a moment', noticeIsError: true })
+  if (!ran && !(await read($, uiA)).busy) await setUi($, { notice: W.handoffBusy, noticeIsError: true })
 }
 
 async function runHandoff($: $T, given: Handoff): Promise<void> {
@@ -474,14 +481,14 @@ async function runHandoff($: $T, given: Handoff): Promise<void> {
       if (box?.text.trim()) then.held = box.text
     }
     const prompt = await handoffPrompt($, sess.home)
-    await setUi($, { busy: true, confirm: '', move: null, held: then.held ?? '', notice: `Writing the handoff note${prompt.own ? ' with your prompt' : ''}…`, noticeIsError: false })
+    await setUi($, { busy: true, confirm: '', move: null, held: then.held ?? '', notice: W.writingNote(prompt.own), noticeIsError: false })
     if (given.fromBox) await $.prompt.fill({ text: '' }).catch(() => undefined)
     const tail = cache.lastAnswer ? `\n\nYour latest reply, which may be missing from this request, was:\n${cache.lastAnswer.slice(0, 6000)}` : ''
     const next = then.held ? `\n\nThe new session gets this message from the user right after the note:\n${then.held}` : ''
     forking = true
     const r = await $.model.fork({ prompt: prompt.text + tail + next }).finally(() => { forking = false })
     if (!r.isAnswered || !r.text.trim()) {
-      await setNotice($, `Handoff stopped: no note (${r.isAnswered ? 'empty' : r.reason}); the conversation is kept`, true)
+      await setNotice($, W.noNote(r.isAnswered ? 'empty' : r.reason), true)
       return
     }
     // The session's short id and the local time: short enough to read in a notice.
@@ -492,7 +499,7 @@ async function runHandoff($: $T, given: Handoff): Promise<void> {
     const shown = sess.home && path.startsWith(sess.home) ? `~${path.slice(sess.home.length)}` : path
     await $.fs.write(path, r.text)
     if ((await $.fs.read(path)) !== r.text) {
-      await setNotice($, 'Handoff stopped: the note could not be saved; the conversation is kept', true)
+      await setNotice($, W.noteNotSaved, true)
       return
     }
     saved = shown
@@ -500,7 +507,7 @@ async function runHandoff($: $T, given: Handoff): Promise<void> {
     // resume meanwhile), and not one that went on while the note was written.
     const [id, after] = await Promise.all([$.session.id(), read($, uiA)])
     if (id !== sess.id || after.turns !== before.turns || mainTurn) {
-      await setNotice($, `Note saved at ${shown}; the conversation changed or went on while it was written, so it was not cleared`, true)
+      await setNotice($, W.noteKept(shown, 'changed'), true)
       return
     }
     // The /clear runs once the session is idle, and ends one conversation: two ended meanwhile
@@ -511,7 +518,7 @@ async function runHandoff($: $T, given: Handoff): Promise<void> {
     await $.command.run({ command: 'clear' })
     const fresh = await $.session.id()
     if (fresh === sess.id || generation > gen + 1) {
-      await setNotice($, `Note saved at ${shown}; ${fresh === sess.id ? 'the conversation was not cleared' : 'another conversation came first, so the note was not sent'}`, true)
+      await setNotice($, W.noteKept(shown, fresh === sess.id ? 'not cleared' : 'another first'), true)
       return
     }
     // From here on the note is the only copy of the context: every message names where it is.
@@ -520,13 +527,13 @@ async function runHandoff($: $T, given: Handoff): Promise<void> {
     const text = `Continue from this handoff note (saved at ${path}):\n\n${r.text.trim()}${then.held ? `\n\n---\n\n${then.held}` : ''}`
     const sent = !mentionsFile(then.held ?? '') && await $.prompt.submit({ text, asUser: true }).then(s => !s.drop, () => false)
     if (sent) {
-      await setNotice($, `Handed off: the new session starts from ${shown}`, false)
+      await setNotice($, W.handedOff(shown), false)
       return
     }
     const fill = await $.prompt.fill({ text }).catch(() => ({ isFilled: false }))
-    await setNotice($, fill.isFilled ? 'New session ready: the note is in the prompt; press Enter to start' : `New session started. Note saved at ${shown}`, !fill.isFilled)
+    await setNotice($, W.newSession(shown, fill.isFilled), !fill.isFilled)
   } catch (err) {
-    await setNotice($, `Handoff failed: ${String(err)}${saved ? `; the note is at ${saved}` : ''}`, true)
+    await setNotice($, W.handoffFailed(String(err), saved), true)
   } finally {
     await giveBack($, handedOff ? undefined : then.held)
   }
@@ -552,14 +559,14 @@ async function sendHeld($: $T): Promise<void> {
     await setUi($, { confirm: '', held: '' })
     if (!text.trim()) return
     if (mentionsFile(text)) {
-      await setUi($, { notice: 'Press Enter to send it: a message that names files with @ goes from the prompt box', noticeIsError: false })
+      await setUi($, { notice: W.sendFromBox, noticeIsError: false })
       return
     }
     await $.prompt.fill({ text: '' }).catch(() => undefined)
     const r = await $.prompt.submit({ text, asUser: true }).catch(() => null)
     if (!r || r.drop) {
       await giveBack($, text)
-      await setNotice($, `Not sent${r?.drop ? `: ${r.drop}` : ''}; the message is back in the prompt`, true)
+      await setNotice($, W.notSent(r?.drop), true)
     }
   })
 }
@@ -700,7 +707,7 @@ export const register: Register = (on, options) => {
     const before = await read($, uiA)
     await update($, cacheA, c => ({ ...EMPTY_CACHE, ...c }))
     await update($, uiA, (u: UiState): UiState => ({
-      ...EMPTY_UI, ...u, busy: false, notice: u.busy ? 'The band reloaded during a handoff; the conversation is kept' : u.notice,
+      ...EMPTY_UI, ...u, busy: false, notice: u.busy ? W.handoffReloaded : u.notice,
       confirm: CONFIRMS.includes(u.confirm) ? u.confirm : '',
     }))
     if (before.busy && before.held) await giveBack($, before.held)
@@ -713,6 +720,17 @@ export const register: Register = (on, options) => {
     await refresh($, true)
     $.clock.every(10_000, () => {
       void refresh($, false)
+    })
+    // While the plugin retries this session's account the band reads every 2 s, so the countdown,
+    // the running seconds and the outcome show promptly; while its own step waits with no answer,
+    // it redraws to count.
+    $.clock.every(2_000, async () => {
+      const [snap, sess, live] = await Promise.all([read($, snapA), read($, sessA), read($, liveA)])
+      if (snap?.sessions[sess.id]?.retry) void refresh($, false)
+      else if (live.step && live.step.contentAt === 0) {
+        const now = await $.clock.now()
+        await update($, nowA, () => now)
+      }
     })
     await scheduleWarm($)
     return next(e)
@@ -798,7 +816,40 @@ export const register: Register = (on, options) => {
     // A cache entry lives from its request's start, the time spent answering included. The clock
     // is asked before the step and answers after it: a streaming hook passes the step on first.
     const asked = $.clock.now()
-    const r = yield* next(e)
+    // The reader's own step (not a subagent's, nor the band's model call): its content chunks say
+    // whether it is answering (text, thinking, a tool call or its input; never the engine's own
+    // items, such as its retry marker).
+    const watched = !ownStep(e) && (!mainTurn || e.turnId === mainTurn)
+    const mine = (l: Live) => l.step?.turnId === e.turnId && l.step.index === e.index
+    if (watched) {
+      const startedAt = await asked
+      await update($, liveA, l => ({ ...l, step: { turnId: e.turnId, index: e.index, startedAt, contentAt: 0 } }))
+    }
+    const inner = next(e)
+    let r: Awaited<ReturnType<typeof inner.next>>['value'] | undefined
+    let done = false
+    try {
+      for (;;) {
+        const item = await inner.next()
+        if (item.done) {
+          r = item.value
+          done = true
+          break
+        }
+        const chunk = item.value
+        if (watched && chunk.kind !== 'engine' && chunk.kind !== 'stop') {
+          const at = await $.clock.now()
+          await update($, liveA, l => {
+            const step = mine(l) ? stepAfter(l.step, chunk, at) : l.step
+            return step === l.step ? l : { ...l, step }
+          })
+        }
+        yield chunk
+      }
+    } finally {
+      if (!done) await inner.return?.(undefined as never)
+      if (watched) await update($, liveA, l => (mine(l) ? { ...l, step: null } : l))
+    }
     const started = await asked
     // A step of another conversation (one a /clear or a resume left) is not this one's.
     if (gen === generation && !ownStep(e) && r?.usage) {

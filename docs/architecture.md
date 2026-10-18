@@ -330,7 +330,7 @@ character cells in a terminal (`terminal.tsx`), and as cards in the desktop app 
 whose font is proportional, whose widths are CSS lengths and whose colours follow its light or dark
 theme. Both show cards while Claude waits and one line while it works (also when another mod draws
 beneath it), and the row says one thing at a time: a question, what came of an action, or an alert
-(the proxy's, a cold next turn, a session moved, a full context), in that order.
+(the proxy's, a cold next turn, a session moved or kept, a full context), in that order.
 
 Everything it shows of accounts comes from `/band`, read every 10 seconds at `ANTHROPIC_BASE_URL`
 with `ANTHROPIC_AUTH_TOKEN` (else `ANTHROPIC_API_KEY`, else no key, for a proxy without `api-keys`),
@@ -360,6 +360,29 @@ listed by a pick for that model since its last failure (any failure, any model, 
 always tell which ones the proxy cools an account for). It never moves a session back by itself.
 A row too wide for the band draws its short form (`↪ Switched d••• → k••• · d••• hung`); the
 Codex notice says the same words (`mod/tests/moves.js` holds both sides' expected wording).
+
+While a turn waits, the row says what is being tried. When the snapshot's `retry` names the
+session, quota-pilot is waiting to try its account again (`! d••• returned HTTP 529 · retrying it in
+about 50s; k••• is next if needed`, or `waiting up to 75s for it` when the next try would come after
+the give-up, so it never promises a retry it will not make) or a try runs (`! d••• hung for 2m 15s ·
+retrying it, 40s so far`). The account after `next if needed` is the snapshot's `takeover`, the one a
+pick would answer once the retries end; with none the row ends there, or says `no other account has
+quota`. Without `retry`, a
+main step with no content in the 30 s since it started reads `! no answer for 45s`, adding `if it
+fails, a retry or another account takes over` while `takeover` names one: it names no account, as
+the band cannot see where the request is. These rows show only while the band's own main step has
+had no content (text, thinking, a tool call or its input) since the first failure, or since it
+started for the hang watch; Claude Code's retry marker and the stream's envelope do not count. They
+go at the first content, the step's end or a cancel. While `retry` names the session the band reads
+`/band` every 2 s, then every 10 s again, and counts every live number on its own clock shifted by
+the snapshot's `generated_at`, so a band on another device agrees with the proxy. A retry that kept
+the session leaves a note for 15 minutes, `↪ Stayed on d••• after HTTP 529 · the retry 61s later
+worked; cache kept` (`cache kept` only when the retry read the cache); one that ended in a move
+shows the move. An imminent move off a resting account or a binding whose retry got no answer reads
+`! d••• got no answer · moves to k••• (3% used) on the next turn`, and a held message counts that
+turn as cold. Of the proxy's alerts, a retry waiting or running goes first (unless quota data is
+old), then the plugin's warnings, then the hang watch. Every row's text and short form come from one
+table, `wording.ts`, checked against the same fixture.
 
 A session signed in to Claude directly reads no proxy. The desktop app's are: it points them at
 Anthropic's own API with the app's sign-in. The band then shows that account's own limits, as Claude

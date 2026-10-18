@@ -1,7 +1,22 @@
-// The expected wording of every move, read by tests/band.test.ts and by plugin/codex_test.go, which
+// The expected wording of the band's rows (`rows`, the band's alone) and of every move (`moves`,
+// which the plugin's Codex notice says too), read by tests/band.test.ts and by plugin/codex_test.go, which
 // reads what follows `export default` as JSON: keep it JSON (double quotes, no trailing commas).
 export default {
   "about": "Why a session moved off d••• to k•••, worded from its switch record: the band's move row reads 'Switched d••• → k••• · ' and `why` (its short form ends in `short` instead), and the Codex notice says the same `why`.",
+  "rows": [
+    { "name": "waiting for a retry", "row": "waiting", "args": ["d•••", { "kind": "overloaded", "status": 529 }, 50000, false, 75, "k•••", false], "text": "d••• returned HTTP 529 · retrying it in about 50s; k••• is next if needed", "short": "d••• returned HTTP 529 · retrying in 50s" },
+    { "name": "waiting, the retry due now", "row": "waiting", "args": ["d•••", { "kind": "overloaded", "status": 529 }, 0, false, 75, "k•••", false], "text": "d••• returned HTTP 529 · retrying it now; k••• is next if needed", "short": "d••• returned HTTP 529 · retrying now" },
+    { "name": "waiting, no other account with quota", "row": "waiting", "args": ["d•••", { "kind": "overloaded", "status": 529 }, 50000, false, 75, null, true], "text": "d••• returned HTTP 529 · retrying it in about 50s; no other account has quota", "short": "d••• returned HTTP 529 · retrying in 50s" },
+    { "name": "waiting past the give-up", "row": "waiting", "args": ["d•••", { "kind": "server", "status": 503 }, 119000, true, 75, "k•••", false], "text": "d••• returned HTTP 503 · waiting up to 75s for it; k••• is next if needed", "short": "d••• returned HTTP 503 · waiting up to 75s" },
+    { "name": "a retry running", "row": "running", "args": ["d•••", { "kind": "hang", "wait_ms": 135000 }, 40000, "k•••", false], "text": "d••• hung for 2m 15s · retrying it, 40s so far; k••• is next if needed", "short": "d••• hung · retrying it, 40s so far" },
+    { "name": "no answer, an account to take over", "row": "hangWatch", "args": [45000, true], "text": "no answer for 45s · if it fails, a retry or another account takes over", "short": "no answer for 45s" },
+    { "name": "no answer, none to take over", "row": "hangWatch", "args": [45000, false], "text": "no answer for 45s" },
+    { "name": "a retry that worked after a 529", "row": "kept", "args": ["d•••", { "kind": "overloaded", "status": 529 }, 61000, 400000], "text": "Stayed on d••• after HTTP 529 · the retry 61s later worked; cache kept", "short": "Stayed on d••• · retry worked" },
+    { "name": "a retry that worked after a lost connection", "row": "kept", "args": ["d•••", { "kind": "connection" }, 100, 400000], "text": "Stayed on d••• after a lost connection · the retry worked; cache kept", "short": "Stayed on d••• · retry worked" },
+    { "name": "a retry that worked after a hang, reading no cache", "row": "kept", "args": ["d•••", { "kind": "hang", "wait_ms": 135000 }, 300, 0], "text": "Stayed on d••• after a 2m 15s hang · the retry worked", "short": "Stayed on d••• · retry worked" },
+    { "name": "resting, a move next turn", "row": "movesNext", "args": ["d•••", "resting after 2 failures", "k•••", "3% used"], "text": "d••• resting after 2 failures · moves to k••• (3% used) on the next turn", "short": "d••• resting · moves to k••• next turn" },
+    { "name": "no answer, a move next turn", "row": "movesNext", "args": ["d•••", "got no answer", "k•••", "3% used"], "text": "d••• got no answer · moves to k••• (3% used) on the next turn", "short": "d••• got no answer · moves next turn" }
+  ],
   "moves": [
     {
       "name": "a hang (2026-10-11, once worded 'd••• was unavailable')",

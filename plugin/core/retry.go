@@ -79,7 +79,7 @@ type RetryOutcome struct {
 	Account   string    `json:"account"`
 	Cause     Cause     `json:"cause"`
 	Tries     int       `json:"tries"`
-	AfterMs   int64     `json:"after_ms"` // from the first failure's end to the success
+	AfterMs   int64     `json:"after_ms"` // from the first failure's end to when the try that worked was sent
 	CacheRead int64     `json:"cache_read"`
 	At        time.Time `json:"at"`
 }
@@ -202,8 +202,13 @@ func (s *State) endEpisodeLocked(ek episodeKey, root string, e *episode, kept *U
 	delete(s.episodes, ek)
 	if kept != nil {
 		if sess := s.sessions[root]; sess != nil && ek.binding == keyOf(ek.binding, root) {
+			// When the try that worked was sent, after the first failure: "the retry 61s later worked".
+			sent := kept.RequestedAt
+			if sent.IsZero() || sent.After(now) {
+				sent = now
+			}
 			sess.RetryOutcome = &RetryOutcome{Account: e.account, Cause: e.cause, Tries: e.tries,
-				AfterMs: max(0, now.Sub(e.firstEnd).Milliseconds()), CacheRead: kept.CacheRead, At: now}
+				AfterMs: max(0, sent.Sub(e.firstEnd).Milliseconds()), CacheRead: kept.CacheRead, At: now}
 		}
 		s.dirty = true
 		return

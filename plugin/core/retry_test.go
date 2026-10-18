@@ -565,6 +565,26 @@ func TestAHungBindingIsAnnounced(t *testing.T) {
 	}
 }
 
+// The account that takes over is one a pick has offered for the session's model: B, offered for
+// Sonnet but not for Opus (the host cools it for Opus), takes over no Opus session, so the band's
+// rows name none.
+func TestTheTakeoverIsOfferedForTheSessionsModel(t *testing.T) {
+	s, c := twoAccounts(t)
+	s.UpdateInventory([]CredInfo{{ID: "claude-a", Provider: "claude", Email: "dana@example.com"}, {ID: "claude-b", Provider: "claude", Email: "kim@example.com"}})
+	if r := pick(s, "claude:s1", opus, []Candidate{credA}); r.AuthID != "claude-a" {
+		t.Fatalf("pick %s", r.AuthID)
+	}
+	answered(s, c, "claude:s1", "claude-a")
+	pick(s, "claude:s2", "claude-sonnet-5-5", both)
+	if v := s.Build().Sessions["s1"]; v.Takeover != "" {
+		t.Fatalf("takeover %q with B offered only for Sonnet", v.Takeover)
+	}
+	pk(s, both...)
+	if v := s.Build().Sessions["s1"]; v.Takeover != "claude-b" {
+		t.Fatalf("takeover %q with B offered for Opus", v.Takeover)
+	}
+}
+
 func TestEveryRequestOfTheBindingTakesPart(t *testing.T) {
 	s, c := retrySetup(t, 160_000)
 	failed(s, c, "claude-a", "", 529, "", time.Second, time.Second)

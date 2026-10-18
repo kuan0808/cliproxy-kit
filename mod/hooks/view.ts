@@ -1,6 +1,7 @@
 // What the band shows, whichever surface draws it: the terminal's cells and the desktop app's
 // cards read the same facts and the same row above them, with the same actions behind them.
-import type { Auto, BandError, CacheInfo, ModelInfo, Move, SessionInfo, Snap, UiState } from '../types'
+import type { Auto, BandError, CacheInfo, Live, ModelInfo, Move, SessionInfo, Snap, UiState } from '../types'
+import { W, type Words } from './wording'
 import {
   autoState,
   bandErrorText,
@@ -99,6 +100,8 @@ export type BandInput = {
   /** This session's own choice of the automatic features, and whether nobody attends it. */
   auto: Auto
   unattended: boolean
+  /** The band's own main step, and its clock against the proxy's. */
+  live: Live
 }
 
 export type Facts = {
@@ -231,7 +234,7 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     if (asks) act.ui({ confirm: 'move', move, switchStep: '' })
     else act.send(move)
   }
-  const unroute: Move = { action: 'unroute', fields: {}, text: `Back to ${providerTitle(original)}` }
+  const unroute: Move = { action: 'unroute', fields: {}, text: W.backTo(providerTitle(original)) }
 
   const facts: Facts = {
     proxied: sess.proxied,
@@ -272,53 +275,55 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
   const ask = (title: string, detail: string, acts: Act[], close = cancel(), brief?: string): Row => ({ key: 'ask', tone: 'ask', title, detail, brief, acts, close })
 
   if (ui.confirm === 'handoff') {
-    return ask('Hand off to a new session?',
-      `Claude writes a summary (goal, done, not done, changes, watch out, next step) and saves it; this conversation clears and a new one starts from the summary${ui.held ? ', with your message after it' : ''}.`,
+    const q = W.handoffAsk(Boolean(ui.held))
+    return ask(q.title, q.detail,
       [{ key: 'yes-handoff', label: 'hand off', main: true, run: () => act.handoff({ held: ui.held || undefined }) }],
       cancel({ held: '' }))
   }
   // A question left from before holding was turned off (an upgrade, /config) is not asked.
   if (ui.confirm === 'send' && c.cold && f.holdOn) {
     const cold = c.cold
-    return ask('Message held',
-      // Enter sends it: the line Claude Code prints for the held message says so.
-      `next turn starts cold (${cold.why}): ${rewriteText(cold.tokens, c.cost)}`,
-      [
-        { key: 'send-held', label: 'send', main: true, run: act.sendHeld },
-        { key: 'handoff-held', label: 'hand off with it', run: () => act.handoff({ held: ui.held, fromBox: true }) },
-      ],
-      cancel({ coldOk: cold.key, held: '' }),
-      `next turn starts cold: ${rewriteBrief(cold.tokens, c.cost)}`)
+    // Enter sends it: the line Claude Code prints for the held message says so.
+    const q = W.held(cold.why, rewriteText(cold.tokens, c.cost), c.cost ? fmtUsd(c.cost.cold) : '')
+    return {
+      ...ask(q.title, q.detail,
+        [
+          { key: 'send-held', label: 'send', main: true, run: act.sendHeld },
+          { key: 'handoff-held', label: 'hand off with it', run: () => act.handoff({ held: ui.held, fromBox: true }) },
+        ],
+        cancel({ coldOk: cold.key, held: '' })),
+      short: q.short,
+    }
   }
   if (ui.confirm === 'move' && ui.move) {
     const move = ui.move
     const target = move.action === 'route' ? move.fields.model ?? f.model : f.model
     const cost = turnCost(target, cache.prompt, cache.ttlMs)
-    return ask(`${move.text}?`,
-      `The next turn then starts cold: it ${rewriteText(cache.prompt, cost)}.`,
+    const q = W.moveAsk(move.text, rewriteText(cache.prompt, cost), rewriteBrief(cache.prompt, cost))
+    return ask(q.title, q.detail,
       [
         { key: 'yes-move', label: move.action === 'switch' ? 'switch' : move.action === 'route' ? 'route' : 'go back', main: true, run: () => act.send(move) },
         { key: 'handoff-move', label: 'hand off first', run: () => act.handoff({ move }) },
       ],
       cancel(),
-      `then starts cold: ${rewriteBrief(cache.prompt, cost)}`)
+      q.brief)
   }
   if (ui.confirm === 'switch' && acct) {
     // Two steps: accounts of this provider and the providers to route to, then that provider's models.
     const route = acct.session.route
     if (ui.switchStep) {
       const provider = ui.switchStep
-      return ask(`${providerTitle(provider)} model`, '', [
+      return ask(W.modelMenu(providerTitle(provider)), '', [
         ...latestModels(i.models, provider).map((m): Act => route?.model === m
           ? { key: `model-${m}`, label: `${m} (now)`, name: true }
-          : { key: `model-${m}`, label: m, name: true, main: true, run: () => menu.pick({ action: 'route', fields: { provider, model: m }, text: `Switch to ${m}` }) }),
+          : { key: `model-${m}`, label: m, name: true, main: true, run: () => menu.pick({ action: 'route', fields: { provider, model: m }, text: W.switchTo(m) }) }),
         { key: 'back', label: '‹ back', run: () => act.ui({ switchStep: '' }) },
       ])
     }
     const ready = new Set(switchTargets(acct.view, acct.session.auth_id, acct.session.blocked).map(x => x.id))
-    return ask('Switch this session to:', '', [
+    return ask(W.switchMenu, '', [
       ...otherAccounts(acct.view, acct.session.auth_id).map((x): Act => ready.has(x.id)
-        ? { key: `to-${x.id}`, label: `${x.label} ${usedText(windowOf(x, '7d'))}`, name: true, main: true, run: () => menu.pick({ action: 'switch', fields: { auth_id: x.id }, text: `Switch to ${x.label}` }) }
+        ? { key: `to-${x.id}`, label: `${x.label} ${usedText(windowOf(x, '7d'))}`, name: true, main: true, run: () => menu.pick({ action: 'switch', fields: { auth_id: x.id }, text: W.switchTo(x.label) }) }
         : { key: `not-${x.id}`, label: cannotTake(x, acct.session.model, now), name: true }),
       ...(route ? [{ key: 'unroute', label: `back to ${providerTitle(menu.original)}`, main: true, run: () => menu.pick(menu.unroute) }] : []),
       ...menu.switchProviders.map((p): Act => ({ key: `prov-${p}`, label: `${providerTitle(p)} ›`, main: true, run: () => act.ui({ switchStep: p }) })),
@@ -334,20 +339,24 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
   // Without quota data from the proxy, the reason it gave goes first.
   if (bandError) return { key: 'alert', tone: 'warn', title: bandErrorText(bandError), detail: '', acts: [] }
   const alert = pickAlert(snap, acct, i.sess.proxied, now, ui.dismissedSwitch)
-  // What the proxy warns of goes before a cold turn; that the session moved, after it.
+  const live = liveRows(i, acct)
+  // The proxy's alerts go before a cold turn: a retry of the session's account, waiting or running,
+  // first; then the plugin's warnings; then the band's own hang watch. That the session moved, or
+  // stayed, comes after the cold turn.
+  if (live?.kind === 'retry' && !alert?.text.startsWith('quota data is')) return liveRow(live)
   if (alert && alert.action !== 'dismiss') {
     const fallback = acct ? snap?.config.fallback_map[acct.provider] : undefined
     const [fbProvider, fbModel] = (fallback ?? ':').split(':')
     const acts: Act[] = alert.action === 'route' && fbProvider && fbModel && menu.canSend
-      ? [{ key: 'route', label: `use ${fbModel}`, name: true, run: () => menu.pick({ action: 'route', fields: { provider: fbProvider, model: fbModel }, text: `Route to ${fbModel}` }) }]
+      ? [{ key: 'route', label: `use ${fbModel}`, name: true, run: () => menu.pick({ action: 'route', fields: { provider: fbProvider, model: fbModel }, text: W.routeTo(fbModel) }) }]
       : alert.action === 'handoff' && !working ? [handoff] : []
     return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts }
   }
+  if (live?.kind === 'watch') return liveRow(live)
   const cold = c.cold
   if (cold && !working && cold.tokens >= COLD_NOTICE_FLOOR && !coldConfirmed(cold, ui.coldDismissed)) {
     return {
-      key: 'alert', tone: 'warn', title: 'Next turn starts cold', detail: `${cold.why}; it ${rewriteText(cold.tokens, c.cost)}`,
-      brief: `${cold.why}; ${rewriteBrief(cold.tokens, c.cost)}`,
+      key: 'alert', tone: 'warn', ...W.coldTurn(cold.why, rewriteText(cold.tokens, c.cost), rewriteBrief(cold.tokens, c.cost)),
       acts: [handoff], close: { key: 'cold-ok', label: 'ok', run: () => act.ui({ coldDismissed: cold.key }) },
     }
   }
@@ -355,19 +364,52 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
     // Back to the account a move left, by today's switch and its question about a cold turn.
     const back = alert.back && acct && menu.canSend ? acct.view.credentials.find(c => c.id === alert.back) : undefined
     const acts: Act[] = back
-      ? [{ key: 'switch-back', label: 'switch back', run: () => menu.pick({ action: 'switch', fields: { auth_id: back.id }, text: `Switch to ${back.label}` }) }]
+      ? [{ key: 'switch-back', label: 'switch back', run: () => menu.pick({ action: 'switch', fields: { auth_id: back.id }, text: W.switchTo(back.label) }) }]
       : []
     return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts, close: { key: 'alert-ok', label: 'ok', run: () => act.ui({ dismissedSwitch: alert.key ?? '' }) } }
   }
   const used = f.ctx ? Math.round(100 - f.ctx.left) : 0
   if (settings.handoffAt > 0 && used >= settings.handoffAt && !working && (!ui.handoffDismissedAt || used >= ui.handoffDismissedAt + 10)) {
     return {
-      key: 'alert', tone: 'info', title: `Context ${used}% used`, detail: 'hand off to a new session that starts from a summary?',
+      key: 'alert', tone: 'info', ...W.context(used),
       acts: [handoff], close: { key: 'handoff-ok', label: 'ok', run: () => act.ui({ handoffDismissedAt: used }) },
     }
   }
   return null
 }
+
+/**
+ * The live rows, from the band's own main step and the plugin's retry of its account: while a retry
+ * waits or runs, shown only while the step has had no content since the first failure; else, a
+ * step with no content in its first 30 seconds (the hang watch). Times the plugin gives are on its
+ * clock, compared on the band's shifted by the skew of the last read.
+ */
+function liveRows(i: BandInput, acct: SessionAccount | null): (Words & { kind: 'retry' | 'watch' }) | null {
+  const step = i.live.step
+  if (!step || !acct) return null
+  const s = acct.session
+  const onBand = (iso: string) => Date.parse(iso) + i.live.skew
+  const label = (id: string | undefined) => acct.view.credentials.find(c => c.id === id)?.label
+  const next = label(s.takeover)
+  const r = s.retry
+  if (r) {
+    if (step.contentAt >= onBand(r.first_failure_at)) return null
+    const from = label(r.account) ?? 'this account'
+    const noQuota = otherAccounts(acct.view, r.account).filter(c => !c.disabled).every(c => c.unavailable)
+    if (r.try_started_at) return { kind: 'retry', ...W.running(from, r.cause, i.now - onBand(r.try_started_at), next, noQuota) }
+    const giveUpS = Math.round((Date.parse(r.give_up_at) - Date.parse(r.first_failure_at)) / 1000)
+    const pastGiveUp = Date.parse(r.next_try_at) > Date.parse(r.give_up_at)
+    return { kind: 'retry', ...W.waiting(from, r.cause, onBand(r.next_try_at) - i.now, pastGiveUp, giveUpS, next, noQuota) }
+  }
+  if (step.contentAt === 0 && i.now - step.startedAt >= HANG_WATCH_MS) return { kind: 'watch', ...W.hangWatch(i.now - step.startedAt, Boolean(next)) }
+  return null
+}
+
+/** A live row: a warning, which goes when it stops being true. */
+const liveRow = (w: Words): Row => ({ key: 'alert', tone: 'warn', title: w.text, detail: '', short: w.short, acts: [] })
+
+/** How long the band's main step goes with no content before it says so. */
+const HANG_WATCH_MS = 30_000
 
 /**
  * The cache card's caption: what is left of it and what keeping it warm did, or what a cold turn

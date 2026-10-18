@@ -1,5 +1,18 @@
 // Pure helpers for the band: no `$`, so the tests call them directly.
-import type { Auto, BandError, CacheInfo, ModelInfo, Pending, Snap, SnapCred, SnapProvider, SnapSession, SnapSwitch, SnapWindow } from '../types'
+import type { Auto, BandError, CacheInfo, ModelInfo, Pending, Snap, SnapCred, SnapProvider, SnapSession, SnapWindow, StepInfo } from '../types'
+import { fmtDuration, moveWhy, W } from './wording'
+
+export { bandErrorText, fmtDuration, fmtWait, moveWhy } from './wording'
+
+/**
+ * The band's main step after one of its chunks: content (text, thinking, a tool call or its input)
+ * moves its last content time, at most once a second, as what counts is whether content came since
+ * a moment; the engine's own items (its retry marker, the envelope) and the end never do.
+ */
+export function stepAfter(step: StepInfo | null, chunk: { kind: string }, at: number): StepInfo | null {
+  if (!step || chunk.kind === 'engine' || chunk.kind === 'stop' || at - step.contentAt < 1000) return step
+  return { ...step, contentAt: at }
+}
 
 /** Whether an account rests now: it serves only when nothing else can. */
 export const restingNow = (c: SnapCred | undefined, now: number): boolean => Boolean(c?.rest && Date.parse(c.rest.until) > now)
@@ -51,19 +64,6 @@ export const sev = (remainingPct: number): string => sevIn(C, remainingPct)
 const MIN = 60_000
 const HOUR = 60 * MIN
 const DAY = 24 * HOUR
-
-/** "3h 20m", "1d 3h", "52m", "now". */
-export function fmtDuration(ms: number): string {
-  if (ms <= 30_000) return 'now'
-  const total = Math.round(ms / MIN)
-  const d = Math.floor(total / (DAY / MIN))
-  const h = Math.floor((total % (DAY / MIN)) / 60)
-  const m = total % 60
-  if (d > 0) return `${d}d ${h}h`
-  if (h >= 10 || (h > 0 && m === 0)) return `${h}h`
-  if (h > 0) return `${h}h ${m}m`
-  return `${Math.max(1, m)}m`
-}
 
 /** "412k", "1.2M", "1M", "830". */
 export function fmtTokens(n: number): string {
@@ -308,84 +308,6 @@ export type Alert = { level: 'warn' | 'info'; text: string; short?: string; acti
 const movesNextTurn = (s: SnapSession | undefined): boolean =>
   Boolean(s?.switch_imminent && (s.switch_reason?.startsWith('resting') || s.switch_reason === 'got no answer'))
 
-/** "45s", "2m 15s", "2m", "1h 5m": a wait as long as the seconds matter. */
-export function fmtWait(ms: number): string {
-  const s = Math.max(1, Math.round(ms / 1000))
-  if (s < 60) return `${s}s`
-  if (s < 3600) return s % 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s / 60}m`
-  const m = Math.round(s / 60)
-  return m % 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m / 60}h`
-}
-
-const times = (n: number | undefined) => (n && n > 1 ? (n === 2 ? ' twice' : ` ${n} times`) : '')
-
-/**
- * Why a session left `from`, worded from its switch record and never from the account's state
- * now: `why` for the row, `short` for a narrow one. The Codex notice says the same words
- * (tests/moves.json holds both sides' expected wording). A record from an older plugin says only
- * what it can confirm.
- */
-export function moveWhy(sw: SnapSwitch, from: string, now: number): { why: string; short: string } {
-  const c = sw.cause ?? {}
-  const status = c.status ? ` (HTTP ${c.status})` : ''
-  const said = (why: string, short = why.split('; ')[0]!) => ({ why, short })
-  if (sw.kind === 'rest') {
-    // The failures that rested it, while their kind agrees, and when it is tried again.
-    const left = Date.parse(c.until ?? '') - now
-    const what = c.kind ? failedWhy(c, from) : `${from} resting after ${c.count ?? 2} failures`
-    return left > 0 ? { why: c.kind ? `${what}; resting, back in ${fmtDuration(left)}` : what, short: `${from} resting` } : said(what)
-  }
-  switch (sw.kind) {
-    case undefined:
-    case '':
-      if (sw.reason.includes('by user')) return said('switched by you')
-      return said(sw.reason.startsWith('moved while idle') ? 'moved while idle' : 'reason not recorded')
-    case 'user':
-      return said('switched by you')
-    case 'quota':
-      return said(`${from} ${c.reason || 'quota used up'}`)
-    case 'idle':
-      return said(c.reason ? `${from} ${c.reason}; moved while idle` : 'moved while idle')
-    case 'gone':
-      return said(c.reason === 'disabled' ? `${from} is disabled` : `${from} was removed`)
-    case 'sign-in':
-      return said(`${from} refused sign-in${status}`)
-    case 'model':
-      return said(`${from} cannot serve ${(c.model ?? 'this model').replace(/^claude-/, '')}`)
-    case 'left-out':
-      return said(`the proxy left ${from} out; no failure recorded`, 'reason unknown')
-  }
-  return said(failedWhy(c, from) + retryTail(c), c.kind === 'hang' ? `${from} hung` : undefined)
-}
-
-/** How the last retry failed, when that says more than its count: "; the retry got no answer". */
-function retryTail(c: NonNullable<SnapSwitch['cause']>): string {
-  const r = c.last_retry
-  if (!r || (r.kind === c.kind && r.kind !== 'request')) return ''
-  if (r.kind === 'request') return r.answered ? '; the retry was cancelled' : '; the retry got no answer'
-  return `; ${failedWhy({ ...r, count: 1 }, 'the retry')}`
-}
-
-/** What a failure, or a run of failures of one kind, did: "d••• returned HTTP 529 twice". */
-function failedWhy(c: NonNullable<SnapSwitch['cause']>, from: string): string {
-  const n = times(c.count)
-  switch (c.kind) {
-    case 'hang':
-      return n ? `${from} hung${n}` : `${from} hung for ${fmtWait(c.wait_ms ?? 0)}`
-    case 'connection':
-      return `${from} lost its connection${n}`
-    case 'timeout':
-      return `${from} timed out${n}`
-    case 'overloaded':
-      return `${from} returned HTTP ${c.status || 529}${n}`
-    case 'server':
-      return `${from} returned HTTP ${c.status}${n}`
-    case 'rate':
-      return `${from} was rate-limited${n}`
-  }
-  return `${from} failed${c.status ? ` (HTTP ${c.status})` : ''}${n}`
-}
-
 /**
  * The single alert the band shows, most important first. Confirmations and notices are drawn
  * by the caller before this.
@@ -393,7 +315,7 @@ function failedWhy(c: NonNullable<SnapSwitch['cause']>, from: string): string {
 export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxied: boolean, now: number, dismissed = ''): Alert | null {
   if (proxied && snap) {
     const age = now - Date.parse(snap.generated_at)
-    if (age > 3 * MIN) return { level: 'warn', text: `quota data is ${fmtDuration(age)} old; is the proxy running?` }
+    if (age > 3 * MIN) return { level: 'warn', ...W.stale(fmtDuration(age)) }
   }
   if (!acct || !snap) return null
   const { session, view, provider } = acct
@@ -401,25 +323,14 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
   if (view.health === 'exhausted' && !session.route) {
     const fallback = snap.config.fallback_map[provider]
     const back = nextUp(view, '', now)
-    return {
-      level: 'warn',
-      text: `${provider} accounts are used up · ${back}`,
-      action: fallback ? 'route' : undefined,
-    }
+    return { level: 'warn', ...W.exhausted(provider, back), action: fallback ? 'route' : undefined }
   }
   if (session.switch_imminent && movesNextTurn(session)) {
     // A resting account, or one whose retry got no answer, gives its session to the account the
     // plugin names, at its next turn.
     const label = acct.cred?.label ?? 'this account'
     const next = view.credentials.find(c => c.id === session.next_auth_id)
-    const resting = session.switch_reason!.startsWith('resting')
-    if (next) {
-      return {
-        level: 'warn',
-        text: `${label} ${session.switch_reason} · moves to ${next.label} (${usedText(windowOf(next, '7d'))}) on the next turn`,
-        short: resting ? `${label} resting · moves to ${next.label} next turn` : `${label} ${session.switch_reason} · moves next turn`,
-      }
-    }
+    if (next) return { level: 'warn', ...W.movesNext(label, session.switch_reason!, next.label, usedText(windowOf(next, '7d'))) }
   }
   if (session.switch_imminent && !movesNextTurn(session)) {
     // An account read as used up often answers a while longer: the session moves once it refuses.
@@ -427,18 +338,23 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
     const label = acct.cred?.label ?? 'this account'
     const next = view.credentials.find(c => c.id === session.next_auth_id)
     const when = reason.endsWith('used up') ? `once ${label} stops answering` : 'on the next turn'
-    const tail = next ? `moves to ${next.label} (${usedText(windowOf(next, '7d'))}) ${when}` : 'no other account has quota'
-    return { level: 'warn', text: `${reason} on ${label} · ${tail}` }
+    return { level: 'warn', ...W.limited(reason, label, next?.label ?? null, next ? usedText(windowOf(next, '7d')) : '', when) }
+  }
+  // A retry that kept the session where it was shows for 15 minutes, or until dismissed, unless a
+  // move came after it.
+  const kept = session.retry_outcome
+  const sw = session.last_switch
+  if (kept && kept.at !== dismissed && now - Date.parse(kept.at) < 15 * MIN && (!sw || Date.parse(sw.at) < Date.parse(kept.at))) {
+    const from = view.credentials.find(c => c.id === kept.account)?.label ?? 'its account'
+    return { level: 'info', ...W.kept(from, kept.cause, kept.after_ms, kept.cache_read), action: 'dismiss', key: kept.at }
   }
   // A move shows for 15 minutes, or until dismissed, and says why the session left, from its
   // record; `switch back` while quota-pilot says the account it left can take the session again.
-  const sw = session.last_switch
   if (sw && sw.at !== dismissed && now - Date.parse(sw.at) < 15 * MIN) {
     const from = view.credentials.find(c => c.id === sw.from)?.label ?? 'previous account'
     const to = view.credentials.find(c => c.id === sw.to)?.label ?? 'another account'
-    const { why, short } = moveWhy(sw, from, now)
     const back = session.switch_back && session.switch_back === sw.from && sw.kind !== 'user' ? sw.from : undefined
-    return { level: 'info', text: `Switched ${from} → ${to} · ${why}`, short: `Switched ${from} → ${to} · ${short}`, action: 'dismiss', key: sw.at, back }
+    return { level: 'info', ...W.moved(from, to, moveWhy(sw, from, now)), action: 'dismiss', key: sw.at, back }
   }
   return null
 }
@@ -486,14 +402,6 @@ export function readBand(status: number, text: string): { snap: Snap; error: nul
 }
 
 /** Why the band has no quota data from the proxy, in words. */
-export function bandErrorText(error: BandError): string {
-  if (error.kind === 'network') return `cannot reach the proxy for quota data: ${error.message}`
-  if (error.kind === 'body') return "the proxy's quota data is not in a form this band reads; are both the same version?"
-  if (error.status === 401) return 'quota data comes once this key has sent a request through the proxy'
-  if (error.status === 404) return 'the proxy has no quota-pilot band route (404); is the plugin installed there?'
-  return `the proxy answered HTTP ${error.status} for quota data`
-}
-
 // A command goes with the band's next read of /band, which answers with its acknowledgement: a
 // minute without one means the proxy is not answering.
 const PENDING_MS = MIN
@@ -512,13 +420,11 @@ export function settlePending(pending: readonly Pending[], snap: Snap | null, no
   for (const p of pending) {
     const ack = snap?.acks.find(a => a.command_id === p.id)
     if (ack) {
-      notice = ack.status === 'applied'
-        ? { text: `${p.text}: done`, isError: false }
-        : { text: `${p.text}: ${ack.reason ?? 'rejected'}`, isError: true }
+      notice = ack.status === 'applied' ? { text: W.done(p.text), isError: false } : { text: W.refused(p.text, ack.reason), isError: true }
     } else if (snap && snap.boot_id !== p.boot) {
-      notice = { text: `${p.text}: the proxy restarted before confirming it`, isError: true }
+      notice = { text: W.restarted(p.text), isError: true }
     } else if (now - p.at > PENDING_MS) {
-      notice = { text: `${p.text}: no answer from the proxy; is it running?`, isError: true }
+      notice = { text: W.unanswered(p.text), isError: true }
     } else {
       left.push(p)
     }
