@@ -86,6 +86,7 @@
     "used_value": "已用 {{value}}%",
     "pool_unread": "還沒讀到：{{list}}",
     "no_window": "沒有這個額度",
+    "no_limits": "供應商沒有另設這些額度：{{list}}",
     "same_as": "與 {{account}} 是同一個帳號"
   },
   "quota_usage": {

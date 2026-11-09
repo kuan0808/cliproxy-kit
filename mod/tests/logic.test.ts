@@ -151,6 +151,9 @@ describe('prices', () => {
     // Opus 5.5: $8 a million for a 1-hour write, $5 for a 5-minute one, $0.20 to read.
     expect(turnCost('claude-opus-5-5', 1_000_000, H)).toEqual({ cold: 8, warm: 0.2 })
     expect(turnCost('claude-opus-5-5[1m]', 1_000_000, 5 * 60_000)).toEqual({ cold: 5, warm: 0.2 })
+    expect(turnCost('claude-fable-5-2', 1_000_000, H)).toEqual({ cold: 16, warm: 0.2 })
+    expect(turnCost('claude-mythos-5-2', 1_000_000, 5 * 60_000)).toEqual({ cold: 10, warm: 0.2 })
+    expect(turnCost('claude-fable-5-1', 1_000_000, H)).toEqual({ cold: 20, warm: 0.25 })
     expect(turnCost('claude-sonnet-4-5-20250929', 1_000_000, H)?.cold).toBe(6)
     // Haiku 5.5 and OpenAI's models cost more past a prompt size.
     expect(Number(turnCost('claude-haiku-5-5', 100_000, H)?.cold.toFixed(6))).toBe(0.02)

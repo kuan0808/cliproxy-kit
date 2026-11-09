@@ -29,6 +29,34 @@ beforeAll(async () => {
 });
 
 describe('QuotaLedger rendering', () => {
+  test('a limit no account of a provider has is said once for the provider, not left out in silence', () => {
+    const weeklyOnly = normalizeQuotaPilotSnapshot({
+      ...rawSnapshot,
+      providers: {
+        claude: {
+          health: 'healthy',
+          credentials: [
+            {
+              id: 'claude-a@example.com.json',
+              label: 'a•••',
+              plan: 'Ultra',
+              order: 1,
+              tier: 1,
+              reason: 'weekly quota resets soonest',
+              windows: [
+                { kind: '7d', label: 'Weekly', remaining: 0.6, reset_at: '2026-10-10T00:00:00Z' },
+              ],
+              absent: ['5h', '7d_fable'],
+            },
+          ],
+        },
+      },
+    })!;
+    const markup = render({ snapshot: { status: 'live', snapshot: weeklyOnly, failure: null } });
+    expect(markup).toContain('The provider reports no separate quota for: 5-hour, Weekly Fable');
+    expect(markup).not.toContain('>5-hour used<');
+  });
+
   test('live: overview, routing markers, stale marker and the footer line', () => {
     const markup = render();
     expect(markup).toContain('Live routing from the quota-pilot plugin');

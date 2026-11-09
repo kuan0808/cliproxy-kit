@@ -42,10 +42,11 @@ takes, in order:
 
 1. the account the user switched the session to, when it is offered;
 2. accounts with weekly quota left for the model and enough of their 5-hour window: at least
-   `min_five_hour_left_percent` (25 by default) left, or a reset within 30 minutes. Among these the
-   soonest weekly reset comes first, so quota that would expire unused is used first; a model with
-   a weekly window of its own (Fable) goes by that window's reset;
-3. accounts whose quota is not known yet;
+   `min_five_hour_left_percent` (25 by default) left, or a reset within 30 minutes. An account whose
+   plan has no 5-hour window, as its usage reading says, needs none. Among these the soonest weekly
+   reset comes first, so quota that would expire unused is used first; a model with a weekly window
+   of its own (Fable) goes by that window's reset;
+3. accounts whose quota is not known yet, a Claude account's 5-hour window not read yet included;
 4. accounts low on their 5-hour window, or used up.
 
 Within each, an account that can serve the model comes before one that cannot (its own weekly
@@ -197,12 +198,19 @@ Polling pauses after 15 minutes without any request, because a plugin turned off
 never told, and resumes with the next one; the page's Refresh reads every account at once and says
 which it could not read and why (its login, refused, asked to slow down, another status, the
 network, an unreadable answer, or out of time). A usage-endpoint reading is complete: a window it does
-not name (a Codex plan without a 5-hour window, a Claude model window such as Fable's that the
-account lacks) is gone, and the band and the page say the account has no such limit; a Claude answer
-that names no window at all is no reading. Headers name only some windows and never remove one. A Claude account's
-plan is read from its profile, whether or not its usage read worked, when first seen, every hour,
-on Refresh and after its window started over; a Codex plan comes with each usage reading. The last
-readings survive a restart in `state.json`, marked stale as they age.
+not name (a plan without a 5-hour window, Codex's or Claude's) is gone, and the band and the page
+say the account has no such limit; a Claude answer that names no window at all is no reading.
+Headers name only some windows and never remove one. A Claude model's own weekly limit (Fable's)
+comes two ways, as Claude Code reads them: in the headers as the window `7d_oi`, and in the usage
+endpoint as a `weekly_scoped` row of `limits` named by its model. One that a header named goes only
+when a usage reading carries `limits` and leaves the model out, as a reading without `limits` says
+nothing of it; one that nothing named is a limit the account does not have. The ledger names, once
+for each provider, the limits none of its accounts has. A
+Claude account's plan is read from its profile (the provider's own name for it,
+`plan_display_name`, else told from the profile's other fields), whether or not its usage read
+worked, when first seen, every hour, on Refresh and after its window started over; a Codex plan
+comes with each usage reading. The last readings survive a restart in `state.json`, marked stale as
+they age.
 
 The live state and the report follow one set of window rules (`core/window.go`):
 
@@ -252,7 +260,7 @@ and moves`.
 The kind is read from the status, the error body, `ttft` and the wait, in that order: a client
 cancel (499) and what the proxy itself reads as the request's fault (`core/faults.go`, pinned
 against the proxy below) are `request`; a model the account does not serve is `model`; a 429 while
-the account reads as used up is `quota`; 401, 402, 403 and a refused grant are `sign-in`; no
+the account reads as used up, by that response's own quota headers too, is `quota`; 401, 402, 403 and a refused grant are `sign-in`; no
 response within the hang time (see the constants under
 [When an account fails](#when-an-account-fails)) is `hang`; then a lost connection, a timeout, a
 529, any other 5xx, a 429, anything else. A compact request's failure is `request` unless it is a
@@ -492,7 +500,8 @@ quota through the proxy: CLIProxyAPI does not pass on the rate-limit events its 
 
 ## Upstream behaviour it relies on
 
-Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296:
+Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296; the quota headers, the usage endpoint's
+`limits` and the profile's plan name against Claude Code 2.1.321:
 
 - A scheduler plugin that handles a pick bypasses the native selector, session affinity included.
 - Pick requests carry `canonical_session_id` (`claude:<session>`, with `:agent:<id>` for a
@@ -519,7 +528,10 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296:
 What CLIProxyAPI does around a failed attempt is pinned by the proxy contract test, which runs the
 proxy's own account manager, API handlers and, in `plugin/contract_service_test.go`, its real
 executors against a stub upstream, all in-process (`go test ./...` in `plugin/`; checked against
-8.0.15 and 8.0.16). A proxy update that changes any of this fails that test:
+8.0.15 and 8.0.16). A proxy update that changes any of this fails that test, as 8.0.62 does: it
+builds, but there a declined pick stops the request at once with a 503 carrying the reason, where
+8.0.16 ends the round with the failed attempt's error and runs the next one, so the eleven tests
+of a decline after a failure fail, and a retry comes only with Claude Code's own (see Limitations):
 
 - When quota-pilot declines the next pick of the same round after an attempt on A failed
   (`TestADeclineAfterAFailureWithThreeRetryRounds`): after a dropped or reset connection the proxy
@@ -586,6 +598,10 @@ back, so the band takes only that end as proof the turn stopped.
 
 ## Limitations
 
+- CLIProxyAPI 8.0.62 answers a declined pick with a 503 at once (checked 2026-11-10; 8.0.15 and
+  8.0.16 do as described above): on it no retry stays inside its request, every retry on the bound
+  account is one of Claude Code's own, and the client sees the 503 with quota-pilot's reason in
+  place of the account's own failure. The contract test and this page follow 8.0.16.
 - Rests and trials live in memory, like refusals: a proxy restart forgets them. An account that
   alternates failure and success never rests, as each success starts the count over.
 - A failure's record that reaches quota-pilot later than the record wait after the next pick costs

@@ -1,6 +1,9 @@
 package core
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // A quota window's readings come from two sources that trail each other, the response headers and
 // the usage endpoint, so one set of rules decides which reading tells what a window has used, for
@@ -221,8 +224,10 @@ func (c *Cred) planChanged(at time.Time) {
 }
 
 // absentAfter takes a full reading of the provider's usage endpoint: a window kind it does not name
-// is one the account does not have (a plan without a 5-hour window, a model window gone).
-func (c *Cred) absentAfter(windows []Window) {
+// is one the account does not have (a plan without a 5-hour window, no weekly limit of Fable's own).
+// A model's own weekly window that a header named is the exception: it goes only when the reading
+// lists such windows (scoped) and leaves it out, as one that does not list them says nothing of it.
+func (c *Cred) absentAfter(windows []Window, scoped bool) {
 	named := map[string]bool{}
 	for _, w := range windows {
 		named[w.Kind] = true
@@ -230,20 +235,22 @@ func (c *Cred) absentAfter(windows []Window) {
 	// Every kind such a reading can name, as a Claude model's own window another account has.
 	kinds := []string{KindFiveHour, KindWeekly}
 	if c.Provider == "claude" {
-		kinds = claudePollKinds
+		kinds = append(append([]string(nil), claudeKeyedKinds...), "7d_fable")
 	}
-	kinds = append([]string(nil), kinds...)
 	for kind := range c.Windows {
 		kinds = append(kinds, kind)
 	}
 	for _, kind := range kinds {
-		if !named[kind] {
-			delete(c.Windows, kind)
-			delete(c.tracks, kind)
-			if c.Absent == nil {
-				c.Absent = map[string]bool{}
-			}
-			c.Absent[kind] = true
+		_, held := c.Windows[kind]
+		keyed := c.Provider != "claude" || slices.Contains(claudeKeyedKinds, kind)
+		if named[kind] || held && !keyed && !scoped {
+			continue
 		}
+		delete(c.Windows, kind)
+		delete(c.tracks, kind)
+		if c.Absent == nil {
+			c.Absent = map[string]bool{}
+		}
+		c.Absent[kind] = true
 	}
 }

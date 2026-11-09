@@ -269,6 +269,12 @@ $track: color-mix(in srgb, var(--text-primary) 9%, transparent);
   color: var(--text-secondary);
 }
 
+.groupNote {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
 .rows {
   margin: 0;
   padding: 0;

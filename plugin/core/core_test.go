@@ -590,24 +590,24 @@ func TestCodexHeadersAndBodies(t *testing.T) {
 		t.Fatalf("codex header windows = %+v", ws)
 	}
 	body := []byte(`{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":1791010000},"secondary_window":null}}`)
-	ws, full := WindowsFromUsageBody("codex", body, now)
+	ws, full, _ := WindowsFromUsageBody("codex", body, now)
 	if !full || len(ws) != 1 || ws[0].Kind != "5h" || ws[0].Remaining != 0.8 {
 		t.Fatalf("codex body windows = %+v", ws)
 	}
-	claude := []byte(`{"five_hour":{"utilization":14,"resets_at":"2026-10-04T01:10:00.49+00:00"},"seven_day":{"utilization":33,"resets_at":"2026-10-10T00:00:00+00:00"},"iguana_necktie":{"utilization":null},"extra_usage":{"utilization":null}}`)
-	if ws, full = WindowsFromUsageBody("claude", claude, now); !full || len(ws) != 2 {
+	claude := []byte(`{"five_hour":{"utilization":14,"resets_at":"2026-10-04T01:10:00.49+00:00"},"seven_day":{"utilization":33,"resets_at":"2026-10-10T00:00:00+00:00"},"extra_usage":{"utilization":null}}`)
+	if ws, full, _ = WindowsFromUsageBody("claude", claude, now); !full || len(ws) != 2 {
 		t.Fatalf("claude body windows = %+v", ws)
 	}
-	if _, full = WindowsFromUsageBody("codex", []byte(`{"error":"x"}`), now); full {
+	if _, full, _ = WindowsFromUsageBody("codex", []byte(`{"error":"x"}`), now); full {
 		t.Fatal("an answer without rate limits read as a full reading")
 	}
 	// A Claude answer that names no window says nothing of them; one naming a window as null does.
 	for _, body := range []string{`null`, `{}`, `{"error":"temporarily unavailable"}`} {
-		if _, full = WindowsFromUsageBody("claude", []byte(body), now); full {
+		if _, full, _ = WindowsFromUsageBody("claude", []byte(body), now); full {
 			t.Fatalf("%s read as a full reading", body)
 		}
 	}
-	if ws, full = WindowsFromUsageBody("claude", []byte(`{"five_hour":null,"seven_day":{"utilization":10}}`), now); !full || len(ws) != 1 {
+	if ws, full, _ = WindowsFromUsageBody("claude", []byte(`{"five_hour":null,"seven_day":{"utilization":10}}`), now); !full || len(ws) != 1 {
 		t.Fatalf("a reading without a 5-hour window = %+v %v", ws, full)
 	}
 	// A WebSocket quota event says only how long is left.
@@ -1353,7 +1353,7 @@ func TestTheLiveStateFollowsTheWindowRules(t *testing.T) {
 		t.Fatalf("late readings moved the window: %v", got)
 	}
 	// A full reading without a 5-hour window: the account has none, rather than one not read.
-	s.MergePoll("claude-a", "claude", []Window{{Kind: KindWeekly, Remaining: 0.5, ResetAt: reset, ObservedAt: c.t.Add(41 * time.Minute)}})
+	s.MergePoll("claude-a", "claude", []Window{{Kind: KindWeekly, Remaining: 0.5, ResetAt: reset, ObservedAt: c.t.Add(41 * time.Minute)}}, false)
 	if _, present, absent := s.FiveHour("claude-a"); present || !absent {
 		t.Fatal("5-hour window not absent")
 	}
@@ -1383,7 +1383,7 @@ func TestAfterAPlanChangeASmallFallStartsTheWindowOver(t *testing.T) {
 // (it was set back since) does not count as fresh.
 func TestARestartKeepsAbsenceAndDistrustsTheFuture(t *testing.T) {
 	s, c := newTestState()
-	s.MergePoll("codex-a", "codex", []Window{{Kind: KindWeekly, Remaining: 0.5, ResetAt: c.t.Add(24 * time.Hour), ObservedAt: c.t.Add(time.Hour)}})
+	s.MergePoll("codex-a", "codex", []Window{{Kind: KindWeekly, Remaining: 0.5, ResetAt: c.t.Add(24 * time.Hour), ObservedAt: c.t.Add(time.Hour)}}, false)
 	saved := s.Export()
 	r, _ := newTestState()
 	r.Import(saved)
@@ -1398,7 +1398,7 @@ func TestARestartKeepsAbsenceAndDistrustsTheFuture(t *testing.T) {
 	}
 	// A Claude reading that names no model window of its own says the account has none: one
 	// another account has shows as no such quota here, not as not reported.
-	s.MergePoll("claude-a", "claude", []Window{{Kind: KindFiveHour, Remaining: 0.9, ObservedAt: c.t}, {Kind: KindWeekly, Remaining: 0.5, ObservedAt: c.t}})
+	s.MergePoll("claude-a", "claude", []Window{{Kind: KindFiveHour, Remaining: 0.9, ObservedAt: c.t}, {Kind: KindWeekly, Remaining: 0.5, ObservedAt: c.t}}, false)
 	var absent []string
 	for _, cv := range s.Build().Providers["claude"].Credentials {
 		if cv.ID == "claude-a" {

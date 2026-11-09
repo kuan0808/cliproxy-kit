@@ -257,7 +257,7 @@ Cards while Claude waits, one line while it works:
 | On the band | Means |
 | --- | --- |
 | **Account** | The account the proxy gave this session (`expected` before its first request), its plan and the model. |
-| **5-hour**, **Weekly** | That account's use of each window, and when it resets. |
+| **5-hour**, **Weekly** | That account's use of each window, and when it resets. A plan without a 5-hour limit reads `no such limit`; a model with a weekly limit of its own (Fable) shows that one, as `Weekly Fable`, while it has less left than the week. |
 | **Context** | How full the conversation is. |
 | **Cache** | Time left before the prompt cache goes cold, with `kept warm 0/3` counting refreshes while keeping it warm is on; once cold, what the next turn rewrites and costs. |
 | **Accounts** | Every account's weekly use, and the one a switch or a new session gets next. |
@@ -346,7 +346,7 @@ On the panel's **Plugins** page, or under `plugins.configs.quota-pilot` in `conf
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `min_five_hour_left_percent` | `25` | A new session is not given an account with less of its 5-hour window left, unless that window resets within 30 minutes. |
+| `min_five_hour_left_percent` | `25` | A new session is not given an account with less of its 5-hour window left, unless that window resets within 30 minutes. An account whose plan has no 5-hour window is ranked by its week alone. |
 | `cross_provider` | `off` | `auto` moves Claude Code sessions to the `fallback_map` model when every account of their provider is used up; `off` leaves that to `switch`. |
 | `fallback_map` | none | The model each provider moves to, as `provider: provider:model`, for example `claude: codex:gpt-6.1-sol`. |
 | `idle_poll_minutes` | `10` | How often idle accounts' quota is read. |
@@ -436,7 +436,8 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | The page or the band is slow while the Mac is busy | Homebrew runs the proxy as a low-priority service. Add `ProcessType` `Interactive` to `~/Library/LaunchAgents/sh.brew.cliproxyapi.plist` (`plutil -replace ProcessType -string Interactive <file>`), then load it again with `launchctl bootout gui/$(id -u)/sh.brew.cliproxyapi` and `launchctl bootstrap gui/$(id -u) <file>`. `brew services restart` writes the file anew. |
 | Codex sessions are missing from the page | Codex does not use the proxy yet (step 4). |
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
-| A Codex account has no 5-hour window | Its plan has none; the page and the band say so. |
+| An account has no 5-hour window | Its plan has none (a Codex plan, a Claude plan without the 5-hour limit); the page and the band say so, and it is ranked by its week alone. |
+| The ledger has no `Weekly Fable` meter | The provider reports no separate Fable limit for those accounts: Fable draws on their week. The ledger says so under the provider's name, and shows the meter as soon as the provider names one. |
 | The band says `Switched d••• → k••• · reason not recorded` | quota-pilot is older than the band and does not record why a session moved: update it from the panel's Plugin Store. |
 | The band says `retrying it in about 50s`, or Claude Code shows `API error · Retrying` with `quota-pilot: … retrying it in about 50s` | quota-pilot keeps the request on the session's own account for a retry, so the prompt cache stays. The turn goes on there once the retry answers, or on the account named once its retries end; `switch to k•••` on the band stops waiting now. |
 | The band says `retrying it, 2m so far` | The retry hangs too. `switch to k•••` stops waiting now; or Esc and send again, and the session moves. |

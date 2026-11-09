@@ -40,6 +40,49 @@ describe('ledger', () => {
     expect(claude.nextReset?.atMs).toBe(Date.parse('2026-10-04T11:59:59Z'));
   });
 
+  test('a limit the provider says none of its accounts has is named for the group; one not read yet is not', () => {
+    const window = (kind: string, remaining: number) => ({
+      kind,
+      remaining,
+      reset_at: '2026-10-10T00:00:00Z',
+    });
+    const plans = (third: object[]) =>
+      buildLedger(
+        normalizeQuotaPilotSnapshot({
+          providers: {
+            claude: {
+              credentials: [
+                {
+                  id: 'claude-a.json',
+                  label: 'a•••',
+                  windows: [window('7d', 0.6)],
+                  absent: ['5h', '7d_fable', '7d_opus'],
+                },
+                {
+                  id: 'claude-b.json',
+                  label: 'b•••',
+                  windows: [window('7d', 0.4), window('7d_opus', 0.9)],
+                  absent: ['7d_fable', '5h'],
+                },
+                ...third,
+              ],
+            },
+          },
+        })!,
+        'all',
+        '',
+        NOW_MS
+      ).groups[0];
+    // b has an Opus window, so only the 5-hour and Fable ones are no account's.
+    expect(plans([]).noLimit).toEqual(['5h', '7d_fable']);
+    // c's 5-hour window is only not read yet: nothing says the plan has none.
+    expect(
+      plans([
+        { id: 'claude-c.json', label: 'c•••', windows: [window('7d', 0.5)], absent: ['7d_fable'] },
+      ]).noLimit
+    ).toEqual(['7d_fable']);
+  });
+
   test('a pool holds every account with the window, and names those not read yet', () => {
     const window = (kind: string, remaining: number) => ({ kind, remaining, reset_at: '2026-10-10T00:00:00Z' });
     const pools = normalizeQuotaPilotSnapshot({

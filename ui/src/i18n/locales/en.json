@@ -94,6 +94,7 @@
     "used_value": "{{value}}% used",
     "pool_unread": "Not read yet: {{list}}",
     "no_window": "No such quota",
+    "no_limits": "The provider reports no separate quota for: {{list}}",
     "same_as": "Same account as {{account}}"
   },
   "quota_usage": {

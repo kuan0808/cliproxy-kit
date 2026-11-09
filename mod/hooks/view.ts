@@ -212,6 +212,9 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     note = 'no quota data'
   }
   const shownCred = acct?.cred ?? likely?.cred
+  // On a direct login Claude Code reports the account's limits after a reply: once it has, one it
+  // does not name is one the plan does not have.
+  const reported = !sess.proxied && sess.rateLimits.length > 0
   const poolView = acct?.view ?? (likely ? snap?.providers[likely.provider] : undefined)
   const poolCurrent = acct?.session.auth_id ?? likely?.cred.id ?? ''
   const all = poolView && poolView.credentials.length ? pooled(poolView) : null
@@ -250,8 +253,8 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     isCodex,
     five,
     week,
-    fiveMissing: missingText(shownCred, '5h'),
-    weekMissing: missingText(shownCred, '7d'),
+    fiveMissing: reported ? 'no such limit' : missingText(shownCred, '5h'),
+    weekMissing: reported ? 'no such limit' : missingText(shownCred, '7d'),
     ctx,
     cache: { ...cs, rate: hitRate(cache), cold, cost, tokens: cache.prompt, warmed: cache.warmed, keepWarm: settings.keepWarm, keepWarmOn: autoState('keepWarm', settings, i.auto, i.unattended).on },
     holdOn: autoState('holdCold', settings, i.auto, i.unattended).on,

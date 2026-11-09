@@ -724,6 +724,22 @@ test("band in the desktop app, signed in to Claude directly, shows that account'
   }
 })
 
+test('band on a direct login to a plan with no 5-hour limit says so, once Claude Code has reported its limits', async ($, on) => {
+  const clock = stubSession(on, SNAP, { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'https://api.anthropic.com' })
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const five = async () => {
+    const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+    const tile = await ui.find({ key: 'five' })
+    await ui.unmount()
+    return tile?.text ?? ''
+  }
+  // Before any reply Claude Code reports no limit at all: nothing is known yet.
+  expect(await five()).toMatch(/after the first reply/)
+  limits = [{ kind: 'seven_day', percentUsed: 12, resetsAt: iso(50 * H) }]
+  await clock.advance(10_000)
+  expect(await five()).toMatch(/no such limit/)
+})
+
 test('a cold turn is told before it is sent: why, how much it rewrites, and what it costs', async ($, on) => {
   const clock = stubSession(on, SNAP)
   stepReplies(on)

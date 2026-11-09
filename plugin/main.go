@@ -1013,7 +1013,8 @@ func pollCredential(ctx context.Context, j pollJob) (r pollResult) {
 	} else {
 		headers["anthropic-beta"] = []string{"oauth-2025-04-20"}
 		headers["Content-Type"] = []string{"application/json"}
-		headers["User-Agent"] = []string{"claude-cli/2.1.288 (external, cli)"}
+		// The Claude Code version whose reading of these two endpoints the parsing follows.
+		headers["User-Agent"] = []string{"claude-cli/2.1.321 (external, cli)"}
 	}
 	if j.usage {
 		body, status, errDo := httpGet(ctx, url, headers)
@@ -1028,8 +1029,8 @@ func pollCredential(ctx context.Context, j pollJob) (r pollResult) {
 		case status != http.StatusOK:
 			fail("http", status, fmt.Sprintf("HTTP %d", status))
 		default:
-			if windows, full := core.WindowsFromUsageBody(info.Provider, body, r.at); full {
-				state.MergePoll(info.ID, info.Provider, windows)
+			if windows, full, scoped := core.WindowsFromUsageBody(info.Provider, body, r.at); full {
+				state.MergePoll(info.ID, info.Provider, windows, scoped)
 				if info.Provider == "codex" {
 					state.SetPlan(info.ID, info.Provider, core.CodexPlan(body))
 				}

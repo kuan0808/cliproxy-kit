@@ -660,6 +660,8 @@ func (s *State) UpdateInventory(list []CredInfo) {
 	for id := range s.creds {
 		if !seen[id] {
 			delete(s.creds, id)
+			delete(s.listed, id)
+			delete(s.failedAt, id)
 		}
 	}
 	s.inventoryLoaded, s.inventoryAt = true, s.now()
@@ -782,8 +784,8 @@ func (s *State) MergeWindows(authID, provider string, windows []Window) {
 }
 
 // MergePoll stores a full reading of the provider's usage endpoint: the windows it names, and the
-// absence of those it does not.
-func (s *State) MergePoll(authID, provider string, windows []Window) {
+// absence of those it does not; scoped says it lists each model's own weekly window too.
+func (s *State) MergePoll(authID, provider string, windows []Window, scoped bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if authID == "" {
@@ -791,7 +793,7 @@ func (s *State) MergePoll(authID, provider string, windows []Window) {
 	}
 	s.mergeWindowsLocked(authID, provider, windows)
 	if c := s.memberLocked(authID, provider); c != nil {
-		c.absentAfter(windows)
+		c.absentAfter(windows, scoped)
 		s.dirty = true
 	}
 	s.logReadingLocked(authID, provider, windows)
@@ -864,6 +866,16 @@ func (s *State) Observe(u Usage) {
 		model = tr.Model
 	}
 	root := RootSession(u.SessionID, u.ParentID)
+	// What the response itself read of the quota is taken first: a refusal whose own headers say a
+	// window is used up is a quota refusal, not a rate limit to retry.
+	var windows []Window
+	if u.AuthID != "" && supported {
+		if c := s.memberLocked(u.AuthID, provider); c != nil && u.AuthIndex != "" {
+			c.Index = u.AuthIndex
+		}
+		windows = WindowsFromHeaders(provider, u.ResponseHeader, at)
+		s.mergeWindowsLocked(u.AuthID, provider, windows)
+	}
 	kind := ""
 	if u.Failed && u.AuthID != "" && supported {
 		kind = s.failedLocked(u, provider, root, model, tr.Compact, at, now)
@@ -882,14 +894,6 @@ func (s *State) Observe(u Usage) {
 		}
 	}
 	if u.AuthID != "" {
-		var windows []Window
-		if supported {
-			if c := s.memberLocked(u.AuthID, provider); c != nil && u.AuthIndex != "" {
-				c.Index = u.AuthIndex
-			}
-			windows = WindowsFromHeaders(provider, u.ResponseHeader, at)
-			s.mergeWindowsLocked(u.AuthID, provider, windows)
-		}
 		r, read := readingOf(windows)
 		r.T, r.Account, r.Provider = at.UnixMilli(), u.AuthID, provider
 		// A refused request (a 429 at 100%) still reads the quota with no tokens run; a stream
@@ -1491,7 +1495,9 @@ func (s *State) quotaRank(c *Cred, model string, now time.Time, offered bool) Ra
 			ready, readyReset = windowLabel(bucket)+" quota resets soonest", reset
 		}
 	}
-	needFive := c.Provider == "claude" || fivePresent
+	// A Claude account's 5-hour window is waited for until it is read, or the provider says the plan
+	// has none; a Codex account's counts only when it has one.
+	needFive := fivePresent || c.Provider == "claude" && !c.Absent[KindFiveHour]
 	switch {
 	case !offered && c.Unavailable && now.Before(c.NextRetryAfter):
 		r.Tier, r.Reason = 2, "cooling down on some model"
@@ -1512,7 +1518,7 @@ func (s *State) sweepLocked(now time.Time) {
 	for k, b := range s.bindings {
 		if now.Sub(b.LastUsed) > b.ttl() {
 			delete(s.bindings, k)
-			delete(s.displaced, k)
+			s.forgetBindingLocked(k)
 			s.dirty = true
 		}
 	}
@@ -1532,6 +1538,35 @@ func (s *State) sweepLocked(now time.Time) {
 	for id, tr := range s.traces {
 		if now.Sub(tr.At) > traceTTL {
 			delete(s.traces, id)
+		}
+	}
+}
+
+// forgetBindingLocked drops what was kept of a binding that is gone: a session resumed later starts
+// clean on the account it is given then, with no mark, failure or boundary of the binding before.
+func (s *State) forgetBindingLocked(key string) {
+	delete(s.displaced, key)
+	delete(s.failures, key)
+	for ek := range s.episodes {
+		if ek.binding == key {
+			delete(s.episodes, ek)
+		}
+	}
+	for ek := range s.hung {
+		if ek.binding == key {
+			delete(s.hung, ek)
+		}
+	}
+	for _, times := range []map[episodeKey]time.Time{s.elsewhere, s.inflight} {
+		for ek := range times {
+			if ek.binding == key {
+				delete(times, ek)
+			}
+		}
+	}
+	for ek := range s.stopped {
+		if ek.binding == key {
+			delete(s.stopped, ek)
 		}
 	}
 }

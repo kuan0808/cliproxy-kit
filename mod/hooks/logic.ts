@@ -519,7 +519,8 @@ export function autoState(feature: keyof Auto, s: Settings, mine: Auto, unattend
  * What a million tokens cost at API prices: written to the cache for five minutes or an hour, and
  * read from it. `over` names the prompt size above which `long` applies. Checked on 2026-10-11
  * against platform.claude.com/docs/en/about-claude/pricing and
- * developers.openai.com/api/docs/pricing (Standard); a model not listed shows tokens only.
+ * developers.openai.com/api/docs/pricing (Standard), Fable and Mythos 5.2 on 2026-11-10; a model
+ * not listed shows tokens only.
  */
 type Price = { write5m: number; write1h: number; read: number }
 type PriceRow = { price: Price; over?: number; long?: Price }
@@ -531,6 +532,7 @@ const openai = (write: number, read: number): PriceRow => ({
   long: { write5m: write * 2, write1h: write * 2, read: read * 2 },
 })
 const PRICES: [RegExp, PriceRow][] = [
+  [/^claude-(fable|mythos)-5-2$/, { price: claude(10, 16, 0.2) }],
   [/^claude-(fable|mythos)-5-1$/, { price: claude(12.5, 20, 0.25) }],
   [/^claude-(fable|mythos)-5$/, { price: claude(12.5, 20, 1) }],
   [/^claude-opus-5-5$/, { price: claude(5, 8, 0.2) }],

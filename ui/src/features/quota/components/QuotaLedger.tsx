@@ -295,7 +295,7 @@ function ProviderSummary({ group, now, locale, resolvedTheme, identityOf }: Prov
       {group.pool && group.pool.unread.length > 0 && (
         <span className={styles.muted}>
           {t('quota_ledger.pool_unread', {
-            list: group.pool.unread.map(identityOf).join(', '),
+            list: group.pool.unread.map(identityOf).join(t('quota_usage.list_separator')),
           })}
         </span>
       )}
@@ -349,6 +349,16 @@ function ProviderSection({ group, kinds, now, locale, identityOf }: ProviderSect
         {providerName}
         <span className={styles.groupCount}>{group.rows.length}</span>
       </h3>
+      {group.noLimit.length > 0 && (
+        // Said once for the provider: a limit none of its accounts has gets no column of dashes.
+        <p className={styles.groupNote}>
+          {t('quota_ledger.no_limits', {
+            list: group.noLimit
+              .map((kind) => t(`quota_ledger.kind_${kind}`, { defaultValue: kind }))
+              .join(t('quota_usage.list_separator')),
+          })}
+        </p>
+      )}
       <ol className={styles.rows} role="list" style={style} data-kinds={Math.max(1, kinds.length)}>
         {group.rows.map((row) => (
           <LedgerRowItem

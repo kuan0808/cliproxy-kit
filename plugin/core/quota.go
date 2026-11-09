@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Window kinds shared by every provider. Model-scoped weekly buckets use "7d_<family>".
@@ -59,23 +61,43 @@ func ModelBucket(model string) string {
 	return ""
 }
 
-// claudeHeaderKind maps the window token in anthropic-ratelimit-unified-<token>-* headers.
+// ScopedKind is the window kind of a model's own weekly limit, from the name the provider gives the
+// model ("Fable"): the kind that model's requests draw on (ModelBucket), else the name itself in a
+// kind's letters; "" for no name.
+func ScopedKind(name string) string {
+	if bucket := ModelBucket(name); bucket != "" {
+		return bucket
+	}
+	words := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	if len(words) == 0 {
+		return ""
+	}
+	return "7d_" + strings.Join(words, "_")
+}
+
+// claudeHeaderKind maps the window token in anthropic-ratelimit-unified-<token>-* headers, as
+// Claude Code reads them (checked against 2.1.321).
 func claudeHeaderKind(token string) string {
 	switch token {
 	case "5h":
 		return KindFiveHour
 	case "7d":
 		return KindWeekly
-	case "7d_opus", "7d_sonnet", "7d_fable":
+	case "7d_opus", "7d_sonnet":
 		return token
+	case "7d_oi":
+		// The weekly limit of the models a plan includes only up to a share of its week ("overage
+		// included"): Claude Code calls it the Fable limit.
+		return "7d_fable"
 	}
 	return ""
 }
 
-// claudePollKind maps the keys of the Claude OAuth usage endpoint body.
-// claudePollKinds are the window kinds a Claude usage reading can name.
-var claudePollKinds = []string{KindFiveHour, KindWeekly, "7d_opus", "7d_sonnet", "7d_fable"}
+// claudeKeyedKinds are the window kinds a Claude usage reading names by a key of its own, null for
+// one the account lacks. A model's own weekly limit (Fable's) is a row of its `limits` instead.
+var claudeKeyedKinds = []string{KindFiveHour, KindWeekly, "7d_opus", "7d_sonnet"}
 
+// claudePollKind maps the keys of the Claude OAuth usage endpoint body.
 func claudePollKind(key string) string {
 	switch key {
 	case "five_hour":
@@ -86,8 +108,6 @@ func claudePollKind(key string) string {
 		return "7d_opus"
 	case "seven_day_sonnet":
 		return "7d_sonnet"
-	case "iguana_necktie":
-		return "7d_fable"
 	}
 	return ""
 }
@@ -201,12 +221,14 @@ func codexKind(minutes int) string {
 	}
 }
 
-// WindowsFromUsageBody reads quota windows from a provider usage endpoint response, and whether
-// the response was one: a full reading, which names every window the account has.
-func WindowsFromUsageBody(provider string, body []byte, now time.Time) ([]Window, bool) {
+// WindowsFromUsageBody reads quota windows from a provider usage endpoint response; whether the
+// response was one, a full reading, which names every window the account has by a key; and whether
+// it lists each model's own weekly limit too (scoped), so that one it leaves out is one the account
+// lacks.
+func WindowsFromUsageBody(provider string, body []byte, now time.Time) (windows []Window, full, scoped bool) {
 	var doc map[string]any
 	if json.Unmarshal(body, &doc) != nil {
-		return nil, false
+		return nil, false, false
 	}
 	var out []Window
 	switch provider {
@@ -218,7 +240,7 @@ func WindowsFromUsageBody(provider string, body []byte, now time.Time) ([]Window
 			named = named || claudePollKind(key) != ""
 		}
 		if !named {
-			return nil, false
+			return nil, false, false
 		}
 		for key, raw := range doc {
 			kind := claudePollKind(key)
@@ -238,10 +260,32 @@ func WindowsFromUsageBody(provider string, body []byte, now time.Time) ([]Window
 			}
 			out = append(out, w)
 		}
+		// A model's own weekly limit is a `weekly_scoped` row of `limits`, named by the model it is
+		// for, as Claude Code's usage screen reads it (checked against 2.1.321).
+		rows, listed := doc["limits"].([]any)
+		scoped = listed
+		for _, raw := range rows {
+			row, _ := raw.(map[string]any)
+			scope, _ := row["scope"].(map[string]any)
+			model, _ := scope["model"].(map[string]any)
+			name, _ := model["display_name"].(string)
+			percent, okPercent := row["percent"].(float64)
+			kind := ScopedKind(name)
+			if row["kind"] != "weekly_scoped" || kind == "" || !okPercent {
+				continue
+			}
+			w := Window{Kind: kind, Remaining: clamp01(1 - percent/100), ObservedAt: now, Source: "poll"}
+			if s, okReset := row["resets_at"].(string); okReset {
+				if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+					w.ResetAt = t.UTC()
+				}
+			}
+			out = append(out, w)
+		}
 	case "codex":
 		limits, ok := doc["rate_limit"].(map[string]any)
 		if !ok {
-			return nil, false
+			return nil, false, false
 		}
 		for _, name := range []string{"primary_window", "secondary_window"} {
 			window, okWindow := limits[name].(map[string]any)
@@ -262,9 +306,9 @@ func WindowsFromUsageBody(provider string, body []byte, now time.Time) ([]Window
 			out = append(out, w)
 		}
 	default:
-		return nil, false
+		return nil, false, false
 	}
-	return out, true
+	return out, true, scoped
 }
 
 func clamp01(f float64) float64 {
@@ -274,8 +318,13 @@ func clamp01(f float64) float64 {
 	return math.Max(0, math.Min(1, f))
 }
 
-// ClaudePlan names the subscription in an Anthropic OAuth profile response: Team, Max 20x,
-// Max 5x, Max, Pro or Free; "" when the response does not say.
+// planName is a plan name fit to show: letters, digits, spaces and . + -, at most 40, as Claude Code
+// takes the profile's own.
+var planName = regexp.MustCompile(`^[\p{L}\p{N}](?:[\p{L}\p{N} .+-]{0,38}[\p{L}\p{N}+])?$`)
+
+// ClaudePlan names the subscription in an Anthropic OAuth profile response: as the provider names
+// it (`plan_display_name`, "Ultra"), else Team, Max 20x, Max 5x, Max, Pro or Free by what the
+// profile tells; "" when the response does not say.
 func ClaudePlan(body []byte) string {
 	var doc struct {
 		Account struct {
@@ -286,10 +335,14 @@ func ClaudePlan(body []byte) string {
 			Type   string `json:"organization_type"`
 			Status string `json:"subscription_status"`
 			Tier   string `json:"rate_limit_tier"`
+			Name   string `json:"plan_display_name"`
 		} `json:"organization"`
 	}
 	if json.Unmarshal(body, &doc) != nil {
 		return ""
+	}
+	if planName.MatchString(doc.Organization.Name) {
+		return doc.Organization.Name
 	}
 	tier := strings.ToLower(doc.Organization.Tier)
 	switch {

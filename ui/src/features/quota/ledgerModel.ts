@@ -60,6 +60,8 @@ export interface LedgerGroup {
   fiveHour: LedgerPool | null;
   /** Soonest upcoming weekly reset among the rows. */
   nextReset: { atMs: number; row: LedgerRow } | null;
+  /** Window kinds the provider said none of the accounts has, in column order. */
+  noLimit: string[];
 }
 
 export interface LedgerPool {
@@ -146,6 +148,12 @@ const poolOf = (all: LedgerRow[], kind: string): LedgerPool | null => {
   };
 };
 
+/** The window kinds every account of a provider is said to lack: one not read yet lacks none. */
+const noLimitOf = (all: LedgerRow[]) => {
+  const [first = [], ...rest] = accountRows(all).map((row) => row.absent);
+  return first.filter((kind) => rest.every((absent) => absent.includes(kind))).sort(compareKinds);
+};
+
 function buildGroup(
   provider: string,
   health: QuotaPilotHealth,
@@ -168,6 +176,7 @@ function buildGroup(
     pool: poolOf(rows, LEDGER_WEEKLY_KIND),
     fiveHour: poolOf(rows, '5h'),
     nextReset,
+    noLimit: noLimitOf(rows),
   };
 }
 

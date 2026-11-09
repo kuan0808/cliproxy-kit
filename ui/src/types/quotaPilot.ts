@@ -8,7 +8,7 @@
 export type QuotaPilotHealth = 'healthy' | 'exhausted' | 'unknown';
 
 export interface QuotaPilotWindow {
-  /** `5h`, `7d`, `7d_opus`, `7d_sonnet`, `7d_fable`, or a future kind. */
+  /** `5h`, `7d`, or a model's own weekly window: `7d_opus`, `7d_sonnet`, `7d_fable`, or a later one. */
   kind: string;
   label: string;
   remaining: number;
