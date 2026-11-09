@@ -205,7 +205,8 @@ comes two ways, as Claude Code reads them: in the headers as the window `7d_oi`,
 endpoint as a `weekly_scoped` row of `limits` named by its model. One that a header named goes only
 when a usage reading carries `limits` and leaves the model out, as a reading without `limits` says
 nothing of it; one that nothing named is a limit the account does not have. The ledger names, once
-for each provider, the limits none of its accounts has. A
+for each provider, the limits none of its accounts has. A window on any displayed credential
+suppresses that no-limit claim, even when another credential of the same account says it is absent. A
 Claude account's plan is read from its profile (the provider's own name for it,
 `plan_display_name`, else told from the profile's other fields), whether or not its usage read
 worked, when first seen, every hour, on Refresh and after its window started over; a Codex plan

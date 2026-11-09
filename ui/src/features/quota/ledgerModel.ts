@@ -151,7 +151,13 @@ const poolOf = (all: LedgerRow[], kind: string): LedgerPool | null => {
 /** The window kinds every account of a provider is said to lack: one not read yet lacks none. */
 const noLimitOf = (all: LedgerRow[]) => {
   const [first = [], ...rest] = accountRows(all).map((row) => row.absent);
-  return first.filter((kind) => rest.every((absent) => absent.includes(kind))).sort(compareKinds);
+  return first
+    .filter(
+      (kind) =>
+        rest.every((absent) => absent.includes(kind)) &&
+        !all.some((row) => row.windows.some((window) => window.kind === kind))
+    )
+    .sort(compareKinds);
 };
 
 function buildGroup(

@@ -29,7 +29,7 @@ beforeAll(async () => {
 });
 
 describe('QuotaLedger rendering', () => {
-  test('a limit no account of a provider has is said once for the provider, not left out in silence', () => {
+  test('a provider no-limit note yields to a window reported by a duplicate credential', () => {
     const weeklyOnly = normalizeQuotaPilotSnapshot({
       ...rawSnapshot,
       providers: {
@@ -48,6 +48,13 @@ describe('QuotaLedger rendering', () => {
               ],
               absent: ['5h', '7d_fable'],
             },
+            {
+              id: 'claude-a-secondary.json',
+              label: 'a•••2',
+              same_as: 'claude-a@example.com.json',
+              windows: [],
+              absent: ['5h', '7d_fable'],
+            },
           ],
         },
       },
@@ -55,6 +62,24 @@ describe('QuotaLedger rendering', () => {
     const markup = render({ snapshot: { status: 'live', snapshot: weeklyOnly, failure: null } });
     expect(markup).toContain('The provider reports no separate quota for: 5-hour, Weekly Fable');
     expect(markup).not.toContain('>5-hour used<');
+
+    const twin = weeklyOnly.providers.claude.credentials[1];
+    twin.windows = [
+      {
+        kind: '7d_fable',
+        label: 'Weekly Fable',
+        remaining: 0.8,
+        resetAtMs: NOW_MS + 86_400_000,
+        observedAtMs: NOW_MS,
+        stale: false,
+      },
+    ];
+    twin.absent = ['5h'];
+    const updated = render({ snapshot: { status: 'live', snapshot: weeklyOnly, failure: null } });
+    expect(updated).toContain('The provider reports no separate quota for: 5-hour</p>');
+    expect(updated).not.toContain('The provider reports no separate quota for: 5-hour, Weekly Fable');
+    expect(updated).toContain('>Weekly Fable</span>');
+    expect(updated).toContain('>20% used<');
   });
 
   test('live: overview, routing markers, stale marker and the footer line', () => {

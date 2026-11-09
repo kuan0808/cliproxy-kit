@@ -350,7 +350,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | 用量頁看不到 Codex 的 session | Codex 還沒經過 proxy（步驟 4）。 |
 | Codex 說 hook 以代碼 7 或 22 結束 | hook 的位址沒有 proxy 回應（7），或那個 proxy 上沒有 quota-pilot（22）。 |
 | 帳號沒有 5 小時視窗 | 它的方案本來就沒有（Codex 的方案、沒有 5 小時限制的 Claude 方案）；頁面和額度列都會標明，排序時只看每週額度。 |
-| 帳本裡沒有 `每週 Fable` 的量表 | 供應商沒有為那些帳號另設 Fable 額度：Fable 用的是整週的額度。帳本會在供應商名稱下方說明，供應商一旦回報這個額度就會顯示量表。 |
+| 帳本裡沒有 `每週 Fable` 的量表 | 供應商沒有為那些帳號另設 Fable 額度：Fable 用的是整週的額度。帳本會在供應商名稱下方說明，供應商一旦回報這個額度就會顯示量表。只要畫面中任一組憑證回報這個視窗，就不再顯示沒有該額度的說明。 |
 | 額度列顯示 `Switched d••• → k••• · reason not recorded` | quota-pilot 比額度列舊，不會記錄 session 換帳號的原因：到面板的插件商店更新它。 |
 | 額度列顯示 `retrying it in about 50s`，或 Claude Code 顯示 `API error · Retrying`，附上 `quota-pilot: … retrying it in about 50s` | quota-pilot 讓請求留在 session 原本的帳號重試，保住 prompt 快取。重試有回應後這一輪就在原帳號繼續，重試結束後改由它寫的那個帳號接手；按額度列上的 `switch to k•••` 可以立刻不再等。 |
 | 額度列顯示 `retrying it, 2m so far` | 重試也卡住了。按 `switch to k•••` 立刻不再等；或按 Esc 再送一次，session 就會換帳號。 |

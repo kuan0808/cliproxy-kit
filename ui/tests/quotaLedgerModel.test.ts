@@ -83,6 +83,59 @@ describe('ledger', () => {
     ).toEqual(['7d_fable']);
   });
 
+  test.each(['5h', '7d', '7d_fable', '7d_opus', '7d_sonnet', '7d_future'])(
+    'a displayed %s window overrides a duplicate account absence',
+    (kind) => {
+      const absent = normalizeQuotaPilotSnapshot({
+        providers: {
+          claude: {
+            credentials: [
+              { id: 'primary.json', windows: [], absent: [kind, '7d_absent'] },
+              {
+                id: 'secondary.json',
+                same_as: 'primary.json',
+                windows: [],
+                absent: [kind, '7d_absent'],
+              },
+            ],
+          },
+        },
+      })!;
+      expect(buildLedger(absent, 'all', '', NOW_MS).groups[0].noLimit).toContain(kind);
+
+      for (const reportingIndex of [0, 1]) {
+        const updated = structuredClone(absent);
+        const credentials = updated.providers.claude.credentials;
+        const reporting = credentials[reportingIndex];
+        reporting.windows = [
+          {
+            kind,
+            label: kind,
+            remaining: 0.8,
+            resetAtMs: NOW_MS + 86_400_000,
+            observedAtMs: NOW_MS,
+            stale: false,
+          },
+        ];
+        reporting.absent = ['7d_absent'];
+
+        for (const reverse of [false, true]) {
+          if (reverse) credentials.reverse();
+          for (const tab of ['all', 'claude']) {
+            const ledger = buildLedger(updated, tab, '', NOW_MS);
+            expect(ledger.kinds).toEqual([kind]);
+            expect(ledger.groups[0].noLimit).toEqual(['7d_absent']);
+            expect(buildLedger(updated, tab, reporting.id, NOW_MS).groups[0].noLimit).toEqual([
+              '7d_absent',
+            ]);
+            const other = credentials.find((credential) => credential.id !== reporting.id)!;
+            expect(buildLedger(updated, tab, other.id, NOW_MS).groups[0].noLimit).toContain(kind);
+          }
+        }
+      }
+    }
+  );
+
   test('a pool holds every account with the window, and names those not read yet', () => {
     const window = (kind: string, remaining: number) => ({ kind, remaining, reset_at: '2026-10-10T00:00:00Z' });
     const pools = normalizeQuotaPilotSnapshot({
