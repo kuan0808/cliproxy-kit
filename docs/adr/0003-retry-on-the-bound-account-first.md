@@ -17,10 +17,9 @@ retries carry the retry.
 
 ## Consequences
 
-The retry relies on CLIProxyAPI behaviour pinned by a contract test (a declined pick after a failed
-attempt ends the round with that error; the next round offers the bound account; a declined pick alone
-answers 503) and on Claude Code retrying 5xx for more than two minutes. Codex sessions are never
-declined, as quota-pilot cannot see the proxy's `request-retry` setting. A hang gets one retry, as a
+The retry relies on the [proxy contract](../architecture.md#upstream-behaviour-it-relies-on) and
+Claude Code's retries, subject to the [version limits](../architecture.md#limitations). Codex sessions
+are never declined, as quota-pilot cannot see the proxy's `request-retry` setting. A hang gets one retry, as a
 hang may come from one stuck connection, which a hang that ends at the connection leaves unusable, so
 the retry gets another (one that ends with a late status may reuse it). A wait shows in the band and as
 Claude Code's own `API error · Retrying` line. Nothing cuts a hang's retry short if it hangs too:

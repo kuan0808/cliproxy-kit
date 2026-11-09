@@ -68,6 +68,10 @@ page in the management panel, and a band in Claude Code (**quota-band**).
 You need [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 8.0.14+ on macOS or Linux with
 your accounts logged in, and [Claude Code](https://code.claude.com) 2.1.287+.
 
+> [!IMPORTANT]
+> Check [retry compatibility](docs/architecture.md#limitations) before choosing or updating the
+> CLIProxyAPI version.
+
 **1. Install quota-pilot.** Turn plugins on and add this store in CLIProxyAPI's `config.yaml`:
 
 ```yaml
@@ -437,7 +441,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex sessions are missing from the page | Codex does not use the proxy yet (step 4). |
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
 | An account has no 5-hour window | Its plan has none (a Codex plan, a Claude plan without the 5-hour limit); the page and the band say so, and it is ranked by its week alone. |
-| The ledger has no `Weekly Fable` meter | The provider reports no separate Fable limit for those accounts: Fable draws on their week. The ledger says so under the provider's name, and shows the meter as soon as the provider names one. Any displayed credential reporting that window suppresses the no-limit note. |
+| The ledger has no `Weekly Fable` meter | Press **Refresh** and check any read failures. A no-limit note naming Fable means the displayed accounts report no separate Fable quota, so Fable uses their week. Without that note, its limit may still be unread. See [quota readings](docs/architecture.md#reading-quota). |
 | The band says `Switched d••• → k••• · reason not recorded` | quota-pilot is older than the band and does not record why a session moved: update it from the panel's Plugin Store. |
 | The band says `retrying it in about 50s`, or Claude Code shows `API error · Retrying` with `quota-pilot: … retrying it in about 50s` | quota-pilot keeps the request on the session's own account for a retry, so the prompt cache stays. The turn goes on there once the retry answers, or on the account named once its retries end; `switch to k•••` on the band stops waiting now. |
 | The band says `retrying it, 2m so far` | The retry hangs too. `switch to k•••` stops waiting now; or Esc and send again, and the session moves. |

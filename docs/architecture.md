@@ -66,7 +66,7 @@ prompt cache is gone anyway, while its account is no longer one a new session wo
 request goes to the best account at no cost. A session the user switched stays. A binding or route
 the proxy chose lives in `state.json` for 24 hours after its last use, and one the user chose for 30
 days, as long as Claude Code keeps a session to resume, so a resumed session keeps its account,
-route and prompt cache.
+route and prompt cache. Expiry also clears that binding's retry marks and failure history.
 
 ### When an account fails
 
@@ -197,21 +197,21 @@ Codex's `x-codex-*`) and, for idle accounts, from each provider's usage endpoint
 Polling pauses after 15 minutes without any request, because a plugin turned off in the config is
 never told, and resumes with the next one; the page's Refresh reads every account at once and says
 which it could not read and why (its login, refused, asked to slow down, another status, the
-network, an unreadable answer, or out of time). A usage-endpoint reading is complete: a window it does
-not name (a plan without a 5-hour window, Codex's or Claude's) is gone, and the band and the page
-say the account has no such limit; a Claude answer that names no window at all is no reading.
-Headers name only some windows and never remove one. A Claude model's own weekly limit (Fable's)
-comes two ways, as Claude Code reads them: in the headers as the window `7d_oi`, and in the usage
-endpoint as a `weekly_scoped` row of `limits` named by its model. One that a header named goes only
-when a usage reading carries `limits` and leaves the model out, as a reading without `limits` says
-nothing of it; one that nothing named is a limit the account does not have. The ledger names, once
-for each provider, the limits none of its accounts has. A window on any displayed credential
-suppresses that no-limit claim, even when another credential of the same account says it is absent. A
-Claude account's plan is read from its profile (the provider's own name for it,
-`plan_display_name`, else told from the profile's other fields), whether or not its usage read
-worked, when first seen, every hour, on Refresh and after its window started over; a Codex plan
-comes with each usage reading. The last readings survive a restart in `state.json`, marked stale as
-they age.
+network, an unreadable answer, or out of time). A usage-endpoint reading removes missing keyed
+windows (a plan without a 5-hour window, Codex's or Claude's), and the band and the page say the
+account has no such limit; a Claude answer that names no keyed window is no reading. Headers name
+only some windows and never remove one. Fable's own weekly limit comes two ways, as Claude Code
+reads them: in the headers as the window `7d_oi`, and in the usage endpoint as a `weekly_scoped` row
+of `limits` named by its model. A previously read model window without its own response key, such
+as Fable's, stays when `limits` is missing; it goes only when a usage reading includes a `limits`
+array and leaves it out. A complete reading also marks an unseen Fable window absent. The ledger's
+no-limit note covers the displayed accounts after search, counting duplicate credentials as one
+account. A window on any displayed credential suppresses that window's no-limit claim, even when
+another credential of the same account says it is absent. A Claude account's plan is read from its
+profile (the provider's own name for it, `plan_display_name`, else told from the profile's other
+fields), whether or not its usage read worked, when first seen, every hour, on Refresh and after
+its window started over; a Codex plan comes with each usage reading. The last readings survive a
+restart in `state.json`, marked stale as they age.
 
 The live state and the report follow one set of window rules (`core/window.go`):
 
@@ -431,8 +431,9 @@ Every row's text and short form come from one table, `wording.ts`, checked again
 A session signed in to Claude directly reads no proxy. The desktop app's are: it points them at
 Anthropic's own API with the app's sign-in. The band then shows that account's own limits, as Claude
 Code reports them after a reply, and leaves out what only the proxy has: accounts, switching and its
-alerts. In place of `quota` it has `settings`, which opens the same pane with the band's settings
-alone, as the pane does when the proxy gives no snapshot.
+alerts. Once that report names any window, a missing one reads `no such limit`. In place of `quota`
+it has `settings`, which opens the same pane with the band's settings alone, as the pane does when
+the proxy gives no snapshot.
 
 Context, cache and model come from Claude Code itself, so the rest works either way:
 
@@ -529,10 +530,8 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296; the quota headers, t
 What CLIProxyAPI does around a failed attempt is pinned by the proxy contract test, which runs the
 proxy's own account manager, API handlers and, in `plugin/contract_service_test.go`, its real
 executors against a stub upstream, all in-process (`go test ./...` in `plugin/`; checked against
-8.0.15 and 8.0.16). A proxy update that changes any of this fails that test, as 8.0.62 does: it
-builds, but there a declined pick stops the request at once with a 503 carrying the reason, where
-8.0.16 ends the round with the failed attempt's error and runs the next one, so the eleven tests
-of a decline after a failure fail, and a retry comes only with Claude Code's own (see Limitations):
+8.0.15 and 8.0.16). A proxy update that changes any of this fails that test; known version
+differences are listed under [Limitations](#limitations):
 
 - When quota-pilot declines the next pick of the same round after an attempt on A failed
   (`TestADeclineAfterAFailureWithThreeRetryRounds`): after a dropped or reset connection the proxy
