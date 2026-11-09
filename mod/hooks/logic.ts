@@ -264,6 +264,9 @@ export function blockedOthers(view: SnapProvider, current: string, now: number):
     .join('; ')
 }
 
+/** A model as the band names it: "opus-5-5" for "claude-opus-5-5". */
+export const shortModel = (model: string) => model.replace(/^claude-/, '')
+
 /** "resets in 3h 20m", "resetting now", or "no reset pending". */
 export function resetText(reset: string): string {
   if (!reset) return 'no reset pending'
@@ -339,6 +342,13 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
     const next = view.credentials.find(c => c.id === session.next_auth_id)
     const when = reason.endsWith('used up') ? `once ${label} stops answering` : 'on the next turn'
     return { level: 'warn', ...W.limited(reason, label, next?.label ?? null, next ? usedText(windowOf(next, '7d')) : '', when) }
+  }
+  // A fallback the proxy took by itself (the model asked for is used up on every account) is said
+  // until dismissed: the band learns of it after its first turn, which was cold.
+  const fell = session.route
+  if (fell?.auto && fell.from) {
+    const key = `fallback:${fell.from}:${fell.model}`
+    if (key !== dismissed) return { level: 'info', ...W.fallback(shortModel(fell.from), shortModel(fell.model)), action: 'dismiss', key }
   }
   // A retry that kept the session where it was shows for 15 minutes, or until dismissed, unless a
   // move came after it.

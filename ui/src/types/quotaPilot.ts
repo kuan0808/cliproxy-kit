@@ -51,6 +51,14 @@ export interface QuotaPilotProvider {
   health: QuotaPilotHealth;
   /** Already in routing order. */
   credentials: QuotaPilotCredential[];
+  /** Sessions in use that run `model` while `from` is used up on every account. */
+  fallbacks: QuotaPilotFallback[];
+}
+
+export interface QuotaPilotFallback {
+  from: string;
+  model: string;
+  sessions: number;
 }
 
 export interface QuotaPilotConfig {

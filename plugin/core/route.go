@@ -65,9 +65,10 @@ type RouteDecision struct {
 // added or enabled since is not in it.
 const inventoryFresh = 30 * time.Second
 
-// Route decides cross-provider routing: a band override first, then the opt-in automatic
-// takeover. Automatic takeover needs fresh data showing every credential of the requested
-// provider unable to serve, and a request that fits the target model.
+// Route decides whether a request runs another model than the one it asks for: a route the band
+// set first, then the fallback map, by itself, when the model asked for is used up on every
+// account. That needs fresh data showing every account of its provider unable to serve it, and a
+// request that fits the model it goes to.
 func (s *State) Route(in RouteInput) RouteDecision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -88,9 +89,24 @@ func (s *State) Route(in RouteInput) RouteDecision {
 		available[strings.ToLower(p)] = true
 	}
 
+	r, routed := s.routes[root]
+	// A model's route stands in for that model alone: the session's other requests run as asked.
+	if routed && r.From != "" && r.From != modelKey(in.RequestedModel) {
+		return RouteDecision{}
+	}
+	// An automatic route is decided again when going back costs nothing (what it stood in for can
+	// serve, and the session has rested past its cache), or when its own target has run out.
+	if routed && r.Auto && in.Turn {
+		free := now.Sub(r.At) >= cacheGone && s.healthLocked(from, in.RequestedModel, now) == "healthy"
+		if free || s.healthLocked(r.Provider, r.Model, now) == "exhausted" {
+			delete(s.routes, root)
+			s.dirty = true
+			routed = false
+		}
+	}
 	// An established route that cannot run is not handled here: the router cannot fail a
-	// request, so Intercept stops it instead of letting it fall back to the original provider.
-	if r, ok := s.routes[root]; ok {
+	// request, so Intercept stops it instead of letting it fall back to the original model.
+	if routed {
 		r.At = now
 		s.routes[root] = r
 		if r.Provider == from && strings.EqualFold(r.Model, in.RequestedModel) {
@@ -108,31 +124,16 @@ func (s *State) Route(in RouteInput) RouteDecision {
 		if note != "" {
 			return RouteDecision{}
 		}
-		return RouteDecision{Handled: true, Provider: r.Provider, Model: r.Model, Reason: "session routed to " + r.Provider}
+		return RouteDecision{Handled: true, Provider: r.Provider, Model: r.Model, Reason: "session routed to " + r.Model}
 	}
 
-	// Without a route, the note says why the automatic takeover could not run; each turn of the
-	// conversation decides it afresh, so it clears once the reason is gone.
-	if s.cfg.CrossProvider != "auto" || s.healthLocked(from, in.RequestedModel, now) != "exhausted" {
-		if in.Turn {
-			s.noteLocked(sess, "")
-		}
-		return RouteDecision{}
+	// Without a route, the note says why the fallback could not run; each turn of the conversation
+	// decides it afresh, so it clears once the reason is gone.
+	to, note := Route{}, ""
+	if s.healthLocked(from, in.RequestedModel, now) == "exhausted" {
+		to, note = s.fallbackLocked(in.RequestedModel, needOf(sess, in), available, now)
 	}
-	provider, model, ok := strings.Cut(s.cfg.FallbackMap[from], ":")
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	note := ""
-	switch {
-	case !ok || model == "" || provider == from:
-		note = from + " is used up and no fallback is configured"
-	case !available[provider]:
-		note = from + " is used up and its fallback " + provider + " has no account on the proxy"
-	case s.healthLocked(provider, model, now) == "exhausted":
-		note = from + " and " + provider + " are both used up"
-	default:
-		note = s.fitsLocked(model, needOf(sess, in))
-	}
-	if note != "" || !in.Turn {
+	if to.Model == "" || !in.Turn {
 		if in.Turn {
 			s.noteLocked(sess, note)
 		}
@@ -141,10 +142,69 @@ func (s *State) Route(in RouteInput) RouteDecision {
 	if now.Sub(s.inventoryAt) > inventoryFresh {
 		return RouteDecision{Recheck: true}
 	}
-	s.routes[root] = Route{Provider: provider, Model: model, At: now, Auto: true}
+	to.At, to.Auto = now, true
+	s.routes[root] = to
 	s.noteLocked(sess, "")
 	s.dirty = true
-	return RouteDecision{Handled: true, Provider: provider, Model: model, Reason: from + " used up; automatic takeover"}
+	return RouteDecision{Handled: true, Provider: to.Provider, Model: to.Model, Reason: modelKey(in.RequestedModel) + " used up; automatic fallback"}
+}
+
+// fallbackOf is what the fallback map names for a model: the entry of the longest key its id
+// starts with, else its provider's. A value is a model, or provider:model.
+func (s *State) fallbackOf(model string) (provider, target string) {
+	id, key := modelKey(model), ProviderOfModel(model)
+	for k := range s.cfg.FallbackMap {
+		if k != "" && strings.HasPrefix(id, k) && (len(k) > len(key) || !strings.HasPrefix(id, key)) {
+			key = k
+		}
+	}
+	return fallbackTarget(s.cfg.FallbackMap[key])
+}
+
+// fallbackTarget reads a fallback map value: "provider:model", or a model of the provider its id
+// names.
+func fallbackTarget(value string) (provider, model string) {
+	if p, m, ok := strings.Cut(value, ":"); ok {
+		return strings.ToLower(strings.TrimSpace(p)), strings.TrimSpace(m)
+	}
+	return ProviderOfModel(value), strings.TrimSpace(value)
+}
+
+// fallbackLocked follows the fallback map from a model that is used up on every account to the
+// first model that can serve: what the map names for it, and for that in turn when it is used up
+// too. It gives the route to take, or why there is none; neither when the next step would cross to
+// another provider, which happens by itself only under cross_provider auto.
+func (s *State) fallbackLocked(requested string, need int, available map[string]bool, now time.Time) (Route, string) {
+	from := ProviderOfModel(requested)
+	seen := map[string]bool{modelKey(requested): true}
+	for model := requested; ; {
+		provider, target := s.fallbackOf(model)
+		crossing := provider != from
+		switch {
+		case crossing && s.cfg.CrossProvider != "auto":
+			return Route{}, ""
+		case target == "" || provider == "" || seen[modelKey(target)]:
+			if model == requested {
+				return Route{}, from + " is used up and no fallback is configured"
+			}
+			return Route{}, from + " is used up, and so is what it falls back to"
+		case !available[provider]:
+			return Route{}, from + " is used up and its fallback " + provider + " has no account on the proxy"
+		}
+		seen[modelKey(target)] = true
+		if s.healthLocked(provider, target, now) == "exhausted" {
+			model = target
+			continue
+		}
+		if note := s.fitsLocked(target, need); note != "" {
+			return Route{}, note
+		}
+		to := Route{Provider: provider, Model: target}
+		if !crossing {
+			to.From = modelKey(requested) // it stands in for the model asked alone
+		}
+		return to, ""
+	}
 }
 
 func (s *State) noteLocked(sess *session, note string) {
@@ -241,10 +301,10 @@ type InterceptDecision struct {
 // thread and keep the session stateless on that model.
 const threadUnsupported = "thread_unsupported_request"
 
-// Intercept runs after the route decision and before credential selection. A session routed to
-// another provider must send its whole history, because that provider cannot continue an
-// Anthropic message thread; and a routed request that could not be sent there is stopped
-// rather than quietly served by the original provider.
+// Intercept runs after the route decision and before credential selection. A request routed to
+// another model must send its whole history, because a message thread keeps the model and the
+// provider it began on; and a routed request that could not be sent there is stopped rather than
+// quietly served by the original model.
 func (s *State) Intercept(in InterceptInput) InterceptDecision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -259,10 +319,12 @@ func (s *State) Intercept(in InterceptInput) InterceptDecision {
 	}
 	root := rootFromRaw(in.Session)
 	from := ProviderOfModel(in.RequestedModel)
-	if r, ok := s.routes[root]; ok && from != "" && !(r.Provider == from && strings.EqualFold(r.Model, in.RequestedModel)) {
-		if in.Thread != "" && r.Provider != from {
+	applies := func(r Route) bool { return r.From == "" || r.From == modelKey(in.RequestedModel) }
+	if r, ok := s.routes[root]; ok && from != "" && applies(r) && !(r.Provider == from && strings.EqualFold(r.Model, in.RequestedModel)) {
+		// A thread keeps one model, on one provider: its continuation cannot run on another.
+		if in.Thread != "" {
 			return InterceptDecision{Terminate: true, ErrorCode: threadUnsupported,
-				Message: "message threads are off while this session runs on " + r.Provider}
+				Message: "message threads are off while this session runs on " + r.Model}
 		}
 		// The router did not send it there (the conversation does not fit, or the provider has no
 		// account): stopped, rather than served by the original model unasked.

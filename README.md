@@ -351,8 +351,8 @@ On the panel's **Plugins** page, or under `plugins.configs.quota-pilot` in `conf
 | Key | Default | What it does |
 | --- | --- | --- |
 | `min_five_hour_left_percent` | `25` | A new session is not given an account with less of its 5-hour window left, unless that window resets within 30 minutes. An account whose plan has no 5-hour window is ranked by its week alone. |
-| `cross_provider` | `off` | `auto` moves Claude Code sessions to the `fallback_map` model when every account of their provider is used up; `off` leaves that to `switch`. |
-| `fallback_map` | none | The model each provider moves to, as `provider: provider:model`, for example `claude: codex:gpt-6.1-sol`. |
+| `cross_provider` | `off` | `auto` moves Claude Code sessions to the `fallback_map` model of another provider when every account of their own is used up; `off` leaves that to `switch`. A fallback within one provider needs neither. |
+| `fallback_map` | none | What runs when a model is used up on every account, as `key: target`. The key is a provider or the start of a model id (the longest match wins), the target a model or `provider:model`: `claude-fable: claude-opus-5-5`, `claude: codex:gpt-6.1-sol`. A target of the same provider is used by itself, and the session returns once the model is back and it has rested an hour, or at `back` in the band. |
 | `idle_poll_minutes` | `10` | How often idle accounts' quota is read. |
 | `context_lengths` | built in | Context window per model, to tell whether a conversation fits another model. |
 
@@ -441,6 +441,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex sessions are missing from the page | Codex does not use the proxy yet (step 4). |
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
 | An account has no 5-hour window | Its plan has none (a Codex plan, a Claude plan without the 5-hour limit); the page and the band say so, and it is ranked by its week alone. |
+| A session on Fable stops when Fable's weekly limit runs out | Add `claude-fable: claude-opus-5-5` to `fallback_map`, and set `upstream.claude.model-level-cooling: true` in the proxy's config: without it CLIProxyAPI holds the whole account back, for every model, until the limit resets. |
 | The ledger has no `Weekly Fable` meter | Press **Refresh** and check any read failures. A no-limit note naming Fable means the displayed accounts report no separate Fable quota, so Fable uses their week. Without that note, its limit may still be unread. See [quota readings](docs/architecture.md#reading-quota). |
 | The band says `Switched d••• → k••• · reason not recorded` | quota-pilot is older than the band and does not record why a session moved: update it from the panel's Plugin Store. |
 | The band says `retrying it in about 50s`, or Claude Code shows `API error · Retrying` with `quota-pilot: … retrying it in about 50s` | quota-pilot keeps the request on the session's own account for a retry, so the prompt cache stays. The turn goes on there once the retry answers, or on the account named once its retries end; `switch to k•••` on the band stops waiting now. |

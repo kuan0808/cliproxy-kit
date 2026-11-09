@@ -72,6 +72,8 @@
     "no_reset": "目前沒有重置",
     "credentials": "{{count}} 個憑證",
     "fallback_rule": "{{from}} 用完時改用 {{model}}（{{provider}}）",
+    "fallback_rule_model": "{{from}} 用完時改用 {{model}}",
+    "fallback_sessions": "{{count}} 個 session 在 {{from}} 用完期間改用 {{model}}",
     "auto_on": "自動切換：開啟",
     "auto_off": "自動切換：關閉",
     "not_reported": "未回報",

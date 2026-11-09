@@ -35,7 +35,7 @@ const (
 // Config is the plugin configuration, edited on the official panel's Plugins page.
 type Config struct {
 	CrossProvider          string            // "off" or "auto"
-	FallbackMap            map[string]string // provider -> "provider:model"
+	FallbackMap            map[string]string // a provider, or the start of a model id -> "model" or "provider:model"
 	MinFiveHourLeftPercent float64
 	IdlePollMinutes        int
 	ContextLengths         map[string]int
@@ -52,9 +52,12 @@ func (c Config) Normalized() Config {
 	if c.IdlePollMinutes <= 0 {
 		c.IdlePollMinutes = 10
 	}
-	if c.FallbackMap == nil {
-		c.FallbackMap = map[string]string{}
+	// Keys are matched in lower case, whatever case they were written in.
+	fallbacks := make(map[string]string, len(c.FallbackMap))
+	for k, v := range c.FallbackMap {
+		fallbacks[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
 	}
+	c.FallbackMap = fallbacks
 	if c.ContextLengths == nil {
 		c.ContextLengths = map[string]int{}
 	}
@@ -118,11 +121,14 @@ type Binding struct {
 	Cause *Cause `json:"cause,omitempty"`
 }
 
-// Route is a per-session cross-provider override: the band's, or the proxy's own takeover (Auto).
+// Route sends a session's requests to another model: the band's choice, or the proxy's own by the
+// fallback map (Auto). From is the model it stands in for, when it stands in for that model alone
+// (a fallback within the provider); "" when it takes every request of the session.
 type Route struct {
 	Provider string    `json:"provider"`
 	Model    string    `json:"model"`
 	Auto     bool      `json:"auto"`
+	From     string    `json:"from,omitempty"`
 	At       time.Time `json:"at"`
 }
 

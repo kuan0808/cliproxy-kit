@@ -186,14 +186,19 @@ export function QuotaLedgerView({
             </p>
           )}
           {Object.entries(live.config.fallbackMap).map(([from, to]) => {
-            const [provider = '', model = to] = to.split(':');
+            // A key is a provider, or the start of a model id, shown as written; a target a model
+            // of the same provider, or provider:model.
+            const fromName = live.providers[from] ? getTypeLabel(t, from) : from;
+            const [provider, model] = to.includes(':') ? to.split(':') : ['', to];
             return (
               <span key={from} className={styles.footItem}>
-                {t('quota_ledger.fallback_rule', {
-                  from: getTypeLabel(t, from),
-                  model,
-                  provider: getTypeLabel(t, provider),
-                })}
+                {provider
+                  ? t('quota_ledger.fallback_rule', {
+                      from: fromName,
+                      model,
+                      provider: getTypeLabel(t, provider),
+                    })
+                  : t('quota_ledger.fallback_rule_model', { from: fromName, model })}
               </span>
             );
           })}
@@ -349,6 +354,15 @@ function ProviderSection({ group, kinds, now, locale, identityOf }: ProviderSect
         {providerName}
         <span className={styles.groupCount}>{group.rows.length}</span>
       </h3>
+      {group.fallbacks.map((fallback) => (
+        <p key={`${fallback.from}:${fallback.model}`} className={styles.groupNote}>
+          {t('quota_ledger.fallback_sessions', {
+            count: fallback.sessions,
+            model: fallback.model,
+            from: fallback.from,
+          })}
+        </p>
+      ))}
       {group.noLimit.length > 0 && (
         // Said once for the provider: a limit none of its accounts has gets no column of dashes.
         <p className={styles.groupNote}>

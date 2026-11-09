@@ -282,8 +282,8 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | 設定 | 預設 | 作用 |
 | --- | --- | --- |
 | `min_five_hour_left_percent` | `25` | 新的 session 不會分到 5 小時額度剩不到這個百分比的帳號，除非它 30 分鐘內就重置。方案沒有 5 小時視窗的帳號只看每週額度排序。 |
-| `cross_provider` | `off` | `auto`：某個供應商的帳號全部用完時，自動把 Claude Code 的 session 改送到 `fallback_map` 的模型；`off`：交給 `switch` 手動切換。 |
-| `fallback_map` | 無 | 各供應商改用的模型，寫成 `供應商: 供應商:模型`，例如 `claude: codex:gpt-6.1-sol`。 |
+| `cross_provider` | `off` | `auto`：某個供應商的帳號全部用完時，自動把 Claude Code 的 session 改送到 `fallback_map` 指定的另一個供應商的模型；`off`：交給 `switch` 手動切換。同一個供應商內的 fallback 不受這個設定影響。 |
+| `fallback_map` | 無 | 模型在所有帳號都用完時改用什麼，寫成 `鍵: 目標`。鍵是供應商，或模型 id 的開頭（取最長相符者）；目標是模型，或 `供應商:模型`：`claude-fable: claude-opus-5-5`、`claude: codex:gpt-6.1-sol`。同一個供應商的目標會自動套用，等原模型恢復且 session 閒置滿一小時後自動換回，也可以在額度列按 `back` 立刻換回。 |
 | `idle_poll_minutes` | `10` | 多久讀一次閒置帳號的額度。 |
 | `context_lengths` | 內建表 | 各模型的 context 大小，用來判斷對話放不放得進另一個模型。 |
 
@@ -353,6 +353,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | 用量頁看不到 Codex 的 session | Codex 還沒經過 proxy（步驟 4）。 |
 | Codex 說 hook 以代碼 7 或 22 結束 | hook 的位址沒有 proxy 回應（7），或那個 proxy 上沒有 quota-pilot（22）。 |
 | 帳號沒有 5 小時視窗 | 它的方案本來就沒有（Codex 的方案、沒有 5 小時限制的 Claude 方案）；頁面和額度列都會標明，排序時只看每週額度。 |
+| Fable 的每週額度用完時，用 Fable 的 session 就停住 | 在 `fallback_map` 加上 `claude-fable: claude-opus-5-5`，並在 proxy 的設定裡把 `upstream.claude.model-level-cooling` 設為 `true`：否則 CLIProxyAPI 會讓整個帳號的所有模型一起停用，直到那個額度重置。 |
 | 帳本裡沒有 `每週 Fable` 的量表 | 按 **Refresh**，確認是否有讀取失敗。供應商下方若列出 Fable 沒有獨立額度，表示畫面中的帳號回報沒有另設 Fable 額度，Fable 用的是整週額度。沒有這段說明時，也可能是還沒讀到額度。詳見[額度讀取規則](docs/architecture.md#reading-quota)。 |
 | 額度列顯示 `Switched d••• → k••• · reason not recorded` | quota-pilot 比額度列舊，不會記錄 session 換帳號的原因：到面板的插件商店更新它。 |
 | 額度列顯示 `retrying it in about 50s`，或 Claude Code 顯示 `API error · Retrying`，附上 `quota-pilot: … retrying it in about 50s` | quota-pilot 讓請求留在 session 原本的帳號重試，保住 prompt 快取。重試有回應後這一輪就在原帳號繼續，重試結束後改由它寫的那個帳號接手；按額度列上的 `switch to k•••` 可以立刻不再等。 |

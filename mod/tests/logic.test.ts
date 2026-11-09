@@ -313,6 +313,23 @@ describe('accounts', () => {
     expect(tileWidths('tiles6', 141)).toEqual([24, 22, 22, 24, 22, 22])
   })
 
+  test('a session running a fallback says what it runs, what it stands in for and when it returns', () => {
+    const route = { provider: 'claude', model: 'claude-opus-5-5', auto: true, from: 'claude-fable-5-2', at: iso(-60_000) }
+    const fell = { ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, model: 'claude-opus-5-5', requested_model: 'claude-fable-5-2', route } } }
+    const key = 'fallback:claude-fable-5-2:claude-opus-5-5'
+    expect(pickAlert(fell, sessionAccount(fell, 's1'), true, NOW)).toEqual({
+      level: 'info',
+      text: 'fable-5-2 is used up on every account · running opus-5-5 until it is back and this session has rested an hour',
+      short: 'fable-5-2 used up · on opus-5-5',
+      action: 'dismiss',
+      key,
+    })
+    expect(pickAlert(fell, sessionAccount(fell, 's1'), true, NOW, key)).toBe(null)
+    // A route the reader set, or one to another provider, is theirs: nothing to tell.
+    const chosen = { ...fell, sessions: { s1: { ...fell.sessions.s1!, route: { ...route, auto: false, from: undefined } } } }
+    expect(pickAlert(chosen, sessionAccount(chosen, 's1'), true, NOW)).toBe(null)
+  })
+
   test('alerts: stale data, imminent switch, exhausted provider', async () => {
     expect(pickAlert(SNAP, sessionAccount(SNAP, 's1'), true, NOW)).toBe(null)
     expect(pickAlert({ ...SNAP, generated_at: iso(-10 * 60_000) }, null, true, NOW)?.text).toMatch(/old/)

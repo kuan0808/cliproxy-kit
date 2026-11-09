@@ -26,6 +26,7 @@ import {
   rewriteBrief,
   rewriteText,
   sessionAccount,
+  shortModel,
   switchTargets,
   turnCost,
   untilIso,
@@ -239,7 +240,9 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     if (asks) act.ui({ confirm: 'move', move, switchStep: '' })
     else act.send(move)
   }
-  const unroute: Move = { action: 'unroute', fields: {}, text: W.backTo(providerTitle(original)) }
+  // Back from a model's fallback goes to that model; from another provider, to the session's own.
+  const backName = route?.from ? shortModel(route.from) : providerTitle(original)
+  const unroute: Move = { action: 'unroute', fields: {}, text: W.backTo(backName) }
 
   const facts: Facts = {
     proxied: sess.proxied,
@@ -330,7 +333,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
       ...otherAccounts(acct.view, acct.session.auth_id).map((x): Act => ready.has(x.id)
         ? { key: `to-${x.id}`, label: `${x.label} ${usedText(windowOf(x, '7d'))}`, name: true, main: true, run: () => menu.pick({ action: 'switch', fields: { auth_id: x.id }, text: W.switchTo(x.label) }) }
         : { key: `not-${x.id}`, label: cannotTake(x, acct.session.model, now), name: true }),
-      ...(route ? [{ key: 'unroute', label: `back to ${providerTitle(menu.original)}`, main: true, run: () => menu.pick(menu.unroute) }] : []),
+      ...(route ? [{ key: 'unroute', label: `back to ${route.from ? shortModel(route.from) : providerTitle(menu.original)}`, main: true, run: () => menu.pick(menu.unroute) }] : []),
       ...menu.switchProviders.map((p): Act => ({ key: `prov-${p}`, label: `${providerTitle(p)} ›`, main: true, run: () => act.ui({ switchStep: p }) })),
     ])
   }

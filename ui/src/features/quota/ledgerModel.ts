@@ -5,7 +5,7 @@
  * Pure: no React, no store, no clock of its own (`nowMs` is passed in).
  */
 
-import type { QuotaPilotHealth, QuotaPilotSnapshot } from '@/types';
+import type { QuotaPilotFallback, QuotaPilotHealth, QuotaPilotSnapshot } from '@/types';
 import { QUOTA_TAB_ORDER, type QuotaTabId } from './constants';
 
 /** The window the pooled sum and the next-reset column are computed from. */
@@ -62,6 +62,8 @@ export interface LedgerGroup {
   nextReset: { atMs: number; row: LedgerRow } | null;
   /** Window kinds the provider said none of the accounts has, in column order. */
   noLimit: string[];
+  /** Sessions in use that run a model in place of one used up on every account. */
+  fallbacks: QuotaPilotFallback[];
 }
 
 export interface LedgerPool {
@@ -164,6 +166,7 @@ function buildGroup(
   provider: string,
   health: QuotaPilotHealth,
   rows: LedgerRow[],
+  fallbacks: QuotaPilotFallback[],
   nowMs: number
 ): LedgerGroup {
   let nextReset: LedgerGroup['nextReset'] = null;
@@ -183,6 +186,7 @@ function buildGroup(
     fiveHour: poolOf(rows, '5h'),
     nextReset,
     noLimit: noLimitOf(rows),
+    fallbacks,
   };
 }
 
@@ -241,7 +245,7 @@ export function buildLedger(
             : null,
           resting: cred.rest && cred.rest.untilMs > nowMs ? cred.rest : null,
         }));
-      return buildGroup(provider, view.health, rows, nowMs);
+      return buildGroup(provider, view.health, rows, view.fallbacks, nowMs);
     })
     .filter((group) => group.rows.length > 0);
 

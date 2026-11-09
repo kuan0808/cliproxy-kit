@@ -119,8 +119,7 @@ While an account rests it ranks after every account that can serve and is not re
 their tiers, so a new session gets it only when nothing else can; its sessions move at their next
 turn to such an account when one is offered (the move's kind `rest`), and stay when none is.
 Requests already running on it are left alone. Rest is not a quota limit: a resting account is not
-used up, a provider whose accounts all rest is not exhausted, and `cross_provider: auto` never
-moves a session to another provider for it. Before a session's next turn leaves a resting account,
+used up, a provider whose accounts all rest is not exhausted, and no fallback runs for it. Before a session's next turn leaves a resting account,
 the band warns and counts that turn as cold, toward the account a failover would take now: the
 best-ranked other account, not resting, not used up, that a pick has listed for the session's model
 since that account last failed (`switch_back`'s evidence); with none known, no warning.
@@ -176,18 +175,45 @@ back in 5m`.
 | Acknowledgement wait | 5 s for a press's switch; then 5 s after the stop before saying it is not confirmed | The proxy answers within one read; a turn's end comes at once unless a hook holds it |
 | Switch now's notices | 10 s for a refusal or no answer | Long enough to read; then the waiting row and its control come back |
 
-### Moving a session to another provider
+### Running another model when one is used up
 
-`cross_provider: off` (the default) never changes provider: the band offers a one-press switch to
-the model `fallback_map` names. `auto` moves a session only when every account of its provider is
-used up on fresh data, never on unknown data, with an account list read in the last 30 seconds, and
-only when the conversation fits the target model's context (`context_lengths`, else a table by
-model family). What a conversation needs is the larger of its last turn's tokens (Codex's cached
-input counted once, kept across a restart) and its body (a token per 3 bytes, 1,600 per image or
-file), plus the output it asks for. A thread
-continuation sent to another provider is answered `400 thread_unsupported_request`, which makes
-Claude Code resend the whole conversation. Moving to another provider is for Claude Code sessions:
-Codex chooses its own model.
+A model can run out before its account does: Fable has a weekly limit of its own. When the model a
+session asks for is used up on every account of its provider (fresh readings, an account list read
+in the last 30 seconds, never on unknown data), quota-pilot runs what `fallback_map` names for it:
+the entry of the longest key the model's id starts with (`claude-fable`), else its provider's
+(`claude`); a target is a model, or `provider:model`. When the target is used up too the map is
+followed again from it, each model once (`claude-fable: claude-opus-5-5`, then
+`claude: codex:gpt-6.1-sol`). One account running out is not this: the session moves to another
+account first, as for any refusal.
+
+- **Within a provider** the fallback happens by itself. It stands in for that model alone: the
+  session's requests for another model (a title on Haiku, a subagent on Sonnet) run as asked. The
+  session keeps its account.
+- **To another provider** it happens by itself only under `cross_provider: auto`; with `off` (the
+  default) the band offers it as a one-press switch. It takes every request of the session, and
+  only Claude Code sessions: Codex chooses its own model.
+- **It fits, or it does not run.** The conversation must fit the target's context
+  (`context_lengths`, else a table by model family): the larger of its last turn's tokens (Codex's
+  cached input counted once, kept across a restart) and its body (a token per 3 bytes, 1,600 per
+  image or file), plus the output it asks for. The band says why when it does not.
+- **It stays.** The fallback's prompt cache is the warm one, so an automatic route ends by itself
+  only when that costs nothing: at the session's first turn after an hour without a routed request,
+  once the model it stood in for can serve again. `back` in the band ends it at once, and a new
+  session decides afresh. A route whose own target runs out is decided again at the next turn.
+- **Nothing in the request is rewritten.** It goes as Claude Code built it for the model it asked:
+  Fable 5.2 and Opus 5.5 take the same effort levels, thinking settings, context and output sizes.
+  A message thread keeps the model and provider it began on, so a thread continuation on a route is
+  answered `400 thread_unsupported_request`, which makes Claude Code resend the whole
+  conversation. Thinking blocks the target cannot read are dropped by the API, unbilled. The first
+  turn on a fallback is cold: the prompt cache is kept per model.
+
+For a fallback within Claude the proxy needs `upstream.claude.model-level-cooling: true`: without
+it CLIProxyAPI holds an account back for every model, until the refused limit resets, once
+Anthropic refuses a request on a unified limit, so the account that just ran out of Fable could
+not serve Opus either. quota-pilot reads the model's window and mostly routes before any refusal,
+but one request can cross the last percent. A refusal names the limit that refused it
+(`anthropic-ratelimit-unified-representative-claim`), which quota-pilot takes as that window used
+up until the reset the refusal gives, also where no header of that window's own came.
 
 ### Reading quota
 

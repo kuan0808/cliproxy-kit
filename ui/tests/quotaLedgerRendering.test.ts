@@ -82,6 +82,27 @@ describe('QuotaLedger rendering', () => {
     expect(updated).toContain('>20% used<');
   });
 
+  test('a fallback is told twice: its rule in the footer, and the sessions that run it under their provider', () => {
+    const fell = normalizeQuotaPilotSnapshot({
+      ...rawSnapshot,
+      config: {
+        ...rawSnapshot.config,
+        fallback_map: { 'claude-fable': 'claude-opus-5-5', claude: 'codex:gpt-6-sol' },
+      },
+      providers: {
+        ...rawSnapshot.providers,
+        claude: {
+          ...rawSnapshot.providers.claude,
+          fallbacks: [{ from: 'claude-fable-5-2', model: 'claude-opus-5-5', sessions: 2 }],
+        },
+      },
+    })!;
+    const markup = render({ snapshot: { status: 'live', snapshot: fell, failure: null } });
+    expect(markup).toContain('2 sessions run claude-opus-5-5 while claude-fable-5-2 is used up');
+    expect(markup).toContain('When claude-fable is used up: claude-opus-5-5<');
+    expect(markup).toContain('When Claude is used up: gpt-6-sol (Codex)');
+  });
+
   test('live: overview, routing markers, stale marker and the footer line', () => {
     const markup = render();
     expect(markup).toContain('Live routing from the quota-pilot plugin');

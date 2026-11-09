@@ -107,6 +107,13 @@ const normalizeProvider = (value: unknown): QuotaPilotProvider => {
           .map(normalizeCredential)
           .filter((credential): credential is QuotaPilotCredential => credential !== null)
       : [],
+    fallbacks: Array.isArray(record.fallbacks)
+      ? record.fallbacks.filter(isRecord).map((item) => ({
+          from: asString(item.from),
+          model: asString(item.model),
+          sessions: asNumber(item.sessions),
+        }))
+      : [],
   };
 };
 

@@ -58,7 +58,8 @@ export type SnapSession = {
   auth_label: string
   binding_reason: string
   switched?: boolean
-  route?: { provider: string; model: string; auto: boolean; at: string }
+  /** `from`: the model an automatic route stands in for, when it stands in for that model alone. */
+  route?: { provider: string; model: string; auto: boolean; from?: string; at: string }
   last_switch?: SnapSwitch
   /** The account the session last moved off, while it can take the session's model again. */
   switch_back?: string

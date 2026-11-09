@@ -190,6 +190,11 @@ export const W = {
   hangWatch: (forMs: number, takeover: boolean): Words => (takeover
     ? { text: `no answer for ${fmtWait(forMs)} · if it fails, a retry or another account takes over`, short: `no answer for ${fmtWait(forMs)}` }
     : { text: `no answer for ${fmtWait(forMs)}` }),
+  /** A model used up on every account: what the session runs in its place, and until when. */
+  fallback: (from: string, model: string): Words => ({
+    text: `${from} is used up on every account · running ${model} until it is back and this session has rested an hour`,
+    short: `${from} used up · on ${model}`,
+  }),
   // Notes.
   /** A move; after a press that stopped the turn, until a main turn starts, how to go on. */
   moved: (from: string, to: string, why: { why: string; short: string }, goOn = false): Words => (goOn

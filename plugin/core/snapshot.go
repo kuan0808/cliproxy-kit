@@ -206,6 +206,16 @@ type SnapshotConfig struct {
 type ProviderView struct {
 	Health      string      `json:"health"` // healthy, exhausted, unknown
 	Credentials []*CredView `json:"credentials"`
+	// Fallbacks are the models of the provider that sessions in use run in place of one used up on
+	// every account, by the fallback map.
+	Fallbacks []FallbackView `json:"fallbacks,omitempty"`
+}
+
+// FallbackView is how many sessions in use run Model in place of From.
+type FallbackView struct {
+	From     string `json:"from"`
+	Model    string `json:"model"`
+	Sessions int    `json:"sessions"`
 }
 
 // CredView is one credential as displayed.
@@ -386,6 +396,7 @@ func (s *State) buildLocked() Snapshot {
 	// Each session first, so the accounts can count the sessions whose next turn they serve.
 	sessions := map[string]*SessionView{}
 	sessionsPerCred := map[string]int{}
+	fallbacks := map[FallbackView]int{}
 	for root, sess := range s.sessions {
 		if ViewSession(RawSession(root)) == "" {
 			continue // a conversation the proxy named by its content: no Claude Code session to show
@@ -393,6 +404,9 @@ func (s *State) buildLocked() Snapshot {
 		v := s.sessionViewLocked(root, sess)
 		if v.AuthID != "" && now.Sub(sess.LastSeen) <= activeAfter {
 			sessionsPerCred[v.AuthID]++
+		}
+		if r := v.Route; r != nil && r.Auto && r.From != "" && now.Sub(sess.LastSeen) <= activeAfter {
+			fallbacks[FallbackView{From: r.From, Model: r.Model}]++
 		}
 		s.fillImminentLocked(v, root, sess, now)
 		sessions[root] = v
@@ -424,6 +438,13 @@ func (s *State) buildLocked() Snapshot {
 			pv.Credentials = append(pv.Credentials, v)
 			labels[c.ID] = v.Label
 		}
+		for f, n := range fallbacks {
+			if ProviderOfModel(f.From) == provider {
+				f.Sessions = n
+				pv.Fallbacks = append(pv.Fallbacks, f)
+			}
+		}
+		sort.Slice(pv.Fallbacks, func(i, j int) bool { return pv.Fallbacks[i].From < pv.Fallbacks[j].From })
 		snap.Providers[provider] = pv
 	}
 	for root, v := range sessions {
@@ -440,10 +461,17 @@ func (s *State) nextLocked(root string, sess *session) (provider, model string) 
 	if p := ProviderOfModel(sess.RequestedModel); p != "" {
 		provider, model = p, sess.RequestedModel
 	}
-	if r, ok := s.routes[root]; ok {
+	if r, ok := s.routeOfLocked(root, sess); ok {
 		provider, model = r.Provider, r.Model
 	}
 	return provider, model
+}
+
+// routeOfLocked is the route a session's next turn takes: none while it asks for another model than
+// the one its route stands in for.
+func (s *State) routeOfLocked(root string, sess *session) (Route, bool) {
+	r, ok := s.routes[root]
+	return r, ok && (r.From == "" || r.From == modelKey(sess.RequestedModel))
 }
 
 // sessionViewLocked says where a session's next turn goes.
@@ -459,9 +487,8 @@ func (s *State) sessionViewLocked(root string, sess *session) *SessionView {
 	}
 	v.Retry, v.RetryOutcome = s.retryViewLocked(v.Provider, root, model, now), sess.RetryOutcome
 	v.ElsewhereAt = s.elsewhere[episodeKey{v.Provider + "|" + root, modelKey(model)}]
-	if r, ok := s.routes[root]; ok {
-		rr := r
-		v.Route = &rr
+	if r, ok := s.routeOfLocked(root, sess); ok {
+		v.Route = &r
 	}
 	if b := s.bindings[v.Provider+"|"+root]; b != nil {
 		v.AuthID, v.BindingReason, v.Switched = b.AuthID, b.Reason, b.Reason == switchedReason
@@ -622,7 +649,7 @@ func (s *State) contextsLocked() map[string]int {
 		models = append(models, r.Model)
 	}
 	for _, target := range s.cfg.FallbackMap {
-		_, model, _ := strings.Cut(target, ":")
+		_, model := fallbackTarget(target)
 		models = append(models, model)
 	}
 	for _, model := range models {

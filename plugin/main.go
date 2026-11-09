@@ -1,6 +1,7 @@
 // quota-pilot is a CLIProxyAPI plugin: it chooses the account for each Claude Code session by
-// quota and reset time, keeps sessions on their account, optionally moves a session to another
-// provider, and publishes its state for the Claude Code band and the management panel.
+// quota and reset time, keeps sessions on their account, moves a session to another model or
+// provider when the one it asks for is used up, and publishes its state for the Claude Code band
+// and the management panel.
 package main
 
 /*
@@ -259,9 +260,9 @@ func registration() map[string]any {
 			// ampersands or angle brackets, which the panel would show escaped.
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "cross_provider", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"off", "auto"},
-					Description: "Moving sessions to another provider. off: only by hand, with switch on the band. auto: when every account of a provider is used up, its Claude Code sessions go to the model fallback_map names. / 自動切換供應商。off：只在額度列上用 switch 手動切換。auto：某個供應商的帳號全部用完時，自動把 Claude Code 的 session 改送到 fallback_map 指定的模型。"},
+					Description: "Moving sessions to another provider. off: only by hand, with switch on the band. auto: when every account of a provider is used up, its Claude Code sessions go to what fallback_map names. A fallback within one provider needs neither. / 自動切換供應商。off：只在額度列上用 switch 手動切換。auto：某個供應商的帳號全部用完時，自動把 Claude Code 的 session 改送到 fallback_map 指定的模型。同一個供應商內的 fallback 不受這個設定影響。"},
 				{Name: "fallback_map", Type: pluginapi.ConfigFieldTypeObject,
-					Description: "The model each provider moves to, as provider: provider:model, for example claude: codex:gpt-6.1-sol. Used by switch and by auto. / 各供應商改用的模型，寫成 供應商: 供應商:模型，例如 claude: codex:gpt-6.1-sol。手動和自動切換都用這個設定。"},
+					Description: "What runs when a model is used up on every account, as key: target. The key is a provider or the start of a model id, the longest match wins; the target is a model, or provider:model. For example claude-fable: claude-opus-5-5 and claude: codex:gpt-6.1-sol. A target of the same provider is used by itself, and the session returns once the model is back and it has rested an hour; a target of another provider follows cross_provider. / 模型在所有帳號都用完時改用什麼，寫成 鍵: 目標。鍵是供應商，或模型 id 的開頭，取最長相符者；目標是模型，或 供應商:模型。例如 claude-fable: claude-opus-5-5 以及 claude: codex:gpt-6.1-sol。同一個供應商的目標會自動套用，等原模型恢復且 session 閒置滿一小時後自動換回；跨供應商的目標依 cross_provider 決定。"},
 				{Name: "min_five_hour_left_percent", Type: pluginapi.ConfigFieldTypeNumber,
 					Description: "A new session is not given an account with less than this percent of its 5-hour quota left, unless that window resets within 30 minutes. Default 25. / 新的 session 不會分到 5 小時額度剩不到這個百分比的帳號，除非它 30 分鐘內就重置。預設 25。"},
 				{Name: "idle_poll_minutes", Type: pluginapi.ConfigFieldTypeInteger,

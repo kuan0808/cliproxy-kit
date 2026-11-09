@@ -93,6 +93,16 @@ func claudeHeaderKind(token string) string {
 	return ""
 }
 
+// claudeClaimKind maps the limit a refusal names in anthropic-ratelimit-unified-representative-claim,
+// as Claude Code names them.
+func claudeClaimKind(claim string) string {
+	switch claim {
+	case "seven_day_overage_included":
+		return "7d_fable"
+	}
+	return claudePollKind(claim)
+}
+
 // claudeKeyedKinds are the window kinds a Claude usage reading names by a key of its own, null for
 // one the account lacks. A model's own weekly limit (Fable's) is a row of its `limits` instead.
 var claudeKeyedKinds = []string{KindFiveHour, KindWeekly, "7d_opus", "7d_sonnet"}
@@ -172,6 +182,18 @@ func claudeHeaderWindows(headers http.Header, now time.Time) []Window {
 			case "-status":
 				p.rejected = value == "rejected"
 			}
+		}
+	}
+	// A refusal names the limit that refused it (the representative claim) and when that resets,
+	// also where it sends no window of that limit's own.
+	if strings.TrimSpace(headers.Get("anthropic-ratelimit-unified-status")) == "rejected" {
+		kind := claudeClaimKind(strings.TrimSpace(headers.Get("anthropic-ratelimit-unified-representative-claim")))
+		if _, own := parts[kind]; kind != "" && !own {
+			p := &partial{rejected: true}
+			if f, err := strconv.ParseFloat(strings.TrimSpace(headers.Get("anthropic-ratelimit-unified-reset")), 64); err == nil {
+				p.reset, p.hasReset = f, true
+			}
+			parts[kind] = p
 		}
 	}
 	var out []Window

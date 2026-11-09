@@ -96,9 +96,10 @@ export function accountsPart(els: Els, P: Palette, snap: Snap, acct: SessionAcco
   // grown old shows "~".
   const lastRead = Math.max(0, ...Object.values(snap.providers).flatMap(v => v.credentials.flatMap(c => c.windows.map(w => Date.parse(w.observed_at) || 0))))
   const items: [string, string][] = [
+    // A key is a provider, or the start of a model id; a target a model, or provider:model.
     ...fallbacks.map(([from, to]): [string, string] => {
-      const [provider, model] = to.split(':')
-      return [`When ${title(from)} is used up`, model ? `use ${model} (${title(provider ?? '')})` : to]
+      const [provider, model] = to.includes(':') ? to.split(':') : ['', to]
+      return [`When ${snap.providers[from] ? title(from) : from} is used up`, provider ? `use ${model} (${title(provider)})` : `use ${model}`]
     }),
     ['Switch automatically', snap.config.cross_provider === 'auto' ? 'on' : 'off'],
     ['New sessions avoid', `accounts that have used over ${100 - snap.config.min_five_hour_left_percent}% of their 5-hour quota`],

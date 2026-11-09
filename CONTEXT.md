@@ -87,7 +87,12 @@ _Avoid_: next account, fallback account
 **Failover**:
 A request served by another account after its bound account failed or was left out; its success moves
 the session there.
-_Avoid_: switch, fallback (the fallback map moves sessions to another provider)
+_Avoid_: switch, fallback (a fallback runs another model)
+
+**Fallback**:
+The model a session runs in place of the one it asks for, while that one is used up on every account,
+as the fallback map names it; on another provider only by the user's say or `cross_provider: auto`.
+_Avoid_: failover (another account, same model), downgrade
 
 **Move**:
 A change of binding quota-pilot makes; quota-pilot never undoes one on its own.
