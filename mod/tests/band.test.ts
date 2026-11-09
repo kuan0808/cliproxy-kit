@@ -70,7 +70,7 @@ const SESSION: SessionInfo = {
 
 const BAND = (bodyColumns: number, isWorking: boolean, maxRows = 20) => ({
   component: 'AbovePrompt' as const,
-  props: { hasSurvey: false, isWorking, maxRows, bodyColumns, scroll: { offset: 0, bodyRows: maxRows }, view: {} },
+  props: { hasSurvey: false, isCollapsed: false, isWorking, maxRows, bodyColumns, scroll: { offset: 0, bodyRows: maxRows }, view: {} },
 })
 
 /** Answer every call the band makes at session start, as Claude Code and the proxy would. */
