@@ -45,8 +45,8 @@ page in the management panel, and a band in Claude Code (**quota-band**).
   moved to another account or model) the band says how much and what that costs at API prices, and
   hands off to a fresh session that starts from a summary. Turn on holding a long message until you
   confirm, or keeping the cache warm while you are away, for one session or for all.
-- 🔀 **A handover between providers.** When every Claude account is used up, a session moves to a
-  Codex model by hand, or by itself if you turn that on.
+- 🔀 **A fallback when a model runs out.** Run its configured replacement automatically within a
+  provider, or switch to another provider by hand or by itself if you turn that on.
 
 <table>
   <tr>
@@ -312,8 +312,8 @@ in [docs/architecture.md](docs/architecture.md#when-an-account-fails).
 > [!NOTE]
 > Never retried: a sign-in, quota, model or request failure, any other status, an account at rest,
 > and Codex sessions. A small session is not kept waiting through the proxy's pause after a status;
-> it moves at once. The retry stays inside one request while the proxy's `request-retry` is above
-> 0; at 0, Claude Code's own retry carries it.
+> it moves at once. Whether the proxy or Claude Code carries a retry depends on the proxy version
+> and settings: see [retry compatibility](docs/architecture.md#limitations).
 
 In the desktop app the band draws cards in the app's own light or dark theme, with that account's
 own quota (see [without the proxy](#with-and-without-the-band)):
@@ -354,22 +354,14 @@ On the panel's **Plugins** page, or under `plugins.configs.quota-pilot` in `conf
 | Key | Default | What it does |
 | --- | --- | --- |
 | `min_five_hour_left_percent` | `25` | A new session is not given an account with less of its 5-hour window left, unless that window resets within 30 minutes. An account whose plan has no 5-hour window is ranked by its week alone. |
-| `cross_provider` | `off` | `auto` moves Claude Code sessions to the `fallback_map` model of another provider when every account of their own is used up; `off` leaves that to `switch`. A fallback within one provider needs neither. |
-| `fallback_map` | none | What runs when a model is used up on every account, as `key: target`. The key is a provider or the start of a model id (the longest match wins), the target a model or `provider:model`: `claude-fable: claude-opus-5-5`, `claude: codex:gpt-6.1-sol`. A target of the same provider is used by itself, and the session returns once the model is back and it has rested an hour, or at `back` in the band. |
+| `cross_provider` | `off` | `auto` moves Claude Code sessions to the `fallback_map` model of another provider when the requested model is used up on every account of its provider; `off` leaves that to `switch`. A fallback within one provider needs neither. |
+| `fallback_map` | none | What runs when a model is used up on every account, as `key: target`. The key is a provider or the start of a model id (the longest match wins). The target is a model id whose provider can be inferred, or `provider:model`; names that do not identify their provider need the latter, such as `claude:team-opus`. Examples: `claude-fable: claude-opus-5-5`, `claude: codex:gpt-6.1-sol`. A target of the same provider is used by itself, and the session returns once the model is back and it has rested an hour, or at `back` in the band. |
 | `idle_poll_minutes` | `10` | How often idle accounts' quota is read. |
 | `context_lengths` | built in | Context window per model, to tell whether a conversation fits another model. |
 
-Main conversation turns include thread continuations without tools; subagents and side requests
-do not start or reconsider automatic routes. After `/model`, the new model evaluates its own
-fallback. The proxy supplies the band's manual fallback offer using the same resolver as automatic
-routing, skipping targets exhausted on every account even when their reset time is not reported.
-The offer can cross providers with `cross_provider: off`; context fit is checked when the route
-runs. The band stops showing a model-scoped fallback as soon as `/model` selects another model.
-After an hour's rest, unknown source quota gets one
-refresh with a two-second deadline before deciding whether to return. A timeout keeps the route;
-each routed request advances its activity time and warms the fallback's cache, so returning for
-free needs another hour of rest. Ordinary turns do not poll. This recovery rule applies within a
-provider and across providers.
+For a custom target whose context size is unknown, set `context_lengths` too. Fallback selection,
+manual offers and automatic return follow the
+[routing rules](docs/architecture.md#running-another-model-when-one-is-used-up).
 
 The band's settings are in Claude Code's `/config`, and asked for when it is installed:
 
@@ -464,7 +456,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | The band says `send a message to go on` after `switch to k•••` | The turn was stopped on purpose: any message continues it on k•••, with what the turn had done. |
 | The band says `got no answer · moves to k••• on the next turn` | The retry after a hang got no answer; your next message goes to k•••. Nothing to do. |
 | A request hangs for minutes | Through a proxy Claude Code has no first-byte limit, only its request timeout, `API_TIMEOUT_MS` (600 s by default). A shorter one ends a hang sooner, but also cuts off a slow first reply to a large cold prompt. Esc and send again moves the session; `switch to k•••` on the band's row moves it at any time. |
-| Retries happen on Claude Code's line, not inside one request | The proxy's `request-retry` is 0: the retry needs 1 or more for the proxy to carry it. |
+| Retries happen on Claude Code's line, not inside one request | Check the proxy version and `request-retry` against [retry compatibility](docs/architecture.md#limitations). |
 | The Account card says `resting, back in 4m` | That account kept failing and rests: the session moves at its next turn to an account that can serve, and the rest ends at the time shown, or at its first success. Nothing to do. |
 | A move offers `switch back` | The account the session left can take it again. `switch back` returns, asking first while the cache is warm; quota-pilot never moves a session back on its own, as the new account's cache is the warm one. |
 

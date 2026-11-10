@@ -187,7 +187,7 @@ export function QuotaLedgerView({
           )}
           {Object.entries(live.config.fallbackMap).map(([from, to]) => {
             // A key is a provider, or the start of a model id, shown as written; a target a model
-            // of the same provider, or provider:model.
+            // whose id names its provider, or provider:model.
             const fromName = live.providers[from] ? getTypeLabel(t, from) : from;
             const [provider, model] = to.includes(':') ? to.split(':') : ['', to];
             return (

@@ -225,8 +225,8 @@ func (c *Cred) planChanged(at time.Time) {
 
 // absentAfter takes a full reading of the provider's usage endpoint: a window kind it does not name
 // is one the account does not have (a plan without a 5-hour window, no weekly limit of Fable's own).
-// A model's own weekly window that a header named is the exception: it goes only when the reading
-// lists such windows (scoped) and leaves it out, as one that does not list them says nothing of it.
+// A previously read model window without its own usage key is the exception: only a scoped list
+// that leaves it out says it is gone. A reading without that list says nothing of it.
 func (c *Cred) absentAfter(windows []Window, scoped bool) {
 	named := map[string]bool{}
 	for _, w := range windows {

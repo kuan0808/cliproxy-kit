@@ -466,7 +466,7 @@ func route(raw []byte) ([]byte, error) {
 	}
 	attachments, encoded := attachmentsOf(req.Body)
 	in := core.RouteInput{
-		// Moving to another provider is for Claude Code sessions, which name themselves in this
+		// Fallback routing is for Claude Code sessions, which name themselves in this
 		// header: the host names a request's session only after routing.
 		Session:        strings.TrimSpace(req.Headers.Get("X-Claude-Code-Session-Id")),
 		RequestedModel: req.RequestedModel,

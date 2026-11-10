@@ -24,25 +24,9 @@ one rule and one place to read it, and to act in the proxy, where every request 
 
 ## Consequences
 
-Claude Code still believes it runs the model it asked for: the band says which model answers and
-offers `back`. Requests are not rewritten, so a target must take the request built for the model it
-replaces, as Opus 5.5 does for Fable 5.2. A fallback within Claude relies on the proxy's
-`upstream.claude.model-level-cooling: true`; with the default the account that refused Fable is
-held back for every model.
+Claude Code still believes it runs the model it asked for, so the band identifies the model that
+answers and offers `back`. Keeping requests unchanged makes target compatibility a requirement.
 
-Main conversation turns, including tool-less thread continuations, establish and reconsider
-automatic routes; subagents and side requests do not. A model-scoped route does not suppress a
-newly selected model's own fallback, which can replace it. Core resolves the manual offer with
-the same resolver and publishes it as the session's `fallback` field. Manual offers allow crossing
-providers regardless of `cross_provider`; context fit remains a route-time check. The band reads
-the offer for its alert and action without classifying quota or walking the map. It filters a
-model-scoped route against the current local selection for every display and cache decision,
-before the next proxy turn.
-
-After an hour of rest, unknown source quota triggers one refresh through the existing poller,
-bounded to two seconds on the request path, before deciding the return. A timeout keeps the route.
-Every finalized routed request advances the route's timestamp, even after a failed or
-still-unknown reading: the turn warms the fallback's cache, so a free return needs another hour
-of rest. That timestamp also preserves liveness for Sweep and Import, without a second persisted
-field. Ordinary turns do not poll. The same recovery rule applies to model fallbacks and provider
-takeovers.
+The live routing contract, including Claude's cooling setting, manual offers, local model
+selection and recovery, belongs to
+[Running another model](../architecture.md#running-another-model-when-one-is-used-up).

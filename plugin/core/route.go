@@ -53,9 +53,9 @@ type RouteInput struct {
 	Turn bool
 }
 
-// RouteDecision sends a request to another provider when Handled. Recheck asks for the host's
-// account list to be read again first: it is too old to judge every account used up by. Refresh
-// asks for quota to be read before deciding whether an idle automatic route can end.
+// RouteDecision sends a request to another model when Handled. Recheck asks for a fresh host
+// account list before establishing, ending or replacing an automatic route. Refresh asks for
+// quota to be read before deciding whether an idle automatic route can end.
 type RouteDecision struct {
 	Handled  bool
 	Provider string

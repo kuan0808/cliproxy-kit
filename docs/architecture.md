@@ -179,12 +179,12 @@ back in 5m`.
 
 A model can run out before its account does: Fable has a weekly limit of its own. When the model a
 session asks for is used up on every account of its provider (fresh readings, an account list read
-in the last 30 seconds, never on unknown data), quota-pilot runs what `fallback_map` names for it:
-the entry of the longest key the model's id starts with (`claude-fable`), else its provider's
-(`claude`); a target is a model, or `provider:model`. When the target is used up too the map is
-followed again from it, each model once (`claude-fable: claude-opus-5-5`, then
-`claude: codex:gpt-6.1-sol`). One account running out is not this: the session moves to another
-account first, as for any refusal.
+in the last 30 seconds, never on unknown source quota), quota-pilot resolves the configured
+[`fallback_map`](../README.md#configuration). When the target is used up too the map is followed
+again from it, visiting each provider and model pair at most once. An explicit target provider
+stays with the model while following the chain, including custom aliases whose names do not
+identify their provider. The resolved target name also stays intact through interception. One
+account running out is not this: the session moves to another account first, as for any refusal.
 
 Only main conversation turns establish or reconsider an automatic route, including thread
 continuations that inherit their tools. Subagents and side requests do not. Selecting another
@@ -212,13 +212,18 @@ alerts or controls, so `/model` takes effect before the next request reaches the
   image or file), plus the output it asks for. The band says why when it does not.
 - **It stays.** The fallback's prompt cache is the warm one, so an automatic route ends by itself
   only when that costs nothing: at the session's first turn after an hour without a routed request,
-  once the model it stood in for can serve again. If its quota is unknown after that rest, the
-  request asks the existing poller for a fresh reading once, with a two-second deadline, before
-  deciding the return. A timeout keeps the route. Every finalized routed request advances its
-  timestamp, including after a failed or still-unknown reading: that turn warms the fallback's
+  once the model it stood in for can serve again. Before ending or replacing the route, an account
+  list older than 30 seconds must be read again. If source quota is unknown after that rest, the
+  request asks the existing poller for a fresh reading with a two-second deadline. The request
+  driver handles inventory and quota reads in either order, at most once each, since a refreshed
+  inventory can introduce accounts whose quota is unknown. A failed read or timeout preserves the
+  existing route and still finalizes its routing decision. Every finalized routed request advances
+  its timestamp, including after a failed or still-unknown reading: that turn warms the fallback's
   cache again, so a free return waits for another hour of rest. The same timestamp keeps an active
   route alive through Sweep and persistence. Ordinary turns never ask for this poll. This applies
-  within a provider and across providers.
+  within a provider and across providers. The read-finalization invariant is covered by
+  `TestAttemptedRouteReadsAlwaysFinalize` in `plugin/core/fallback_test.go` and the request-driver
+  cases in `plugin/route_test.go`.
   `back` in the band ends it at once, and a new session decides afresh. A route whose own target
   runs out is decided again at the next turn.
 - **Nothing in the request is rewritten.** It goes as Claude Code built it for the model it asked:

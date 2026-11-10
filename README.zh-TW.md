@@ -35,7 +35,7 @@
 - 📊 **額度用到哪裡去。** 管理面板裡的頁面，把每個帳號的 5 小時視窗、這一週、近 7 或 30 天，依專案和 session 拆開。
 - 🎛️ **在工作的地方看額度。** Claude Code 輸入框上方的額度列，終端機和桌面版都有，顯示帳號、用量、context 和 prompt 快取，一鍵就能切換。
 - 🧊 **不再意外冷啟動。** 下一輪要重寫 prompt 快取之前（快取過期，或 session 換了帳號或模型），額度列會說要重寫多少、以 API 價格計算要花多少，也能交接到從摘要開始的新 session。還可以打開「長對話的訊息先停下等你確認」和「你離開時保持快取」，只對一個 session 或對全部。
-- 🔀 **供應商之間交接。** Claude 帳號全部用完時，session 可以手動換到 Codex 的模型，也可以設定成自動。
+- 🔀 **模型用完時自動接手。** 同一個供應商內會自動改用你設定的替代模型；也能手動切換到其他供應商，或設定成自動。
 
 <table>
   <tr>
@@ -252,7 +252,7 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | 帳號一直失敗 | 它暫停使用：只有其他帳號都無法服務時，新 session 才會分到它；它上面的 session 在下一輪換走 | `! d••• resting after 2 failures · moves to k••• (3% used) on the next turn`；Account 卡片顯示 `resting, back in 4m` |
 
 > [!NOTE]
-> 不會重試的情況：登入、額度、模型或請求本身的錯誤、其他狀態碼、暫停中的帳號，以及 Codex 的 session。對話不大的 session 不會等 proxy 在狀態碼之後的暫停結束，而是立刻換帳號。proxy 的 `request-retry` 大於 0 時，重試會藏在同一個請求裡；設為 0 時由 Claude Code 自己的重試接手。
+> 不會重試的情況：登入、額度、模型或請求本身的錯誤、其他狀態碼、暫停中的帳號，以及 Codex 的 session。對話不大的 session 不會等 proxy 在狀態碼之後的暫停結束，而是立刻換帳號。重試由 proxy 或 Claude Code 接手，取決於 proxy 的版本與設定，詳見 [retry 相容性](docs/architecture.md#limitations)。
 
 在桌面版裡，額度列畫成卡片，跟著 app 的淺色或深色主題，顯示那個帳號自己的額度（見[不經過 proxy 時](#有沒有裝額度列)）：
 
@@ -284,12 +284,12 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | 設定 | 預設 | 作用 |
 | --- | --- | --- |
 | `min_five_hour_left_percent` | `25` | 新的 session 不會分到 5 小時額度剩不到這個百分比的帳號，除非它 30 分鐘內就重置。方案沒有 5 小時視窗的帳號只看每週額度排序。 |
-| `cross_provider` | `off` | `auto`：某個供應商的帳號全部用完時，自動把 Claude Code 的 session 改送到 `fallback_map` 指定的另一個供應商的模型；`off`：交給 `switch` 手動切換。同一個供應商內的 fallback 不受這個設定影響。 |
-| `fallback_map` | 無 | 模型在所有帳號都用完時改用什麼，寫成 `鍵: 目標`。鍵是供應商，或模型 id 的開頭（取最長相符者）；目標是模型，或 `供應商:模型`：`claude-fable: claude-opus-5-5`、`claude: codex:gpt-6.1-sol`。同一個供應商的目標會自動套用，等原模型恢復且 session 閒置滿一小時後自動換回，也可以在額度列按 `back` 立刻換回。 |
+| `cross_provider` | `off` | `auto`：請求的模型在其供應商的所有帳號都用完時，自動把 Claude Code 的 session 改送到 `fallback_map` 指定的另一個供應商的模型；`off`：交給 `switch` 手動切換。同一個供應商內的 fallback 不受這個設定影響。 |
+| `fallback_map` | 無 | 模型在所有帳號都用完時改用什麼，寫成 `鍵: 目標`。鍵是供應商，或模型 id 的開頭（取最長相符者）。目標可以是能推知供應商的模型 id，或 `供應商:模型`；名稱無法辨識供應商時，需要用後者，例如 `claude:team-opus`。範例：`claude-fable: claude-opus-5-5`、`claude: codex:gpt-6.1-sol`。同一個供應商的目標會自動套用，等原模型恢復且 session 閒置滿一小時後自動換回，也可以在額度列按 `back` 立刻換回。 |
 | `idle_poll_minutes` | `10` | 多久讀一次閒置帳號的額度。 |
 | `context_lengths` | 內建表 | 各模型的 context 大小，用來判斷對話放不放得進另一個模型。 |
 
-主對話的回合包含沒有 tools 的 thread 接續請求；subagent 和側邊請求不會建立或重新判斷自動路由。用 `/model` 換模型後，會判斷新模型自己的 fallback。Proxy 用自動路由的同一套判斷提供額度列的手動 fallback 選項，跳過所有帳號都用完的目標，即使額度沒有回報重置時間也適用。手動選項可以在 `cross_provider: off` 時跨供應商，實際使用路由時才檢查 context 大小。用 `/model` 選擇其他模型時，額度列會立刻停止顯示原模型專屬的 fallback。閒置滿一小時後，若原模型額度不明，會重新讀取一次，最多等待 2 秒，再決定是否換回。逾時會保留路由；每次使用路由都會更新活動時間，讓 fallback 的快取重新變熱，因此免費換回需要再次閒置滿一小時。一般回合不會觸發這次讀取。同一供應商內與跨供應商的路由都適用。
+自訂目標的 context 大小不明時，也要設定 `context_lengths`。Fallback 選擇、手動選項與自動換回的詳細規則，見[路由說明](docs/architecture.md#running-another-model-when-one-is-used-up)。
 
 額度列的設定在 Claude Code 的 `/config`，安裝時也會詢問：
 
@@ -365,7 +365,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | 按了 `switch to k•••` 之後額度列顯示 `send a message to go on` | 這一輪是刻意停下的：送出任何訊息，就會在 k••• 上接著做，這一輪做過的事都還在。 |
 | 額度列說 `got no answer · moves to k••• on the next turn` | 沒有回應之後的重試也沒有回應；你的下一則訊息會送到 k•••。不用做什麼。 |
 | 請求卡住好幾分鐘 | 經過 proxy 時，Claude Code 沒有等待第一個位元組的上限，只有請求逾時 `API_TIMEOUT_MS`（預設 600 秒）。設短一點能更早結束卡住的請求，但也會切掉大型冷啟動 prompt 比較慢的第一個回覆。按 Esc 再送一次會換帳號；額度列上的 `switch to k•••` 隨時都能換。 |
-| 重試出現在 Claude Code 的訊息上，而不是藏在同一個請求裡 | proxy 的 `request-retry` 是 0：要設為 1 以上，proxy 才會自己重試。 |
+| 重試出現在 Claude Code 的訊息上，沒有藏在同一個請求裡 | 對照 [retry 相容性](docs/architecture.md#limitations)，檢查 proxy 的版本與 `request-retry` 設定。 |
 | Account 卡片顯示 `resting, back in 4m` | 那個帳號一直失敗，正在暫停使用：session 會在下一輪換到能服務的帳號，暫停到顯示的時間結束，或在它第一次成功時結束。不用做什麼。 |
 | 切換提示附上 `switch back` | session 離開的帳號現在又能接手。按 `switch back` 換回去，快取還熱著時會先問；quota-pilot 不會自己把 session 換回去，因為新帳號的快取才是熱的。 |
 
