@@ -282,6 +282,9 @@ automatic features go further, both off until you turn them on:
 - `/keep-warm on`: while you are away the band refreshes the cache up to three times, each shortly
   before it would expire, at the cache-read price.
 
+After each reply, the band confirms the route before recording the cache, so an automatic fallback
+or return does not hold the next message or stop keep-warm because of an older quota read.
+
 `off` turns one off, `default` goes back to `/config`, and the command alone says where it stands.
 A choice lasts while the window is open, `/clear` and handoffs included; a new window, a restart or
 a resumed conversation starts from the defaults in `/config`. The `quota` pane shows both, with a

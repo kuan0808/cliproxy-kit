@@ -99,6 +99,7 @@ let root: string
 let repo: unknown
 /** The session's id, which a `/clear` changes, and the rate limits Claude Code reports for a direct login. */
 let currentId = SESSION.id
+let selectedModel = SESSION.model
 let limits: { kind: string; percentUsed: number; resetsAt?: string }[] = []
 /** What the band's own model calls answer, and what it asked them. */
 const FORK_OK = { value: { isAnswered: true, text: 'ok', usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 412_000, cache_creation_input_tokens: 0 } } } as OpEventResult<'model.fork'>
@@ -148,6 +149,7 @@ function stubSession(
   root = SESSION.cwd
   repo = null
   currentId = SESSION.id
+  selectedModel = SESSION.model
   limits = []
   forkReply = FORK_OK
   forks = []
@@ -166,7 +168,7 @@ function stubSession(
     await duringSurfaces?.()
     return { value: ['desktop'] }
   })
-  on('session.model', () => ({ value: SESSION.model }))
+  on('session.model', () => ({ value: selectedModel }))
   on('session.cwd', () => ({ value: SESSION.cwd }))
   on('session.usage', () => ({
     value: { startedAt: NOW - H, context: { tokens: contextTokens, window: 1_000_000, percent: contextTokens / 10_000 }, rateLimits: limits, cost: { usd: 4.2 } },
@@ -691,6 +693,17 @@ const stepReplies = (on: On) => on('turn.step', async function* (_$, e) {
   await duringStep?.()
   return { turnId: e.turnId, index: e.index, answer: 'Done.', toolUses: [], stopReason: 'end_turn', usage: WARM_STEP } as never
 })
+
+const routeSnapshotForReply = (target: string, sequence: number): Snap => ({
+  ...SNAP,
+  sequence,
+  config: { ...SNAP.config, fallback_map: { 'claude-fable': target || 'claude-opus-5-5' } },
+  sessions: { s1: {
+    ...SNAP.sessions.s1!, model: target || 'claude-fable-5-2', requested_model: 'claude-fable-5-2',
+    served_auth_id: 'claude-d',
+    route: target ? { provider: 'claude', model: target, from: 'claude-fable-5-2', auto: true, at: iso(sequence > 7 ? 5_000 : -2 * H) } : undefined,
+  } },
+})
 /** Moves the clock on minute by minute, the proxy writing its snapshot as it does. */
 const minutes = async (clock: MockClock, n: number) => {
   for (let m = 0; m < n; m++) {
@@ -880,6 +893,79 @@ test('a routed session is not taken for one whose model changed', async ($, on) 
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
   await reply($)
   expect(await rowText($)).toBe('')
+})
+
+for (const [transition, before, after] of [
+  ['creation', '', 'claude-opus-5-5'],
+  ['replacement', 'claude-opus-5-5', 'claude-sonnet-5-5'],
+  ['return', 'claude-opus-5-5', ''],
+] as const) {
+  test(`a cached reply confirms route ${transition} before holding or keeping warm`, { options: { holdColdDefault: true, keepWarmDefault: true } }, async ($, on) => {
+    const clock = stubSession(on, routeSnapshotForReply(before, 7), { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+    selectedModel = 'claude-fable-5-2'
+    stampReads = true
+    stepReplies(on)
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    await clock.advance(5_000)
+    duringStep = () => { snapshot = routeSnapshotForReply(after, 8) }
+    await $.turn.start({ text: 'go on', turnId: 'r1' } as never)
+    for await (const chunk of $.turn.step({ turnId: 'r1', index: 0, model: 'claude-fable-5-2' } as never)) void chunk
+    await $.turn.complete({ turnId: 'r1', answer: 'Done.', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+    await clock.settle()
+    expect(await rowText($)).not.toContain('Next turn starts cold')
+    expect(await $.prompt.submit(composer('carry on with the warm cache'))).toMatchObject({ text: 'carry on with the warm cache' })
+    await minutes(clock, 4)
+    expect(forks).toHaveLength(1)
+  })
+}
+
+for (const confirmation of ['network failure', 'missing session'] as const) {
+  test(`an unconfirmed cached reply records an unknown route after ${confirmation}`, { options: { holdColdDefault: true, keepWarmDefault: true } }, async ($, on) => {
+    const clock = stubSession(on, routeSnapshotForReply('', 7), { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+    selectedModel = 'claude-fable-5-2'
+    stampReads = true
+    stepReplies(on)
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    await clock.advance(5_000)
+    duringStep = () => {
+      snapshot = routeSnapshotForReply('claude-opus-5-5', 8)
+      if (confirmation === 'network failure') failure = { deny: 'connect ECONNREFUSED 127.0.0.1:8317' }
+      else snapshot = { ...snapshot, sessions: {} }
+    }
+    await $.turn.start({ text: 'go on', turnId: 'r1' } as never)
+    for await (const chunk of $.turn.step({ turnId: 'r1', index: 0, model: 'claude-fable-5-2' } as never)) void chunk
+    await $.turn.complete({ turnId: 'r1', answer: 'Done.', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+    await clock.settle()
+    failure = undefined
+    snapshot = routeSnapshotForReply('claude-opus-5-5', 9)
+    await clock.advance(10_000)
+    expect(await rowText($)).not.toContain('Next turn starts cold')
+    expect(await $.prompt.submit(composer('carry on after confirmation recovers'))).toMatchObject({ text: 'carry on after confirmation recovers' })
+    await minutes(clock, 4)
+    expect(forks).toHaveLength(1)
+  })
+}
+
+test('a resume while confirming a reply cannot restore the old cache or effort', async ($, on) => {
+  const clock = stubSession(on, routeSnapshotForReply('', 7))
+  selectedModel = 'claude-fable-5-2'
+  stepReplies(on)
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  duringStep = () => {
+    duringId = async () => {
+      duringId = undefined
+      await $.session.end({ reason: 'resume', sessionId: SESSION.id } as never)
+      currentId = 's-other'
+    }
+  }
+  await $.turn.start({ text: 'go on', turnId: 'r1' } as never)
+  for await (const chunk of $.turn.step({ turnId: 'r1', index: 0, model: 'claude-fable-5-2', effort: 'max' } as never)) void chunk
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+  expect(await ui.find({ text: /^waiting$/ })).toBeDefined()
+  expect(await ui.find({ text: /max/ })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('a handoff runs once however often it is asked, and leaves a conversation that changed meanwhile', async ($, on) => {

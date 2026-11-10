@@ -104,16 +104,16 @@ async function bandInput($: $T, working: boolean, fresh = false): Promise<BandIn
 // One refresh runs at a time, so a slow one never writes over the result of a newer one, and at
 // most one waits behind it, standing for every request made meanwhile (a full one if any was):
 // a slow network read never builds a queue.
-let running: Promise<void> | null = null
-let waiting: Promise<void> | null = null
+let running: Promise<Snap | null> | null = null
+let waiting: Promise<Snap | null> | null = null
 let waitingFull = false
 // Commands for a proxy read over the network, each sent with the next read of /band (see
 // sendCommand): plugin resources are read-only routes.
 const outbox: object[] = []
 
-function refresh($: $T, full: boolean): Promise<void> {
+function refresh($: $T, full: boolean): Promise<Snap | null> {
   if (!running) {
-    running = refreshOnce($, full).catch(() => undefined).finally(() => { running = null })
+    running = refreshOnce($, full).catch(() => null).finally(() => { running = null })
     return running
   }
   waitingFull ||= full
@@ -126,7 +126,7 @@ function refresh($: $T, full: boolean): Promise<void> {
   return waiting
 }
 
-async function refreshOnce($: $T, full: boolean): Promise<void> {
+async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
   const [home, base, ttl, authToken, apiKey] = await Promise.all([
     $.env.get('HOME'),
     $.env.get('ANTHROPIC_BASE_URL'),
@@ -155,6 +155,7 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
   // a proxy without api-keys): the same wherever the proxy runs (beside it, in a container, on a
   // server).
   const token = authToken || apiKey
+  let snap: Snap | null = null
   if (proxied && base) {
     const url = base.replace(/\/+$/, '')
     const auth: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
@@ -183,7 +184,6 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
     const command = outbox.shift()
     if (command) headers['X-Band-Command'] = encodeURIComponent(JSON.stringify(command))
     if (outbox.length) void refresh($, false)
-    let snap: Snap | null = null
     let error: BandError | null = null
     try {
       const r = await $.http.fetch(`${url}/v0/resource/plugins/quota-pilot/band`, { headers })
@@ -212,6 +212,7 @@ async function refreshOnce($: $T, full: boolean): Promise<void> {
   // The mirror of the session's choice, should a /clear have wiped it unannounced.
   const shown = await read($, autoA)
   if (shown.holdCold !== mine.holdCold || shown.keepWarm !== mine.keepWarm) await update($, autoA, () => mine)
+  return snap
 }
 
 /**
@@ -969,7 +970,8 @@ export const register: Register = (on, options) => {
     // A step of another conversation (one a /clear or a resume left) is not this one's.
     if (gen === generation && !ownStep(e) && r?.usage) {
       const u = r.usage
-      const [snap, sess] = await Promise.all([read($, snapA), read($, sessA)])
+      const snap = await refresh($, false)
+      const sess = await read($, sessA)
       // Only a reply that read or wrote the cache says it is warm; one that did neither, as one under
       // the provider's smallest cached prompt, leaves it unknown.
       const cached = u.cache_read_input_tokens + u.cache_creation_input_tokens > 0
@@ -982,9 +984,11 @@ export const register: Register = (on, options) => {
         creation: u.cache_creation_input_tokens,
         input: u.input_tokens,
         model: e.model || c.model,
-        route: routeFor(snap?.sessions[sess.id], e.model || c.model)?.model ?? '',
+        route: sess.proxied && !snap?.sessions[sess.id]
+          ? null
+          : routeFor(snap?.sessions[sess.id], e.model || c.model)?.model ?? '',
       }))
-      if (e.effort !== undefined) await update($, sessA, s => ({ ...s, effort: String(e.effort) }))
+      if (e.effort !== undefined) await update($, sessA, s => (gen !== generation ? s : { ...s, effort: String(e.effort) }))
     }
     return r
   })

@@ -706,6 +706,7 @@ func (s *State) BuildForBand(session, model, client string) Snapshot {
 		snap.Sessions[session] = own
 	}
 	for _, pv := range snap.Providers {
+		pv.Fallbacks = nil
 		for _, c := range pv.Credentials {
 			c.ID, c.Email, c.SameAs = opaqueID(c.ID), "", opaqueID(c.SameAs)
 		}

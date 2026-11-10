@@ -400,6 +400,11 @@ whose request it first served, for as long as an account or a route the user cho
 only that key's band sees it, switches it and names it, and only that key's Codex hook hears of it;
 anyone may name a session the proxy has not seen.
 
+Per-model fallback aggregates (`providers.*.fallbacks`: source, target and session count) are
+management-only. `BuildForBand` removes them for every client key, including a session's owner;
+the owner's own session route stays visible. Shared quota does not grant access to other clients'
+model-specific activity.
+
 ## The page
 
 One HTML file, built from `ui/` with the panel's own styles and components (MIT, see
@@ -433,6 +438,12 @@ minute, or across a proxy restart, says so. When `/band` gives nothing the band 
 proxy has not accepted yet, no plugin there, no answer) and keeps the last snapshot, marked old.
 The switch list leaves out accounts that cannot serve the session's model and second credentials
 of an account.
+
+After a main reply, the band confirms its route with a fresh `/band` read before recording the
+cache. A failed read or a response without this session records an unknown route (`null`),
+separately from a confirmed unrouted reply (`''`). The next cold-turn decision and keep-warm use
+that record, so route creation, replacement and return during the reply do not invent a second
+cold write. A clear or resume while confirmation is pending leaves the new conversation untouched.
 
 A move is worded from the session's switch record (`last_switch`), which quota-pilot writes where
 the main conversation's binding changes account and nowhere else: at the success elsewhere that

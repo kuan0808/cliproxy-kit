@@ -439,3 +439,58 @@ func TestTheSnapshotTellsWhoRunsAFallback(t *testing.T) {
 		t.Fatalf("after /model sonnet: next turn %s, route %+v, fallbacks %+v", v.Model, v.Route, snap.Providers["claude"].Fallbacks)
 	}
 }
+
+func TestBandOmitsManagementFallbackActivityAcrossClientKeys(t *testing.T) {
+	s, c, in := fableSetup(t, Config{FallbackMap: map[string]string{"claude-fable": "claude-opus-5-5"}})
+	s.Observe(Usage{Provider: "claude", Model: fable, SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t, ClientKey: "sk-a"})
+	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s2", AuthID: "claude-b", RequestedAt: c.t, ClientKey: "sk-b"})
+	fableLeft(s, c, "claude-a", 0)
+	fableLeft(s, c, "claude-b", 0)
+	if d := s.Route(in); !d.Handled || d.Model != "claude-opus-5-5" {
+		t.Fatalf("initial fallback = %+v", d)
+	}
+	for _, q := range []struct {
+		session, key string
+		own          bool
+	}{
+		{"s1", "sk-b", false},
+		{"s2", "sk-b", true},
+		{"s1", "sk-a", true},
+		{"", "sk-b", false},
+	} {
+		client, ok := s.Client(q.key)
+		if !ok {
+			t.Fatalf("client key was not accepted: %s", q.key)
+		}
+		band := s.BuildForBand(q.session, fable, client)
+		if q.own {
+			if band.Sessions[q.session] == nil {
+				t.Fatalf("own session was hidden: %+v", band.Sessions)
+			}
+			if q.session == "s1" && (band.Sessions["s1"].Route == nil || band.Sessions["s1"].Route.Model != "claude-opus-5-5") {
+				t.Fatalf("own route was hidden: %+v", band.Sessions["s1"])
+			}
+		} else if len(band.Sessions) != 0 {
+			t.Fatalf("another client's session was disclosed: %+v", band.Sessions)
+		}
+		raw, err := json.Marshal(band)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire struct {
+			Providers map[string]map[string]json.RawMessage `json:"providers"`
+		}
+		if err := json.Unmarshal(raw, &wire); err != nil {
+			t.Fatal(err)
+		}
+		for provider, view := range wire.Providers {
+			if _, present := view["fallbacks"]; present {
+				t.Fatalf("/band disclosed %s fallback activity to %s: %s", provider, q.key, raw)
+			}
+		}
+	}
+	got := s.Build().Providers["claude"].Fallbacks
+	if len(got) != 1 || got[0] != (FallbackView{From: fable, Model: "claude-opus-5-5", Sessions: 1}) {
+		t.Fatalf("management lost its fallback aggregate: %+v", got)
+	}
+}

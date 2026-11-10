@@ -190,7 +190,7 @@ export type CacheInfo = {
   lastAnswer: string
   /** The model that answered the last main-thread request: another one next finds nothing cached. */
   model: string
-  /** The route the last reply went by ('' for none), as the snapshot said then; null when not known (a resumed conversation). */
+  /** The route the last reply went by ('' for none), as confirmed by the snapshot; null when not known. */
   route: string | null
   /** Times the cache was kept warm since the reader's last prompt, and whether keeping it stopped: a refresh found it gone. */
   warmed: number
