@@ -101,6 +101,85 @@ func TestTheFallbackMapIsFollowedUntilAModelCanServe(t *testing.T) {
 	}
 }
 
+func TestChangingModelsEvaluatesItsOwnFallback(t *testing.T) {
+	s, c, in := fableSetup(t, Config{CrossProvider: "auto", FallbackMap: map[string]string{
+		"claude-fable": "claude-opus-5-5", "claude": "codex:gpt-6-sol",
+	}})
+	fableLeft(s, c, "claude-a", 0)
+	fableLeft(s, c, "claude-b", 0)
+	if d := s.Route(in); d.Model != "claude-opus-5-5" {
+		t.Fatalf("initial Fable fallback = %+v", d)
+	}
+	for _, id := range []string{"claude-a", "claude-b"} {
+		weeklyOnly(s, c, id, 0, 3*24*time.Hour)
+	}
+	in.RequestedModel, in.Turn = "claude-opus-5-5", false
+	if d := s.Route(in); d.Handled || d.Refresh {
+		t.Fatalf("a side request replaced the model route: %+v", d)
+	}
+	if r := routeOf(s); r == nil || r.From != fable {
+		t.Fatalf("the side request discarded the Fable route: %+v", r)
+	}
+	in.Turn = true
+	if d := s.Route(in); !d.Handled || d.Provider != "codex" || d.Model != "gpt-6-sol" {
+		t.Fatalf("Opus after /model = %+v", d)
+	}
+	if v := s.Build().Sessions["s1"]; v.Route == nil || v.Route.From != "" || v.Model != "gpt-6-sol" || v.RequestedModel != in.RequestedModel {
+		t.Fatalf("the new model's route is not visible: %+v", v)
+	}
+	if d := s.Intercept(InterceptInput{Session: in.Session, Model: "gpt-6-sol", RequestedModel: in.RequestedModel, Thread: "continue"}); !d.Terminate || d.ErrorCode != threadUnsupported {
+		t.Fatalf("the new route did not request a whole-history replay: %+v", d)
+	}
+	if d := s.Intercept(InterceptInput{Session: in.Session, Model: "gpt-6-sol", RequestedModel: in.RequestedModel}); d.Terminate {
+		t.Fatalf("the new route stopped its stateless replay: %+v", d)
+	}
+}
+
+func TestIdleAutomaticRoutesRefreshUnknownQuota(t *testing.T) {
+	for _, target := range []string{"claude-opus-5-5", "codex:gpt-6-sol"} {
+		for _, recovered := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/recovered=%t", target, recovered), func(t *testing.T) {
+				s, c, in := fableSetup(t, Config{CrossProvider: "auto", FallbackMap: map[string]string{"claude-fable": target}})
+				fableLeft(s, c, "claude-a", 0)
+				fableLeft(s, c, "claude-b", 0)
+				if d := s.Route(in); !d.Handled || d.Refresh {
+					t.Fatalf("initial fallback = %+v", d)
+				}
+				c.add(10 * time.Minute)
+				if d := s.Route(in); !d.Handled || d.Refresh {
+					t.Fatalf("an ordinary turn requested polling: %+v", d)
+				}
+				at := routeOf(s).At
+				c.add(61 * time.Minute)
+				for range 2 {
+					if d := s.Route(in); !d.Handled || !d.Refresh {
+						t.Fatalf("stale quota after rest = %+v", d)
+					}
+					if r := routeOf(s); r == nil || !r.At.Equal(at) {
+						t.Fatalf("unknown quota consumed the idle interval: %+v", r)
+					}
+					c.add(time.Second)
+				}
+				left := 0.0
+				if recovered {
+					left = 1
+				}
+				for _, id := range []string{"claude-a", "claude-b"} {
+					weeklyOnly(s, c, id, 0.5, 3*24*time.Hour)
+					fableLeft(s, c, id, left)
+				}
+				d := s.Route(in)
+				if d.Refresh || d.Handled == recovered {
+					t.Fatalf("after refreshed quota, recovered=%t: %+v", recovered, d)
+				}
+				if r := routeOf(s); recovered && r != nil || !recovered && (r == nil || !r.At.Equal(c.t)) {
+					t.Fatalf("route after refreshed quota = %+v", r)
+				}
+			})
+		}
+	}
+}
+
 // An automatic route ends by itself only when that costs nothing: what it stood in for can serve
 // again and the session has rested past its cache. Until then it stays, and `back` ends it.
 func TestAnAutomaticRouteEndsOnceItCostsNothing(t *testing.T) {

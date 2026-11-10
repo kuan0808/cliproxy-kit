@@ -9,7 +9,7 @@ import type { Engine, FoundElement, MockClock, TestBody, TestOptions } from 'cla
 const test = (name: string, a: TestOptions | TestBody, b?: TestBody) =>
   typeof a === 'function' ? kitTest(name, { timeoutMs: 120_000 }, a) : kitTest(name, { timeoutMs: 120_000, ...a }, b!)
 
-import type { BandError, SessionInfo, Snap, SnapSwitch, UiState } from '../types'
+import type { BandError, Move, SessionInfo, Snap, SnapSwitch, UiState } from '../types'
 import { settingsOf, stepAfter } from '../hooks/logic'
 import { bandFacts } from '../hooks/view'
 import { W } from '../hooks/wording'
@@ -1569,6 +1569,43 @@ describe('the live rows', () => {
       auto: { holdCold: null, keepWarm: null }, unattended: false, live: { step: step && { turnId: 't1', index: 0, ...step }, skew },
     }, act).top
   const proxy = (skew: number) => NOW - skew
+
+  test('fallback_map grammar selects the same target for the alert and its command', () => {
+    const cases: { map: Record<string, string>; health: string; provider: string; model: string }[] = [
+      { map: { claude: 'gpt-6-sol' }, health: 'exhausted', provider: 'codex', model: 'gpt-6-sol' },
+      { map: { claude: 'codex:gpt-6-sol' }, health: 'exhausted', provider: 'codex', model: 'gpt-6-sol' },
+      { map: { 'claude-fable': 'codex:gpt-6-sol' }, health: 'healthy', provider: 'codex', model: 'gpt-6-sol' },
+      { map: { claude: 'codex:gpt-6-sol', 'claude-fable': 'claude-opus-5-5' }, health: 'healthy', provider: 'claude', model: 'claude-opus-5-5' },
+      { map: { claude: 'claude-sonnet-5-5', 'claude-fable': 'claude-opus-5-5', 'claude-fable-5-2': ' Codex : gpt-6-sol ' }, health: 'healthy', provider: 'codex', model: 'gpt-6-sol' },
+    ]
+    for (const { map, health, provider, model } of cases) {
+      const snap: Snap = {
+        ...SNAP,
+        config: { ...SNAP.config, fallback_map: map },
+        providers: { claude: { ...SNAP.providers.claude!, health } },
+        sessions: { s1: { ...SNAP.sessions.s1!, model: 'claude-fable-5-2[1m]', blocked: ['claude-d', 'claude-k'] } },
+      }
+      const sent: Move[] = []
+      const facts = bandFacts({
+        snap, bandError: null, now: NOW, sess: { ...SESSION, model: 'claude-fable-5-2[1m]' },
+        cache: { ...cache, prompt: 0, lastAt: 0 }, ui, models: [], working: false,
+        settings: settingsOf({}), auto: { holdCold: null, keepWarm: null }, unattended: false,
+        live: { step: null, skew: 0 },
+      }, { ...act, send: move => sent.push(move) })
+      expect(facts.top?.title.startsWith('fable-5-2[1m] is used up on every account')).toBe(true)
+      expect(facts.top?.acts.map(a => a.label)).toEqual([`use ${model}`])
+      facts.top?.acts[0]?.run?.()
+      expect(sent).toEqual([{ action: 'route', fields: { provider, model }, text: W.routeTo(model) }])
+      for (const blocked of [[], ['claude-d']]) {
+        const partial: Snap = {
+          ...snap,
+          providers: { claude: { ...snap.providers.claude!, health: 'healthy' } },
+          sessions: { s1: { ...snap.sessions.s1!, blocked } },
+        }
+        expect(row(partial, null)?.acts.some(a => a.key === 'route') ?? false).toBe(false)
+      }
+    }
+  })
 
   test('waiting: what failed, when it is tried, and who takes over, in full and short', () => {
     for (const skew of [0, 60_000, -60_000]) {

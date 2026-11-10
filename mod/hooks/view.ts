@@ -372,10 +372,9 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
   const liveAct = live && pressAct(i, acct, menu, act)
   if (live?.kind === 'retry' && !alert?.text.startsWith('quota data is')) return liveRow(live, liveAct)
   if (alert && alert.action !== 'dismiss') {
-    const fallback = acct ? snap?.config.fallback_map[acct.provider] : undefined
-    const [fbProvider, fbModel] = (fallback ?? ':').split(':')
-    const acts: Act[] = alert.action === 'route' && fbProvider && fbModel && menu.canSend
-      ? [{ key: 'route', label: `use ${fbModel}`, name: true, run: () => menu.pick({ action: 'route', fields: { provider: fbProvider, model: fbModel }, text: W.routeTo(fbModel) }) }]
+    const fallback = alert.fallback
+    const acts: Act[] = alert.action === 'route' && fallback && menu.canSend
+      ? [{ key: 'route', label: `use ${fallback.model}`, name: true, run: () => menu.pick({ action: 'route', fields: fallback, text: W.routeTo(fallback.model) }) }]
       : alert.action === 'handoff' && !working ? [handoff] : []
     return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts }
   }

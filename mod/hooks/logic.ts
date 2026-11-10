@@ -305,7 +305,20 @@ export function missingText(cred: SnapCred | undefined, kind: string): string {
  * `key` names what a dismissal hides, for alerts that can be dismissed; `short` is the whole row in
  * fewer words, for a row too narrow for it; `back` the account `switch back` returns to.
  */
-export type Alert = { level: 'warn' | 'info'; text: string; short?: string; action?: 'handoff' | 'route' | 'dismiss'; key?: string; back?: string }
+export type Alert = { level: 'warn' | 'info'; text: string; short?: string; action?: 'handoff' | 'route' | 'dismiss'; key?: string; back?: string; fallback?: { provider: string; model: string } }
+
+function fallbackFor(map: Record<string, string>, model: string): Alert['fallback'] {
+  const id = model.split(/[[(]/, 1)[0]!.trim().toLowerCase()
+  let key = providerOfModel(id)
+  for (const k of Object.keys(map)) {
+    if (k && id.startsWith(k) && (k.length > key.length || !id.startsWith(key))) key = k
+  }
+  const value = map[key]?.trim() ?? ''
+  const colon = value.indexOf(':')
+  const target = colon < 0 ? value : value.slice(colon + 1).trim()
+  const provider = colon < 0 ? providerOfModel(target) : value.slice(0, colon).trim().toLowerCase()
+  return provider && target ? { provider, model: target } : undefined
+}
 
 /** Whether the session's move is certain at its next turn: its account rests, or its retry got no answer. */
 const movesNextTurn = (s: SnapSession | undefined): boolean =>
@@ -321,12 +334,12 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
     if (age > 3 * MIN) return { level: 'warn', ...W.stale(fmtDuration(age)) }
   }
   if (!acct || !snap) return null
-  const { session, view, provider } = acct
+  const { session, view } = acct
   if (session.route_note) return { level: 'warn', text: session.route_note, action: 'handoff' }
-  if (view.health === 'exhausted' && !session.route) {
-    const fallback = snap.config.fallback_map[provider]
+  if (!session.route && (view.health === 'exhausted' || view.credentials.length > 0 && view.credentials.every(c => session.blocked?.includes(c.id)))) {
+    const fallback = fallbackFor(snap.config.fallback_map, session.model)
     const back = nextUp(view, '', now)
-    return { level: 'warn', ...W.exhausted(provider, back), action: fallback ? 'route' : undefined }
+    return { level: 'warn', ...W.exhausted(shortModel(session.model), back), action: fallback ? 'route' : undefined, fallback }
   }
   if (session.switch_imminent && movesNextTurn(session)) {
     // A resting account, or one whose retry got no answer, gives its session to the account the

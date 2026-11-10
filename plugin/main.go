@@ -477,6 +477,22 @@ func route(raw []byte) ([]byte, error) {
 		Turn:           conversationTurn(req.Body),
 	}
 	d := state.Route(in)
+	if d.Refresh {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			pollOnce(ctx, minRepoll, false)
+		}()
+		select {
+		case <-done:
+			if ctx.Err() == nil {
+				d = state.Route(in)
+			}
+		case <-ctx.Done():
+		}
+	}
 	if d.Recheck {
 		// A takeover acts on every account being used up: on the host's list as it is now.
 		if infos, ok := readInventory(); ok && len(infos) > 0 {
@@ -517,9 +533,9 @@ func attachmentsOf(body []byte) (count, encoded int) {
 }
 
 // conversationTurn reports whether a request is a turn of the main conversation: Claude Code
-// offers tools on every turn, and a subagent names itself in the request's metadata.
+// offers tools or continues a thread, and a subagent names itself in the request's metadata.
 func conversationTurn(body []byte) bool {
-	if len(gjson.GetBytes(body, "tools").Array()) == 0 {
+	if len(gjson.GetBytes(body, "tools").Array()) == 0 && gjson.GetBytes(body, "thread.type").String() != "continue" {
 		return false
 	}
 	return !fromSubagent(body)

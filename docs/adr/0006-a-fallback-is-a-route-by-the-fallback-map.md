@@ -29,3 +29,13 @@ offers `back`. Requests are not rewritten, so a target must take the request bui
 replaces, as Opus 5.5 does for Fable 5.2. A fallback within Claude relies on the proxy's
 `upstream.claude.model-level-cooling: true`; with the default the account that refused Fable is
 held back for every model.
+
+Main conversation turns, including tool-less thread continuations, establish and reconsider
+automatic routes; subagents and side requests do not. A model-scoped route does not suppress a
+newly selected model's own fallback, which can replace it. The band resolves its manual fallback
+alert and action together using the same map grammar and model-specific exhaustion.
+
+After an hour of rest, unknown source quota triggers one refresh through the existing poller,
+bounded to two seconds on the request path. A timeout or still-unknown reading keeps the route
+and its timestamp, leaving the return decision for the next turn. Ordinary turns do not poll.
+The same recovery rule applies to model fallbacks and provider takeovers.

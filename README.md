@@ -356,6 +356,13 @@ On the panel's **Plugins** page, or under `plugins.configs.quota-pilot` in `conf
 | `idle_poll_minutes` | `10` | How often idle accounts' quota is read. |
 | `context_lengths` | built in | Context window per model, to tell whether a conversation fits another model. |
 
+Main conversation turns include thread continuations without tools; subagents and side requests
+do not start or reconsider automatic routes. After `/model`, the new model evaluates its own
+fallback. The band's manual fallback button uses the same map grammar and model-specific limits.
+After an hour's rest, unknown source quota gets one refresh with a two-second deadline. A timeout
+or still-unknown reading keeps the route and its return opportunity for the next turn; ordinary
+turns do not poll. This recovery rule applies within a provider and across providers.
+
 The band's settings are in Claude Code's `/config`, and asked for when it is installed:
 
 | Setting | Default | What it does |

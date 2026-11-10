@@ -186,6 +186,12 @@ followed again from it, each model once (`claude-fable: claude-opus-5-5`, then
 `claude: codex:gpt-6.1-sol`). One account running out is not this: the session moves to another
 account first, as for any refusal.
 
+Only main conversation turns establish or reconsider an automatic route, including thread
+continuations that inherit their tools. Subagents and side requests do not. Selecting another
+main model ignores a model-scoped route while evaluating the newly requested model's own
+fallback; a new route replaces the old one. The band's manual fallback alert and action use the
+same map grammar and the session model's blocked accounts, including model-specific limits.
+
 - **Within a provider** the fallback happens by itself. It stands in for that model alone: the
   session's requests for another model (a title on Haiku, a subagent on Sonnet) run as asked. The
   session keeps its account.
@@ -198,8 +204,12 @@ account first, as for any refusal.
   image or file), plus the output it asks for. The band says why when it does not.
 - **It stays.** The fallback's prompt cache is the warm one, so an automatic route ends by itself
   only when that costs nothing: at the session's first turn after an hour without a routed request,
-  once the model it stood in for can serve again. `back` in the band ends it at once, and a new
-  session decides afresh. A route whose own target runs out is decided again at the next turn.
+  once the model it stood in for can serve again. If its quota is unknown after that rest, the
+  request asks the existing poller for a fresh reading once, with a two-second deadline. On a
+  timeout or still-unknown quota the route keeps its old timestamp so the next turn can reconsider;
+  ordinary turns never ask for this poll. This applies within a provider and across providers.
+  `back` in the band ends it at once, and a new session decides afresh. A route whose own target
+  runs out is decided again at the next turn.
 - **Nothing in the request is rewritten.** It goes as Claude Code built it for the model it asked:
   Fable 5.2 and Opus 5.5 take the same effort levels, thinking settings, context and output sizes.
   A message thread keeps the model and provider it began on, so a thread continuation on a route is

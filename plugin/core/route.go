@@ -46,19 +46,21 @@ type RouteInput struct {
 	Attachments    int // images and documents it carries
 	MaxOutput      int // the answer it allows (max_tokens); 0 when it does not say
 	Available      []string
-	// Turn marks a turn of the main conversation: it offers tools and comes from no subagent.
+	// Turn marks a turn of the main conversation: it offers tools or continues a thread, and comes from no subagent.
 	// Only a turn says what the conversation asks for and whether it still fits a route.
 	Turn bool
 }
 
 // RouteDecision sends a request to another provider when Handled. Recheck asks for the host's
-// account list to be read again first: it is too old to judge every account used up by.
+// account list to be read again first: it is too old to judge every account used up by. Refresh
+// asks for quota to be read before deciding whether an idle automatic route can end.
 type RouteDecision struct {
 	Handled  bool
 	Provider string
 	Model    string
 	Reason   string
 	Recheck  bool
+	Refresh  bool
 }
 
 // inventoryFresh is how old the host's account list may be when a takeover acts on it: an account
@@ -92,23 +94,30 @@ func (s *State) Route(in RouteInput) RouteDecision {
 	r, routed := s.routes[root]
 	// A model's route stands in for that model alone: the session's other requests run as asked.
 	if routed && r.From != "" && r.From != modelKey(in.RequestedModel) {
-		return RouteDecision{}
+		routed = false
 	}
 	// An automatic route is decided again when going back costs nothing (what it stood in for can
 	// serve, and the session has rested past its cache), or when its own target has run out.
+	refresh := false
 	if routed && r.Auto && in.Turn {
-		free := now.Sub(r.At) >= cacheGone && s.healthLocked(from, in.RequestedModel, now) == "healthy"
+		rested := now.Sub(r.At) >= cacheGone
+		health := s.healthLocked(from, in.RequestedModel, now)
+		free := rested && health == "healthy"
 		if free || s.healthLocked(r.Provider, r.Model, now) == "exhausted" {
 			delete(s.routes, root)
 			s.dirty = true
 			routed = false
+		} else {
+			refresh = rested && health == "unknown"
 		}
 	}
 	// An established route that cannot run is not handled here: the router cannot fail a
 	// request, so Intercept stops it instead of letting it fall back to the original model.
 	if routed {
-		r.At = now
-		s.routes[root] = r
+		if !refresh {
+			r.At = now
+			s.routes[root] = r
+		}
 		if r.Provider == from && strings.EqualFold(r.Model, in.RequestedModel) {
 			return RouteDecision{}
 		}
@@ -122,9 +131,9 @@ func (s *State) Route(in RouteInput) RouteDecision {
 			s.noteLocked(sess, note)
 		}
 		if note != "" {
-			return RouteDecision{}
+			return RouteDecision{Refresh: refresh}
 		}
-		return RouteDecision{Handled: true, Provider: r.Provider, Model: r.Model, Reason: "session routed to " + r.Model}
+		return RouteDecision{Handled: true, Provider: r.Provider, Model: r.Model, Reason: "session routed to " + r.Model, Refresh: refresh}
 	}
 
 	// Without a route, the note says why the fallback could not run; each turn of the conversation
