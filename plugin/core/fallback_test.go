@@ -151,14 +151,11 @@ func TestIdleAutomaticRoutesRefreshUnknownQuota(t *testing.T) {
 				}
 				at := routeOf(s).At
 				c.add(61 * time.Minute)
-				for range 2 {
-					if d := s.Route(in); !d.Handled || !d.Refresh {
-						t.Fatalf("stale quota after rest = %+v", d)
-					}
-					if r := routeOf(s); r == nil || !r.At.Equal(at) {
-						t.Fatalf("unknown quota consumed the idle interval: %+v", r)
-					}
-					c.add(time.Second)
+				if d := s.Route(in); d.Handled || !d.Refresh {
+					t.Fatalf("stale quota after rest = %+v", d)
+				}
+				if r := routeOf(s); r == nil || !r.At.Equal(at) {
+					t.Fatalf("route finalized before reading quota: %+v", r)
 				}
 				left := 0.0
 				if recovered {
@@ -168,6 +165,7 @@ func TestIdleAutomaticRoutesRefreshUnknownQuota(t *testing.T) {
 					weeklyOnly(s, c, id, 0.5, 3*24*time.Hour)
 					fableLeft(s, c, id, left)
 				}
+				in.QuotaRead = "done"
 				d := s.Route(in)
 				if d.Refresh || d.Handled == recovered {
 					t.Fatalf("after refreshed quota, recovered=%t: %+v", recovered, d)
@@ -177,6 +175,58 @@ func TestIdleAutomaticRoutesRefreshUnknownQuota(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestActiveFallbacksSurviveQuotaReadTimeoutsAndRestarts(t *testing.T) {
+	for _, target := range []string{"claude-opus-5-5", "codex:gpt-6-sol"} {
+		t.Run(target, func(t *testing.T) {
+			s, c, in := fableSetup(t, Config{CrossProvider: "auto", FallbackMap: map[string]string{"claude-fable": target}})
+			fableLeft(s, c, "claude-a", 0)
+			fableLeft(s, c, "claude-b", 0)
+			if d := s.Route(in); !d.Handled {
+				t.Fatalf("initial route = %+v", d)
+			}
+			for range 26 {
+				c.add(61 * time.Minute)
+				if d := s.Route(in); !d.Refresh {
+					t.Fatalf("idle route did not request a reading: %+v", d)
+				}
+				s.TakeDirty()
+				in.QuotaRead = "timeout"
+				if d := s.Route(in); !d.Handled || d.Refresh {
+					t.Fatalf("timeout did not finalize the routed request: %+v", d)
+				}
+				in.QuotaRead = ""
+				if !s.TakeDirty() {
+					t.Fatal("route activity was not marked for saving")
+				}
+				s.Sweep()
+				if r := routeOf(s); r == nil || !r.At.Equal(c.t) {
+					t.Fatalf("Sweep discarded active fallback: %+v", r)
+				}
+				next := New("restarted", c.now)
+				next.SetConfig(s.Config())
+				next.Import(s.Export())
+				s = next
+				s.UpdateInventory(inventory)
+				if r := routeOf(s); r == nil || !r.At.Equal(c.t) {
+					t.Fatalf("Import discarded active fallback: %+v", r)
+				}
+			}
+			saved := s.Export()
+			c.add(24*time.Hour + time.Second)
+			s.Sweep()
+			if r, ok := s.Export().Routes["claude:s1"]; ok {
+				t.Fatalf("unused automatic route did not expire: %+v", r)
+			}
+			next := New("expired", c.now)
+			next.SetConfig(s.Config())
+			next.Import(saved)
+			if r, ok := next.Export().Routes["claude:s1"]; ok {
+				t.Fatalf("Import restored an expired automatic route: %+v", r)
+			}
+		})
 	}
 }
 

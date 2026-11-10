@@ -21,6 +21,7 @@ import {
   readBand,
   repoOf,
   rewriteText,
+  routeFor,
   sessionAccount,
   settingsOf,
   settlePending,
@@ -981,7 +982,7 @@ export const register: Register = (on, options) => {
         creation: u.cache_creation_input_tokens,
         input: u.input_tokens,
         model: e.model || c.model,
-        route: snap?.sessions[sess.id]?.route?.model ?? '',
+        route: routeFor(snap?.sessions[sess.id], e.model || c.model)?.model ?? '',
       }))
       if (e.effort !== undefined) await update($, sessA, s => ({ ...s, effort: String(e.effort) }))
     }

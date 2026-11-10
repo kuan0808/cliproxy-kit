@@ -155,6 +155,13 @@ export function sessionAccount(snap: Snap | null, sessionId: string): SessionAcc
   return { provider: session.provider, view, cred, session }
 }
 
+const modelKey = (model: string) => model.split(/[[(]/, 1)[0]!.trim().toLowerCase()
+
+export function routeFor(session: SnapSession | undefined, asked: string): SnapSession['route'] {
+  const route = session?.route
+  return route && (!route.from || modelKey(currentModel(modelKey(asked), route.from)) === modelKey(route.from)) ? route : undefined
+}
+
 export function windowOf(cred: SnapCred | undefined, kind: string): SnapWindow | undefined {
   return cred?.windows.find(w => w.kind === kind)
 }
@@ -307,17 +314,32 @@ export function missingText(cred: SnapCred | undefined, kind: string): string {
  */
 export type Alert = { level: 'warn' | 'info'; text: string; short?: string; action?: 'handoff' | 'route' | 'dismiss'; key?: string; back?: string; fallback?: { provider: string; model: string } }
 
-function fallbackFor(map: Record<string, string>, model: string): Alert['fallback'] {
-  const id = model.split(/[[(]/, 1)[0]!.trim().toLowerCase()
-  let key = providerOfModel(id)
-  for (const k of Object.keys(map)) {
-    if (k && id.startsWith(k) && (k.length > key.length || !id.startsWith(key))) key = k
+function modelExhausted(snap: Snap, provider: string, model: string, now: number): boolean {
+  const view = snap.providers[provider]
+  const kinds = ['5h', '7d', provider === 'claude' ? modelBucket(model) : '']
+  return view?.health === 'exhausted' || Boolean(view?.credentials.length && view.credentials.every(c =>
+    c.disabled || c.windows.some(w => kinds.includes(w.kind) && !w.stale && w.remaining <= 0 &&
+      (!w.reset_at || Date.parse(w.reset_at) > now))))
+}
+
+function fallbackFor(snap: Snap, model: string, now: number): Alert['fallback'] {
+  const map = snap.config.fallback_map
+  const seen = new Set([modelKey(model)])
+  for (let current = model; ;) {
+    const id = modelKey(current)
+    let key = providerOfModel(id)
+    for (const k of Object.keys(map)) {
+      if (k && id.startsWith(k) && (k.length > key.length || !id.startsWith(key))) key = k
+    }
+    const value = map[key]?.trim() ?? ''
+    const colon = value.indexOf(':')
+    const target = colon < 0 ? value : value.slice(colon + 1).trim()
+    const provider = colon < 0 ? providerOfModel(target) : value.slice(0, colon).trim().toLowerCase()
+    if (!provider || !target || seen.has(modelKey(target))) return undefined
+    seen.add(modelKey(target))
+    if (!modelExhausted(snap, provider, target, now)) return { provider, model: target }
+    current = target
   }
-  const value = map[key]?.trim() ?? ''
-  const colon = value.indexOf(':')
-  const target = colon < 0 ? value : value.slice(colon + 1).trim()
-  const provider = colon < 0 ? providerOfModel(target) : value.slice(0, colon).trim().toLowerCase()
-  return provider && target ? { provider, model: target } : undefined
 }
 
 /** Whether the session's move is certain at its next turn: its account rests, or its retry got no answer. */
@@ -328,18 +350,20 @@ const movesNextTurn = (s: SnapSession | undefined): boolean =>
  * The single alert the band shows, most important first. Confirmations and notices are drawn
  * by the caller before this.
  */
-export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxied: boolean, now: number, dismissed = '', pressed: Pressed | null = null): Alert | null {
+export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxied: boolean, now: number, dismissed = '', pressed: Pressed | null = null, asked = acct?.session.requested_model || acct?.session.model || ''): Alert | null {
   if (proxied && snap) {
     const age = now - Date.parse(snap.generated_at)
     if (age > 3 * MIN) return { level: 'warn', ...W.stale(fmtDuration(age)) }
   }
   if (!acct || !snap) return null
   const { session, view } = acct
-  if (session.route_note) return { level: 'warn', text: session.route_note, action: 'handoff' }
-  if (!session.route && (view.health === 'exhausted' || view.credentials.length > 0 && view.credentials.every(c => session.blocked?.includes(c.id)))) {
-    const fallback = fallbackFor(snap.config.fallback_map, session.model)
+  const route = routeFor(session, asked)
+  const model = currentModel(asked, session.requested_model || session.model)
+  if (session.route_note && (route || sameModel(modelKey(model), modelKey(session.requested_model || session.model)))) return { level: 'warn', text: session.route_note, action: 'handoff' }
+  if (!route && modelExhausted(snap, acct.provider, model, now)) {
+    const fallback = fallbackFor(snap, model, now)
     const back = nextUp(view, '', now)
-    return { level: 'warn', ...W.exhausted(shortModel(session.model), back), action: fallback ? 'route' : undefined, fallback }
+    return { level: 'warn', ...W.exhausted(shortModel(model), back), action: fallback ? 'route' : undefined, fallback }
   }
   if (session.switch_imminent && movesNextTurn(session)) {
     // A resting account, or one whose retry got no answer, gives its session to the account the
@@ -358,7 +382,7 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
   }
   // A fallback the proxy took by itself (the model asked for is used up on every account) is said
   // until dismissed: the band learns of it after its first turn, which was cold.
-  const fell = session.route
+  const fell = route
   if (fell?.auto && fell.from) {
     const key = `fallback:${fell.from}:${fell.model}`
     if (key !== dismissed) return { level: 'info', ...W.fallback(shortModel(fell.from), shortModel(fell.model)), action: 'dismiss', key }
@@ -646,9 +670,12 @@ export function coldTurn(cache: CacheInfo, acct: SessionAccount | null, asked: s
   const tokens = cache.prompt
   if (tokens <= 0) return null
   const s = acct?.session
+  const route = routeFor(s, asked)
+  const cached = cache.route || cache.model
+  const changed = Boolean(cached && asked && !sameModel(modelKey(route?.model || asked), modelKey(cached)))
   // A route to another model of the same account moves nothing the proxy tells, but what the
   // last reply's route was, as the band saw it then.
-  const rerouted = s && cache.route !== null && (s.route?.model ?? '') !== cache.route
+  const rerouted = s && cache.route !== null && (route?.model ?? '') !== cache.route && changed && (route || sameModel(asked, cache.model))
   // A move the plugin expects at the next turn (its account rests, or got no answer) is as cold as
   // one made.
   const next = movesNextTurn(s) ? acct?.view.credentials.find(c => c.id === s!.next_auth_id) : undefined
@@ -659,9 +686,9 @@ export function coldTurn(cache: CacheInfo, acct: SessionAccount | null, asked: s
   }
   if (s && (nextTurnMoves(acct) || rerouted)) {
     const label = acct?.view.credentials.find(c => c.id === s.auth_id)?.label ?? 'another account'
-    return { reason: 'moved', why: s.route ? `routed to ${s.route.model}` : `moved to ${label}`, key: movedKey(cache, s.auth_id), tokens }
+    return { reason: 'moved', why: route ? `routed to ${route.model}` : `moved to ${label}`, key: movedKey(cache, s.auth_id), tokens }
   }
-  if (cache.model && asked && !sameModel(asked, cache.model)) {
+  if (!route && changed) {
     const name = asked.replace(/^claude-/, '').replace(/\[[^\]]*\]$/, '')
     return { reason: 'model', why: `model changed to ${name}`, key: `model:${asked}:${cache.lastAt}`, tokens }
   }

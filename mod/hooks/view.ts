@@ -25,6 +25,7 @@ import {
   restingNow,
   rewriteBrief,
   rewriteText,
+  routeFor,
   sessionAccount,
   shortModel,
   switchTargets,
@@ -161,7 +162,7 @@ export function nextTurn(i: BandInput): { acct: SessionAccount | null; model: st
   const acct = sess.proxied ? sessionAccount(snap, sess.id) : null
   // A routed session runs the route's model; otherwise the model is Claude Code's own, which
   // /model changes before any reply.
-  const route = acct?.session.route
+  const route = routeFor(acct?.session, sess.model)
   const seen = acct?.session.requested_model || (acct?.provider === 'claude' ? acct.session.model : '')
   const model = route ? route.model : currentModel(sess.model, seen || cache.model)
   const isCodex = acct?.provider === 'codex'
@@ -174,7 +175,7 @@ export function nextTurn(i: BandInput): { acct: SessionAccount | null; model: st
 export function bandFacts(i: BandInput, act: Do): Facts {
   const { snap, bandError, now, sess, cache, ui, models, settings } = i
   const { acct, model, isCodex, cold, cost } = nextTurn(i)
-  const route = acct?.session.route
+  const route = routeFor(acct?.session, sess.model)
   const ctxWindow = route && snap?.context_lengths[route.model] ? snap.context_lengths[route.model]! : sess.contextWindow
   const ctx = sess.contextTokens != null && ctxWindow > 0
     ? { used: sess.contextTokens, window: ctxWindow, left: Math.max(0, 100 - (sess.contextTokens / ctxWindow) * 100) }
@@ -318,7 +319,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
   }
   if (ui.confirm === 'switch' && acct) {
     // Two steps: accounts of this provider and the providers to route to, then that provider's models.
-    const route = acct.session.route
+    const route = routeFor(acct.session, i.sess.model)
     if (ui.switchStep) {
       const provider = ui.switchStep
       return ask(W.modelMenu(providerTitle(provider)), '', [
@@ -363,7 +364,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
   const handoff: Act = { key: 'alert-handoff', label: 'hand off', main: true, run: () => act.ui({ confirm: 'handoff' }) }
   // Without quota data from the proxy, the reason it gave goes first.
   if (bandError) return { key: 'alert', tone: 'warn', title: bandErrorText(bandError), detail: '', acts: [] }
-  const alert = pickAlert(snap, acct, i.sess.proxied, now, ui.dismissedSwitch, ui.pressed)
+  const alert = pickAlert(snap, acct, i.sess.proxied, now, ui.dismissedSwitch, ui.pressed, i.sess.model)
   const live = liveRows(i, acct)
   // The proxy's alerts go before a cold turn: a retry of the session's account, waiting or running,
   // first; then the plugin's warnings; then the band's own hang watch. That the session moved, or

@@ -11,7 +11,7 @@ const test = (name: string, a: TestOptions | TestBody, b?: TestBody) =>
 
 import type { BandError, Move, SessionInfo, Snap, SnapSwitch, UiState } from '../types'
 import { settingsOf, stepAfter } from '../hooks/logic'
-import { bandFacts } from '../hooks/view'
+import { bandFacts, nextTurn } from '../hooks/view'
 import { W } from '../hooks/wording'
 import MOVES from './moves.js'
 
@@ -1582,28 +1582,132 @@ describe('the live rows', () => {
       const snap: Snap = {
         ...SNAP,
         config: { ...SNAP.config, fallback_map: map },
-        providers: { claude: { ...SNAP.providers.claude!, health } },
+        providers: { claude: { ...SNAP.providers.claude!, health, credentials: SNAP.providers.claude!.credentials.map(c => ({
+          ...c, windows: [...c.windows, { kind: '7d_fable', label: 'Weekly Fable', remaining: 0, reset_at: iso(H), observed_at: iso(0), stale: false }],
+        })) } },
         sessions: { s1: { ...SNAP.sessions.s1!, model: 'claude-fable-5-2[1m]', blocked: ['claude-d', 'claude-k'] } },
       }
       const sent: Move[] = []
-      const facts = bandFacts({
+      const input = {
         snap, bandError: null, now: NOW, sess: { ...SESSION, model: 'claude-fable-5-2[1m]' },
         cache: { ...cache, prompt: 0, lastAt: 0 }, ui, models: [], working: false,
         settings: settingsOf({}), auto: { holdCold: null, keepWarm: null }, unattended: false,
         live: { step: null, skew: 0 },
-      }, { ...act, send: move => sent.push(move) })
-      expect(facts.top?.title.startsWith('fable-5-2[1m] is used up on every account')).toBe(true)
+      }
+      const facts = bandFacts(input, { ...act, send: move => sent.push(move) })
+      expect(facts.top?.title.startsWith('fable-5-2 is used up on every account')).toBe(true)
       expect(facts.top?.acts.map(a => a.label)).toEqual([`use ${model}`])
       facts.top?.acts[0]?.run?.()
       expect(sent).toEqual([{ action: 'route', fields: { provider, model }, text: W.routeTo(model) }])
       for (const blocked of [[], ['claude-d']]) {
         const partial: Snap = {
           ...snap,
-          providers: { claude: { ...snap.providers.claude!, health: 'healthy' } },
+          providers: { claude: { ...snap.providers.claude!, health: 'healthy', credentials: snap.providers.claude!.credentials.map(c => ({
+            ...c, windows: c.windows.map(w => w.kind === '7d_fable' ? { ...w, remaining: blocked.includes(c.id) ? 0 : 0.5 } : w),
+          })) } },
           sessions: { s1: { ...snap.sessions.s1!, blocked } },
         }
-        expect(row(partial, null)?.acts.some(a => a.key === 'route') ?? false).toBe(false)
+        expect(bandFacts({ ...input, snap: partial }, act).top?.acts.some(a => a.key === 'route') ?? false).toBe(false)
       }
+    }
+  })
+
+  test('manual fallback follows the configured chain past exhausted targets only', () => {
+    const base: Snap = {
+      ...SNAP,
+      config: { ...SNAP.config, fallback_map: { 'claude-fable': 'claude-opus-5-5', claude: 'codex:gpt-6-sol' } },
+      providers: {
+        claude: {
+          ...SNAP.providers.claude!,
+          credentials: SNAP.providers.claude!.credentials.map(c => ({ ...c, windows: [
+            ...c.windows,
+            { kind: '7d_fable', label: 'Weekly Fable', remaining: 0, reset_at: iso(H), observed_at: iso(0), stale: false },
+          ] })),
+        },
+        codex: { health: 'healthy', credentials: [{ ...SNAP.providers.claude!.credentials[0]!, id: 'codex-x', auth_index: '3', label: 'x•••' }] },
+      },
+      sessions: { s1: { ...SNAP.sessions.s1!, model: 'claude-fable-5-2', blocked: ['claude-d', 'claude-k'] } },
+    }
+    const input = (snap: Snap) => ({
+      snap, bandError: null, now: NOW, sess: { ...SESSION, model: 'claude-fable-5-2' },
+      cache: { ...cache, prompt: 0, lastAt: 0 }, ui, models: [], working: false,
+      settings: settingsOf({}), auto: { holdCold: null, keepWarm: null }, unattended: false,
+      live: { step: null, skew: 0 },
+    })
+    for (const kind of ['5h', '7d', '7d_opus']) {
+      const snap: Snap = { ...base, providers: { ...base.providers, claude: {
+        ...base.providers.claude!, credentials: base.providers.claude!.credentials.map(c => ({ ...c, windows: [
+          ...c.windows.filter(w => w.kind !== kind),
+          { kind, label: kind, remaining: 0, reset_at: iso(H), observed_at: iso(0), stale: false },
+        ] })),
+      } } }
+      const sent: Move[] = []
+      const facts = bandFacts(input(snap), { ...act, send: move => sent.push(move) })
+      expect(facts.top?.acts.map(a => a.label)).toEqual(['use gpt-6-sol'])
+      facts.top?.acts[0]?.run?.()
+      expect(sent).toEqual([{ action: 'route', fields: { provider: 'codex', model: 'gpt-6-sol' }, text: W.routeTo('gpt-6-sol') }])
+    }
+    for (const mode of ['available', 'stale', 'reset']) {
+      const snap: Snap = { ...base, providers: { ...base.providers, claude: {
+        ...base.providers.claude!, credentials: base.providers.claude!.credentials.map((c, index) => ({ ...c, windows: [
+          ...c.windows,
+          { kind: '7d_opus', label: 'Weekly Opus', remaining: mode === 'available' && index === 0 ? 0.5 : 0, reset_at: iso(mode === 'reset' ? -1 : H), observed_at: iso(0), stale: mode === 'stale' },
+        ] })),
+      } } }
+      expect(bandFacts(input(snap), act).top?.acts.map(a => a.label)).toEqual(['use claude-opus-5-5'])
+    }
+    const cycle: Snap = {
+      ...base,
+      config: { ...base.config, fallback_map: { 'claude-fable': 'claude-opus-5-5', claude: 'claude-fable-5-2[1m]' } },
+      providers: { ...base.providers, claude: { ...base.providers.claude!, health: 'exhausted' } },
+    }
+    expect(bandFacts(input(cycle), act).top?.acts).toEqual([])
+  })
+
+  test('a model-scoped route follows the local model selection before another proxy turn', () => {
+    const route = { provider: 'claude', model: 'claude-opus-5-5', from: 'claude-fable-5-2', auto: true, at: iso(-60_000) }
+    const snap: Snap = {
+      ...SNAP,
+      sessions: { s1: { ...SNAP.sessions.s1!, requested_model: 'claude-fable-5-2', route } },
+      context_lengths: { ...SNAP.context_lengths, 'claude-opus-5-5': 300_000 },
+    }
+    const input = (model: string) => ({
+      snap, bandError: null, now: NOW, sess: { ...SESSION, model, contextWindow: 700_000 },
+      cache: { ...cache, model: 'claude-fable-5-2', route: 'claude-opus-5-5' }, ui, models: [], working: true,
+      settings: settingsOf({}), auto: { holdCold: null, keepWarm: null }, unattended: false,
+      live: { step: null, skew: 0 },
+    })
+    for (const model of ['claude-sonnet-5-5', 'sonnet[1m]', 'claude-opus-5-5', 'opus', 'claude-fable-5-1', 'claude-fable-5-2-20261109']) {
+      const i = input(model)
+      const facts = bandFacts(i, act)
+      expect(facts.route).toBe('')
+      expect(facts.model).toBe(model.replace('[1m]', ''))
+      expect(facts.ctx?.window).toBe(700_000)
+      expect(facts.controls.unroute).toBeUndefined()
+      expect(facts.top).toBeNull()
+      expect(bandFacts({ ...i, ui: { ...ui, confirm: 'switch' } }, act).top?.acts.some(a => a.key === 'unroute')).toBe(false)
+      if (model === 'claude-sonnet-5-5') {
+        expect(facts.cache.cost).toEqual({ cold: 0.64, warm: 0.016 })
+        expect(nextTurn(i).cold).toMatchObject({ reason: 'model', why: 'model changed to sonnet-5-5' })
+      }
+      if (model === 'claude-opus-5-5' || model === 'opus') expect(nextTurn(i).cold).toBeNull()
+    }
+    for (const model of ['claude-fable-5-2', 'fable[1m]', 'fable(high)', 'claude-fable-5-2(high)']) {
+      const i = input(model)
+      const facts = bandFacts(i, act)
+      expect(facts.route).toBe('claude-opus-5-5')
+      expect(facts.model).toBe('claude-opus-5-5')
+      expect(facts.ctx?.window).toBe(300_000)
+      expect(facts.controls.unroute).toBeDefined()
+      expect(facts.top?.title).toContain('running opus-5-5')
+      expect(nextTurn(i).cold).toBeNull()
+      expect(bandFacts({ ...i, ui: { ...ui, confirm: 'switch' } }, act).top?.acts.find(a => a.key === 'unroute')?.label).toBe('back to fable-5-2')
+    }
+    for (const from of [undefined, '']) {
+      const manual: Snap = { ...snap, sessions: { s1: { ...snap.sessions.s1!, route: { ...route, from, auto: false } } } }
+      const facts = bandFacts({ ...input('claude-sonnet-5-5'), snap: manual }, act)
+      expect(facts.route).toBe('claude-opus-5-5')
+      expect(facts.controls.unroute).toBeDefined()
     }
   })
 

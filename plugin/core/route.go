@@ -46,6 +46,7 @@ type RouteInput struct {
 	Attachments    int // images and documents it carries
 	MaxOutput      int // the answer it allows (max_tokens); 0 when it does not say
 	Available      []string
+	QuotaRead      string
 	// Turn marks a turn of the main conversation: it offers tools or continues a thread, and comes from no subagent.
 	// Only a turn says what the conversation asks for and whether it still fits a route.
 	Turn bool
@@ -98,8 +99,7 @@ func (s *State) Route(in RouteInput) RouteDecision {
 	}
 	// An automatic route is decided again when going back costs nothing (what it stood in for can
 	// serve, and the session has rested past its cache), or when its own target has run out.
-	refresh := false
-	if routed && r.Auto && in.Turn {
+	if routed && r.Auto && in.Turn && in.QuotaRead != "timeout" {
 		rested := now.Sub(r.At) >= cacheGone
 		health := s.healthLocked(from, in.RequestedModel, now)
 		free := rested && health == "healthy"
@@ -107,17 +107,16 @@ func (s *State) Route(in RouteInput) RouteDecision {
 			delete(s.routes, root)
 			s.dirty = true
 			routed = false
-		} else {
-			refresh = rested && health == "unknown"
+		} else if rested && health == "unknown" && in.QuotaRead == "" {
+			return RouteDecision{Refresh: true}
 		}
 	}
 	// An established route that cannot run is not handled here: the router cannot fail a
 	// request, so Intercept stops it instead of letting it fall back to the original model.
 	if routed {
-		if !refresh {
-			r.At = now
-			s.routes[root] = r
-		}
+		r.At = now
+		s.routes[root] = r
+		s.dirty = true
 		if r.Provider == from && strings.EqualFold(r.Model, in.RequestedModel) {
 			return RouteDecision{}
 		}
@@ -131,9 +130,9 @@ func (s *State) Route(in RouteInput) RouteDecision {
 			s.noteLocked(sess, note)
 		}
 		if note != "" {
-			return RouteDecision{Refresh: refresh}
+			return RouteDecision{}
 		}
-		return RouteDecision{Handled: true, Provider: r.Provider, Model: r.Model, Reason: "session routed to " + r.Model, Refresh: refresh}
+		return RouteDecision{Handled: true, Provider: r.Provider, Model: r.Model, Reason: "session routed to " + r.Model}
 	}
 
 	// Without a route, the note says why the fallback could not run; each turn of the conversation

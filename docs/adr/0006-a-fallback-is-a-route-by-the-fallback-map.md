@@ -33,9 +33,14 @@ held back for every model.
 Main conversation turns, including tool-less thread continuations, establish and reconsider
 automatic routes; subagents and side requests do not. A model-scoped route does not suppress a
 newly selected model's own fallback, which can replace it. The band resolves its manual fallback
-alert and action together using the same map grammar and model-specific exhaustion.
+alert and action together using the same map grammar, following it past targets known exhausted
+on every account, including model-specific limits. It filters a model-scoped route against the
+current local selection for every display and cache decision, before the next proxy turn.
 
 After an hour of rest, unknown source quota triggers one refresh through the existing poller,
-bounded to two seconds on the request path. A timeout or still-unknown reading keeps the route
-and its timestamp, leaving the return decision for the next turn. Ordinary turns do not poll.
-The same recovery rule applies to model fallbacks and provider takeovers.
+bounded to two seconds on the request path, before deciding the return. A timeout keeps the route.
+Every finalized routed request advances the route's timestamp, even after a failed or
+still-unknown reading: the turn warms the fallback's cache, so a free return needs another hour
+of rest. That timestamp also preserves liveness for Sweep and Import, without a second persisted
+field. Ordinary turns do not poll. The same recovery rule applies to model fallbacks and provider
+takeovers.

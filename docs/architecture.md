@@ -190,7 +190,10 @@ Only main conversation turns establish or reconsider an automatic route, includi
 continuations that inherit their tools. Subagents and side requests do not. Selecting another
 main model ignores a model-scoped route while evaluating the newly requested model's own
 fallback; a new route replaces the old one. The band's manual fallback alert and action use the
-same map grammar and the session model's blocked accounts, including model-specific limits.
+same map grammar, skipping targets known used up on every account, including model-specific
+limits; unknown readings do not prove exhaustion. The band checks a model-scoped route against
+Claude Code's current local selection before using it for the model, price, context, cache,
+alerts or controls, so `/model` takes effect before the next request reaches the proxy.
 
 - **Within a provider** the fallback happens by itself. It stands in for that model alone: the
   session's requests for another model (a title on Haiku, a subagent on Sonnet) run as asked. The
@@ -205,9 +208,12 @@ same map grammar and the session model's blocked accounts, including model-speci
 - **It stays.** The fallback's prompt cache is the warm one, so an automatic route ends by itself
   only when that costs nothing: at the session's first turn after an hour without a routed request,
   once the model it stood in for can serve again. If its quota is unknown after that rest, the
-  request asks the existing poller for a fresh reading once, with a two-second deadline. On a
-  timeout or still-unknown quota the route keeps its old timestamp so the next turn can reconsider;
-  ordinary turns never ask for this poll. This applies within a provider and across providers.
+  request asks the existing poller for a fresh reading once, with a two-second deadline, before
+  deciding the return. A timeout keeps the route. Every finalized routed request advances its
+  timestamp, including after a failed or still-unknown reading: that turn warms the fallback's
+  cache again, so a free return waits for another hour of rest. The same timestamp keeps an active
+  route alive through Sweep and persistence. Ordinary turns never ask for this poll. This applies
+  within a provider and across providers.
   `back` in the band ends it at once, and a new session decides afresh. A route whose own target
   runs out is decided again at the next turn.
 - **Nothing in the request is rewritten.** It goes as Claude Code built it for the model it asked:

@@ -94,24 +94,28 @@ func TestIdleRouteRefreshHasABoundedDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pollTurn = make(chan struct{}, 1)
 		state = fallbackState()
-		if d := fableRoute(t, `{"thread":{"type":"continue"}}`); !d.Handled {
+		if d := fableRoute(t, `{"tools":[{"name":"Bash"}]}`); !d.Handled {
 			t.Fatalf("initial route = %+v", d)
 		}
-		at := state.Build().Sessions["s1"].Route.At
-		time.Sleep(61 * time.Minute)
 		pollTurn <- struct{}{}
 		defer func() { <-pollTurn }()
 		for range 2 {
+			time.Sleep(61 * time.Minute)
 			started := time.Now()
-			d := fableRoute(t, `{"thread":{"type":"continue"}}`)
+			d := fableRoute(t, `{"tools":[{"name":"Bash"}]}`)
 			if !d.Handled || d.TargetModel != "claude-opus-5-5" || time.Since(started) != 2*time.Second {
 				t.Fatalf("refresh deadline: route %+v, elapsed %s", d, time.Since(started))
 			}
 			synctest.Wait()
-			if r := state.Build().Sessions["s1"].Route; r == nil || !r.At.Equal(at) {
-				t.Fatalf("timed-out refresh consumed the idle interval: %+v", r)
+			if r := state.Build().Sessions["s1"].Route; r == nil || !r.At.Equal(time.Now()) {
+				t.Fatalf("timed-out refresh did not record route activity: %+v", r)
+			}
+			started = time.Now()
+			if d := fableRoute(t, `{"tools":[{"name":"Bash"}]}`); !d.Handled || time.Since(started) != 0 {
+				t.Fatalf("an ordinary routed request polled: %+v", d)
 			}
 		}
+		time.Sleep(61 * time.Minute)
 		for _, id := range []string{"a", "b"} {
 			now := time.Now()
 			state.MergePoll(id, "claude", []core.Window{

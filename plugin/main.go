@@ -485,13 +485,15 @@ func route(raw []byte) ([]byte, error) {
 			defer close(done)
 			pollOnce(ctx, minRepoll, false)
 		}()
+		in.QuotaRead = "timeout"
 		select {
 		case <-done:
 			if ctx.Err() == nil {
-				d = state.Route(in)
+				in.QuotaRead = "done"
 			}
 		case <-ctx.Done():
 		}
+		d = state.Route(in)
 	}
 	if d.Recheck {
 		// A takeover acts on every account being used up: on the host's list as it is now.
