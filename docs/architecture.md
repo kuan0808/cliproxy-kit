@@ -437,11 +437,12 @@ The quota cards are the account's windows, each with its reset (`view.ts`, `quot
   yet keeps its card and says so (`not reported yet`, `after the first reply`).
 - **Weekly**. For a model with a weekly window of its own and no separate card for it, that
   window takes this card, under its name, while it has less left than the week.
-- **Weekly Fable**, in the place freed by a missing 5-hour limit on a proxied account: Fable's own
-  weekly window, for every session model, whichever of the two has less left. An account that reports no such window
-  (`absent` names `7d_fable`) reads `no separate limit`, as Fable then draws on the week alone. A
-  direct login has no such card: Claude Code reports the 5-hour and weekly windows only. Plans
-  with a 5-hour limit keep the existing two quota cards.
+- **Weekly Fable**, in the place freed by a missing 5-hour limit on a proxied Claude account:
+  Fable's own weekly window, for every session model, whichever of the two has less left. An
+  account that reports no such window (`absent` names `7d_fable`) reads `no separate limit`, as
+  Fable then draws on the week alone. A Codex account has no such card. Neither does a direct
+  login: Claude Code reports only the 5-hour and weekly windows there. Plans with a 5-hour limit
+  keep the existing two quota cards.
 
 In a terminal the tiles are Account, these, Context, Cache and Accounts: all in a row when they fit
 (a tile that carries a name is at least 24 columns, a meter's 22), else in a row without Accounts,

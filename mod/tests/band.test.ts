@@ -893,6 +893,48 @@ test('the expected account shows Fable before the first proxied request', async 
   }
 })
 
+test('Fable follows Claude account ownership across Codex routes, expected picks and returns', async ($, on) => {
+  const claude = onPlan([WEEK, FABLE], ['5h'], 'claude-opus-5-5')
+  const providers = {
+    ...claude.providers,
+    codex: { ...SNAP.providers.claude!, credentials: [{
+      ...SNAP.providers.claude!.credentials[0]!, id: 'codex-a', label: 'a•••',
+      plan: 'Plus', windows: [WEEK], absent: ['5h'],
+    }] },
+  }
+  const routed = {
+    ...SNAP.sessions.s1!, provider: 'codex', model: 'gpt-6.1-sol',
+    requested_model: 'claude-opus-5-5', auth_id: 'codex-a', auth_label: 'a•••',
+    route: { provider: 'codex', model: 'gpt-6.1-sol', auto: false, at: iso(-60_000) },
+  }
+  const clock = stubSession(on, { ...claude, providers })
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const states: { model: string; sessions: Snap['sessions']; fable: boolean }[] = [
+    { model: SESSION.model, sessions: claude.sessions, fable: true },
+    { model: SESSION.model, sessions: { s1: routed }, fable: false },
+    { model: SESSION.model, sessions: { s1: { ...routed, auth_id: 'removed' } }, fable: false },
+    { model: 'gpt-6.1-sol', sessions: {}, fable: false },
+    { model: 'gpt-6.1-sol', sessions: { s1: { ...routed, requested_model: 'gpt-6.1-sol', route: undefined } }, fable: false },
+    { model: SESSION.model, sessions: claude.sessions, fable: true },
+  ]
+  for (const state of states) {
+    selectedModel = state.model
+    snapshot = { ...claude, providers, sessions: state.sessions, sequence: snapshot.sequence + 1 }
+    await clock.advance(10_000)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      for (const working of [false, true]) {
+        const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, working) })
+        expect(Boolean(await ui.find({ key: working ? 'meter-fable' : 'fable' }))).toBe(state.fable)
+        expect((await ui.find({ key: working ? 'meter-7d' : 'week' }))?.text).toMatch(/64%/)
+        expect(await ui.find({ key: 'five' })).toBeUndefined()
+        expect(await ui.find({ key: 'meter-5h' })).toBeUndefined()
+        expect(await ui.find({ text: /not reported yet/ })).toBeUndefined()
+        await ui.unmount()
+      }
+    }
+  }
+})
+
 test('an account with no Fable limit of its own says so in the tile, and one not read yet says that', async ($, on) => {
   const clock = stubSession(on, onPlan([WEEK], ['5h', '7d_fable', '7d_opus', '7d_sonnet'], 'claude-fable-5-2'))
   selectedModel = 'claude-fable-5-2'

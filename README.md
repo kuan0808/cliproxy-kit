@@ -262,7 +262,7 @@ Cards while Claude waits, one line while it works:
 | --- | --- |
 | **Account** | The account the proxy gave this session (`expected` before its first request), its plan and the model. |
 | **5-hour**, **Weekly** | That account's use of each window, and when it resets. A plan without a 5-hour limit has no 5-hour tile; `quota` says which limits the plan lacks. The model's own weekly limit takes the Weekly tile, under its name, while it has less left than the week, unless shown separately. |
-| **Weekly Fable** | On a proxied account with no 5-hour limit: Fable's own weekly limit fills the freed place, whatever the session's model and whichever limit has less left. `no separate limit` when the account has none, so Fable draws on the week alone. |
+| **Weekly Fable** | On a proxied Claude account with no 5-hour limit: Fable's own weekly limit fills the freed place, whatever the session's model and whichever limit has less left. `no separate limit` when the account has none, so Fable draws on the week alone. |
 | **Context** | How full the conversation is. |
 | **Cache** | Time left before the prompt cache goes cold, with `kept warm 0/3` counting refreshes while keeping it warm is on; once cold, what the next turn rewrites and costs. |
 | **Accounts** | Every account's weekly use, and the one a switch or a new session gets next. |
@@ -275,7 +275,7 @@ Cards while Claude waits, one line while it works:
 
 ![0.1.18](docs/images/fable-before.png)
 
-0.1.19: Fable fills the freed place for every model.
+0.1.19: On Claude accounts, Fable fills the freed place for every model.
 
 ![0.1.19](docs/images/fable-after.png)
 
@@ -462,7 +462,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Codex sessions are missing from the page | Codex does not use the proxy yet (step 4). |
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
 | An account has no 5-hour window | Its plan has none (a Codex plan, a Claude plan without the 5-hour limit). The page says so under the provider's name and the band's `quota` pane says so per account; the band draws no 5-hour tile, and the account is ranked by its week alone. |
-| The band has no `Weekly Fable` tile | From 0.1.19 a proxied account with no 5-hour limit shows Fable in the freed place for every model, regardless of which limit has less left. Plans with a 5-hour limit keep the existing two tiles and show the model's weekly limit only when tighter. A direct login has no separate Fable tile: Claude Code reports no Fable limit there. |
+| The band has no `Weekly Fable` tile | From 0.1.19 a proxied Claude account with no 5-hour limit shows Fable in the freed place for every model, regardless of which limit has less left. Plans with a 5-hour limit keep the existing two tiles and show the model's weekly limit only when tighter. Codex accounts and direct logins have no separate Fable tile; Claude Code reports no Fable limit for direct logins. |
 | A session on Fable stops when Fable's weekly limit runs out | Add `claude-fable: claude-opus-5-5` to `fallback_map`, and set `upstream.claude.model-level-cooling: true` in the proxy's config: without it CLIProxyAPI holds the whole account back, for every model, until the limit resets. |
 | The ledger has no `Weekly Fable` meter | Press **Refresh** and check any read failures. A no-limit note naming Fable means the displayed accounts report no separate Fable quota, so Fable uses their week. Without that note, its limit may still be unread. See [quota readings](docs/architecture.md#reading-quota). |
 | The band says `Switched d••• → k••• · reason not recorded` | quota-pilot is older than the band and does not record why a session moved: update it from the panel's Plugin Store. |

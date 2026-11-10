@@ -132,7 +132,7 @@ export type Facts = {
   isCodex: boolean
   /**
    * The account's quota windows, each a tile: the 5-hour one unless the plan has none, the week,
-   * or Fable's own week in its place through the proxy, whichever has less left.
+   * or Fable's own week in its place on a proxied Claude account, whichever has less left.
    * Another model's own weekly limit takes the week's tile while it is the tighter one.
    */
   quota: Quota[]
@@ -226,7 +226,7 @@ export function bandFacts(i: BandInput, act: Do): Facts {
   const reported = !sess.proxied && sess.rateLimits.length > 0
   // A limit the plan does not have gets no tile; the quota pane says so.
   const noFive = !five && (sess.proxied ? Boolean(shownCred?.absent?.includes('5h')) : lacksFiveHour(sess.rateLimits))
-  const fable = sess.proxied && noFive
+  const fable = sess.proxied && noFive && (acct?.provider ?? likely?.provider) === 'claude'
   if (shownCred) week = meterOf(fable && isFable(model) ? windowOf(shownCred, '7d') : weeklyFor(shownCred, model))
   const quota: Quota[] = []
   if (!noFive) quota.push({ key: 'five', short: '5h', label: '5-hour', meter: five, missing: missingText(shownCred, '5h') })
