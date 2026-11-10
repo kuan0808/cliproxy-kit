@@ -1,7 +1,7 @@
 // The band in a terminal: character cells, so every width is counted.
 import type { Elements, RenderChildren, RenderElement } from 'claude-code'
 
-import { C, barFill, fmtDuration, layout, resetText, sev, tileWidths, tilesSpan } from './logic'
+import { C, barFill, fmtDuration, resetText, sev, spanOf, tiling } from './logic'
 import type { BarOf } from './pane'
 import { cacheCaption, type Act, type BandInput, type Do, type Facts, type Meter, type Row } from './view'
 
@@ -18,11 +18,11 @@ export function terminalBand(els: Els, i: BandInput, f: Facts, act: Do, site: Ba
   // One line while Claude works and cards while it waits, unless the reader chose otherwise
   // for this stretch; cards only where the terminal has room for them.
   const phase = site.working ? 'working' : 'idle'
-  const roomy = layout(rowWidth, site.maxRows, false)
+  // A tile per quota window shown; a direct login has no proxy accounts, so no Accounts tile.
+  const tilingIf = (working: boolean) => tiling(rowWidth, site.maxRows, working, f.quota.length, f.proxied)
+  const roomy = tilingIf(false)
   const chosen = ui.viewPhase === phase && ui.viewTurn === ui.turns ? ui.viewOverride : ''
-  const picked = chosen === 'line' ? 'compact' : chosen === 'cards' ? roomy : layout(rowWidth, site.maxRows, site.working || site.beneath)
-  // A direct login has no proxy accounts: no Accounts tile.
-  const mode = picked === 'tiles6' && !f.proxied ? 'tiles5' : picked
+  const tiled = chosen === 'line' ? null : chosen === 'cards' ? roomy : tilingIf(site.working || site.beneath)
   const setView = (view: 'cards' | 'line') => act.ui({ viewOverride: view, viewPhase: phase, viewTurn: ui.turns })
 
   const dim = (t: string) => <Text color={C.dim}>{t}</Text>
@@ -42,18 +42,17 @@ export function terminalBand(els: Els, i: BandInput, f: Facts, act: Do, site: Ba
     : <Text key={a.key} color={C.dim}>{a.label}</Text>
 
   // -- the row above the band: a question, a notice or an alert --
-  const width = mode === 'compact' ? rowWidth : tilesSpan(mode, rowWidth)
+  const width = tiled ? spanOf(tiled.rows[0]!) : rowWidth
   const top: RenderChildren[] = []
   if (f.top) top.push(rowOf(els, f.top, width))
 
   const c = f.cache
   const cacheColor = f.isCodex ? sev((c.rate ?? 0) * 100) : c.state === 'expiring' ? C.yellow : c.state === 'cold' ? C.red : C.green
   const cacheFrac = f.isCodex ? c.rate ?? 0 : c.frac
-  const { five, week } = f
   const ctxLeft = f.ctx?.left ?? null
 
   // -- one or two rows: while Claude works, or when the terminal is too narrow for tiles --
-  if (mode === 'compact') {
+  if (!tiled) {
     // The width of a meter's figure, which shows what is used.
     const pctWidth = (remaining: number) => `${Math.round(100 - remaining)}%`.length
     const hit = c.rate == null ? '' : `hit ${Math.round(c.rate * 100)}%`
@@ -84,15 +83,19 @@ export function terminalBand(els: Els, i: BandInput, f: Facts, act: Do, site: Ba
         },
       ]
     }
+    // Of the week and Fable's own week, the one with more left goes first when both do not fit.
+    const [weekly, fable] = (['week', 'fable'] as const).map(key => f.quota.find(q => q.key === key)?.meter)
+    const looser = weekly && fable ? (fable.remaining < weekly.remaining ? 'week' : 'fable') : ''
     // The meters at a detail level: 0 everything, 1 without the pool and cache hit, 2 without
     // reset times, 4 without bars.
     const meters = (level: number): Slot[] => {
       const bars = level < 4
       const row: Slot[] = []
       if (ctxLeft != null) row.push(mini(1, 'ctx', usedFrac(ctxLeft), sev(ctxLeft), pctText(ctxLeft), pctWidth(ctxLeft), bars))
-      for (const [drop, label, m] of [[2, '5h', five], [3, '7d', week]] as const) {
+      for (const q of f.quota) {
+        const m = q.meter
         if (!m) continue
-        row.push(mini(drop, label, usedFrac(m.remaining), m.stale ? C.dim : sev(m.remaining), pctText(m.remaining, m.stale),
+        row.push(mini(q.key === 'five' ? 2 : q.key === looser ? 3.5 : 3, q.short, usedFrac(m.remaining), m.stale ? C.dim : sev(m.remaining), pctText(m.remaining, m.stale),
           pctWidth(m.remaining) + (m.stale ? 1 : 0), bars, level < 2 ? m.reset : ''))
       }
       row.push(mini(5, 'cache', cacheFrac, cacheTone, <Text bold color={cacheTone}>{cacheValue}</Text>, cacheValue.length, bars,
@@ -107,7 +110,7 @@ export function terminalBand(els: Els, i: BandInput, f: Facts, act: Do, site: Ba
     // the last when space runs out.
     const controls: Slot[] = []
     if (f.controls.switch) controls.push({ drop: -1, width: 6, node: link(f.controls.switch, false) })
-    if (roomy !== 'compact') controls.push({ drop: -1, width: 4, node: link({ key: 'view-cards', label: 'more', run: () => setView('cards') }, false) })
+    if (roomy) controls.push({ drop: -1, width: 4, node: link({ key: 'view-cards', label: 'more', run: () => setView('cards') }, false) })
     const budget = rowWidth - 4
     const span = (row: Slot[]) => row.reduce((sum, s) => sum + s.width, 0) + 3 * (row.length - 1)
     // The richest level that fits (level 3 also drops the effort), then items by `drop`.
@@ -145,20 +148,28 @@ export function terminalBand(els: Els, i: BandInput, f: Facts, act: Do, site: Ba
   }
 
   // -- tiles: this session, then its quota, context, cache and the account pool --
-  const tws = tileWidths(mode, rowWidth)
+  const tws = tiled.rows.flat()
   const tiles: RenderChildren[] = []
   // A tile: label and value, a meter as wide as the tile's inside, a caption.
   const tile = (key: string, label: string, value: RenderChildren, meter: (cells: number) => RenderChildren, caption: RenderChildren) => {
-    const w = tws[tiles.length % tws.length]!
+    const w = tws[tiles.length]!
     return (
       <Box key={key} width={w} paddingX={2} flexDirection="column" backgroundColor={C.tile}>
-        <Box justifyContent="space-between">{dim(label)}{value}</Box>
+        <Box justifyContent="space-between" gap={1}>
+          <Text color={C.dim} wrap="truncate-end">{label}</Text>
+          <Box flexShrink={0}>{value}</Box>
+        </Box>
         {meter(w - 4)}
         {caption}
       </Box>
     )
   }
-  const used = (m: Meter | undefined) => m ? <Box>{pctText(m.remaining, m.stale)}{dim(' used')}</Box> : dim('—')
+  // A figure reads "64% used" where every quota tile has room for it beside its label ("Weekly
+  // Fable" in a tile at its narrowest has not), else "64%" on every tile alike.
+  const spelled = f.quota.every((q, k) => !q.meter
+    || q.meter.label.length + 1 + `${Math.round(100 - q.meter.remaining)}%${q.meter.stale ? '~' : ''} used`.length <= tws[1 + k]! - 4)
+  const figure = (remaining: number, stale = false) => spelled ? <Box>{pctText(remaining, stale)}{dim(' used')}</Box> : pctText(remaining, stale)
+  const used = (m: Meter | undefined) => m ? figure(m.remaining, m.stale) : dim('—')
   const meterBar = (m: Meter | undefined) => (cells: number) => m ? usedBar(m.remaining, cells, m.stale ? C.dim : sev(m.remaining)) : bar(0, cells, C.track)
   const caption = (t: string) => <Text color={C.dim} wrap="truncate-end">{t}</Text>
   // A routed session's route goes with `back` beside it: the controls row has no room for both
@@ -184,9 +195,10 @@ export function terminalBand(els: Els, i: BandInput, f: Facts, act: Do, site: Ba
       </Box>
     </Box>,
   )
-  tiles.push(tile('five', '5-hour', used(five), meterBar(five), caption(five ? resetText(five.reset) : f.fiveMissing)))
-  tiles.push(tile('week', week?.label ?? 'Weekly', used(week), meterBar(week), caption(week ? resetText(week.reset) : f.weekMissing)))
-  tiles.push(tile('ctx', 'Context', ctxLeft != null ? <Box>{pctText(ctxLeft)}{dim(' used')}</Box> : dim('—'),
+  for (const q of f.quota) {
+    tiles.push(tile(q.key, q.meter?.label ?? q.label, used(q.meter), meterBar(q.meter), caption(q.meter ? resetText(q.meter.reset) : q.missing)))
+  }
+  tiles.push(tile('ctx', 'Context', ctxLeft != null ? figure(ctxLeft) : dim('—'),
     cells => ctxLeft != null ? usedBar(ctxLeft, cells, sev(ctxLeft)) : bar(0, cells, C.track),
     <Text wrap="truncate-end"><Text color={C.dim}>{f.modelName}</Text><Text color={C.dim}>{f.effort ? ` · ${f.effort}` : ''}</Text></Text>))
   const cacheWord = f.isCodex
@@ -196,11 +208,11 @@ export function terminalBand(els: Els, i: BandInput, f: Facts, act: Do, site: Ba
     : c.state === 'cold' ? <Text bold color={C.red}>Cold</Text>
     : dim('waiting')
   tiles.push(tile('cache', 'Cache', cacheWord, cells => bar(cacheFrac, cells, cacheColor), caption(cacheCaption(f, false))))
-  if ((mode === 'tiles6' || mode === 'grid') && f.proxied) {
+  if (tiled.pool) {
     const pool = f.pool
     if (pool && pool.parts.length) {
       const parts = pool.parts
-      tiles.push(tile('all', 'Accounts', pool.left === null ? dim('—') : <Box>{pctText(pool.left, pool.stale)}{dim(' used')}</Box>,
+      tiles.push(tile('all', 'Accounts', pool.left === null ? dim('—') : figure(pool.left, pool.stale),
         cells => {
           const each = Math.floor((cells - (parts.length - 1)) / parts.length)
           return <Box gap={1}>{parts.map((p, n) => <Box key={`p-${n}`}>{p === null ? bar(0, each, C.track) : usedBar(p, each, sev(p))}</Box>)}</Box>
@@ -214,10 +226,9 @@ export function terminalBand(els: Els, i: BandInput, f: Facts, act: Do, site: Ba
   return (
     <Box flexDirection="column">
       {top}
-      {mode === 'grid' ? (
+      {tiled.rows.length > 1 ? (
         <Box key="tiles" flexDirection="column">
-          <Box gap={1}>{tiles.slice(0, 3)}</Box>
-          <Box gap={1}>{tiles.slice(3)}</Box>
+          {[tiles.slice(0, tiled.rows[0]!.length), tiles.slice(tiled.rows[0]!.length)].map((row, n) => <Box key={`row-${n}`} gap={1}>{row}</Box>)}
         </Box>
       ) : (
         <Box key="tiles" gap={1}>{tiles}</Box>

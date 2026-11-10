@@ -250,20 +250,20 @@ Polling pauses after 15 minutes without any request, because a plugin turned off
 never told, and resumes with the next one; the page's Refresh reads every account at once and says
 which it could not read and why (its login, refused, asked to slow down, another status, the
 network, an unreadable answer, or out of time). A usage-endpoint reading removes missing keyed
-windows (a plan without a 5-hour window, Codex's or Claude's), and the band and the page say the
-account has no such limit; a Claude answer that names no keyed window is no reading. Headers name
-only some windows and never remove one. Fable's own weekly limit comes two ways, as Claude Code
-reads them: in the headers as the window `7d_oi`, and in the usage endpoint as a `weekly_scoped` row
-of `limits` named by its model. A previously read model window without its own response key, such
-as Fable's, stays when `limits` is missing; it goes only when a usage reading includes a `limits`
-array and leaves it out. A complete reading also marks an unseen Fable window absent. The ledger's
-no-limit note covers the displayed accounts after search, counting duplicate credentials as one
-account. A window on any displayed credential suppresses that window's no-limit claim, even when
-another credential of the same account says it is absent. A Claude account's plan is read from its
-profile (the provider's own name for it, `plan_display_name`, else told from the profile's other
-fields), whether or not its usage read worked, when first seen, every hour, on Refresh and after
-its window started over; a Codex plan comes with each usage reading. The last readings survive a
-restart in `state.json`, marked stale as they age.
+windows (a plan without a 5-hour window, Codex's or Claude's), and the page and the band's quota
+pane say the account has no such limit; a Claude answer that names no keyed window is no reading.
+Headers name only some windows and never remove one. Fable's own weekly limit comes two ways, as
+Claude Code reads them: in the headers as the window `7d_oi`, and in the usage endpoint as a
+`weekly_scoped` row of `limits` named by its model. A previously read model window without its own
+response key, such as Fable's, stays when `limits` is missing; it goes only when a usage reading
+includes a `limits` array and leaves it out. A complete reading also marks an unseen Fable window
+absent. The ledger's no-limit note covers the displayed accounts after search, counting duplicate
+credentials as one account. A window on any displayed credential suppresses that window's no-limit
+claim, even when another credential of the same account says it is absent. A Claude account's plan
+is read from its profile (the provider's own name for it, `plan_display_name`, else told from the
+profile's other fields), whether or not its usage read worked, when first seen, every hour, on
+Refresh and after its window started over; a Codex plan comes with each usage reading. The last
+readings survive a restart in `state.json`, marked stale as they age.
 
 The live state and the report follow one set of window rules (`core/window.go`):
 
@@ -430,6 +430,33 @@ beneath it), and the row says one thing at a time: a question, what came of an a
 (the proxy's, a cold next turn, a session moved or kept, a full context), in that order. The waiting
 rows carry `switch to k•••` (Switch now, in [When an account fails](#when-an-account-fails)).
 
+The quota cards are the account's windows, each with its reset (`view.ts`, `quota`):
+
+- **5-hour**, unless the plan has none: the snapshot's `absent` names `5h`, or, on a direct login,
+  Claude Code has reported limits without one. A limit the plan lacks gets no card; one not read
+  yet keeps its card and says so (`not reported yet`, `after the first reply`).
+- **Weekly**. For a model with a weekly window of its own and no card for it (Opus, Sonnet), that
+  window takes this card, under its name, while it has less left than the week.
+- **Weekly Fable**, on a session whose next turn runs Fable through the proxy: Fable's own weekly
+  window, always, whichever of the two has less left. An account that reports no such window
+  (`absent` names `7d_fable`) reads `no separate limit`, as Fable then draws on the week alone. A
+  direct login has no such card: Claude Code reports the 5-hour and weekly windows only.
+
+In a terminal the tiles are Account, these, Context, Cache and Accounts: all in a row when they fit
+(a tile that carries a name is at least 24 columns, a meter's 22), else in a row without Accounts,
+else, given seven rows, every tile in two rows of one width, Account and the quota over the rest;
+else one line, which has a meter only for a window with a reading (`5h`, `7d`, `fable`) and, when
+both do not fit, drops whichever of the week and Fable's has more left first. A figure reads `64%
+used` where every quota tile has room for it beside its label, else `64%` on every tile. The desktop
+app's cards share one width per column: all in a row, else the most columns that leave no slot
+empty, the account card tall beside rows of gauges when there is a card too many.
+
+The quota pane lists each account's windows, a row per kind any account of the provider reports. A
+kind every account says it lacks is said once, under the provider's name (`no such limit: 5-hour,
+Weekly Opus`), by the ledger's rule: a second credential of an account counts with that account,
+and a window on any credential keeps the kind's row. On a direct login the pane's first line says
+when the plan has no 5-hour limit.
+
 Everything it shows of accounts comes from `/band`, read every 10 seconds at `ANTHROPIC_BASE_URL`
 with `ANTHROPIC_AUTH_TOKEN` (else `ANTHROPIC_API_KEY`, else no key, for a proxy without `api-keys`),
 the same wherever the proxy runs. Each read sends what only the band's device knows of the session
@@ -494,9 +521,9 @@ Every row's text and short form come from one table, `wording.ts`, checked again
 A session signed in to Claude directly reads no proxy. The desktop app's are: it points them at
 Anthropic's own API with the app's sign-in. The band then shows that account's own limits, as Claude
 Code reports them after a reply, and leaves out what only the proxy has: accounts, switching and its
-alerts. Once that report names any window, a missing one reads `no such limit`. In place of `quota`
-it has `settings`, which opens the same pane with the band's settings alone, as the pane does when
-the proxy gives no snapshot.
+alerts. Once that report names any window, a plan without a 5-hour limit has no 5-hour card, and
+the pane says so. In place of `quota` it has `settings`, which opens the same pane with the band's
+settings alone, as the pane does when the proxy gives no snapshot.
 
 Context, cache and model come from Claude Code itself, so the rest works either way:
 

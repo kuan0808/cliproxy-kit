@@ -35,6 +35,8 @@ import {
   weeklyFor,
   windowOf,
   hitRate,
+  isFable,
+  lacksFiveHour,
   type CacheState,
   type ColdTurn,
   type SessionAccount,
@@ -42,6 +44,12 @@ import {
 } from './logic'
 
 export type Meter = { remaining: number; reset: string; stale: boolean; label: string }
+
+/**
+ * A quota window the band shows: its reading, or in `missing` why it has none. `label` names its
+ * tile until a reading names it, `short` its meter on one line.
+ */
+export type Quota = { key: 'five' | 'week' | 'fable'; short: string; label: string; meter?: Meter; missing: string }
 
 /**
  * A control: pressed, it runs `run`; one without `run` is a note in its place, drawn dim. A
@@ -122,10 +130,12 @@ export type Facts = {
   modelName: string
   effort: string
   isCodex: boolean
-  five?: Meter
-  week?: Meter
-  fiveMissing: string
-  weekMissing: string
+  /**
+   * The account's quota windows, each a tile: the 5-hour one unless the plan has none, the week,
+   * and Fable's own week for a session on Fable through the proxy, whichever has less left.
+   * Another model's own weekly limit takes the week's tile while it is the tighter one.
+   */
+  quota: Quota[]
   ctx: { used: number; window: number; left: number } | null
   cache: {
     state: CacheState
@@ -194,14 +204,10 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     // The plan only: a move is told once, by the row above the band. While the account rests, when
     // it is tried again.
     note = restingNow(acct.cred, now) ? `resting, back in ${fmtDuration(Date.parse(acct.cred.rest!.until) - now)}` : acct.cred.plan ?? ''
-    five = meterOf(windowOf(acct.cred, '5h'))
-    week = meterOf(weeklyFor(acct.cred, model))
   } else if (likely) {
     // Before the proxy has seen this session: the account a new session gets.
     account = likely.cred.label
     note = [likely.cred.plan, 'expected'].filter(Boolean).join(' · ')
-    five = meterOf(windowOf(likely.cred, '5h'))
-    week = meterOf(weeklyFor(likely.cred, model))
   } else if (!sess.proxied) {
     account = 'claude.ai'
     note = 'direct login'
@@ -214,9 +220,27 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     note = 'no quota data'
   }
   const shownCred = acct?.cred ?? likely?.cred
+  // Fable's own weekly limit has a tile of its own, so the week's tile shows the week. Claude Code
+  // reports no such window on a direct login.
+  const fable = sess.proxied && isFable(model)
+  if (shownCred) {
+    five = meterOf(windowOf(shownCred, '5h'))
+    week = meterOf(fable ? windowOf(shownCred, '7d') : weeklyFor(shownCred, model))
+  }
   // On a direct login Claude Code reports the account's limits after a reply: once it has, one it
   // does not name is one the plan does not have.
   const reported = !sess.proxied && sess.rateLimits.length > 0
+  // A limit the plan does not have gets no tile; the quota pane says so.
+  const noFive = !five && (sess.proxied ? Boolean(shownCred?.absent?.includes('5h')) : lacksFiveHour(sess.rateLimits))
+  const quota: Quota[] = []
+  if (!noFive) quota.push({ key: 'five', short: '5h', label: '5-hour', meter: five, missing: missingText(shownCred, '5h') })
+  quota.push({ key: 'week', short: '7d', label: 'Weekly', meter: week, missing: reported ? 'no such limit' : missingText(shownCred, '7d') })
+  if (fable) {
+    quota.push({
+      key: 'fable', short: 'fable', label: 'Weekly Fable', meter: meterOf(windowOf(shownCred, '7d_fable')),
+      missing: shownCred?.absent?.includes('7d_fable') ? 'no separate limit' : missingText(shownCred, '7d_fable'),
+    })
+  }
   const poolView = acct?.view ?? (likely ? snap?.providers[likely.provider] : undefined)
   const poolCurrent = acct?.session.auth_id ?? likely?.cred.id ?? ''
   const all = poolView && poolView.credentials.length ? pooled(poolView) : null
@@ -255,10 +279,7 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     modelName: `${model.replace(/^claude-/, '')}${longContext}`,
     effort: sess.effort,
     isCodex,
-    five,
-    week,
-    fiveMissing: reported ? 'no such limit' : missingText(shownCred, '5h'),
-    weekMissing: reported ? 'no such limit' : missingText(shownCred, '7d'),
+    quota,
     ctx,
     cache: { ...cs, rate: hitRate(cache), cold, cost, tokens: cache.prompt, warmed: cache.warmed, keepWarm: settings.keepWarm, keepWarmOn: autoState('keepWarm', settings, i.auto, i.unattended).on },
     holdOn: autoState('holdCold', settings, i.auto, i.unattended).on,

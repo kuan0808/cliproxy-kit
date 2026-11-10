@@ -1,5 +1,5 @@
 // Pure helpers for the band: no `$`, so the tests call them directly.
-import type { Auto, BandError, CacheInfo, ModelInfo, Pending, Pressed, Snap, SnapCred, SnapProvider, SnapSession, SnapWindow, StepInfo } from '../types'
+import type { Auto, BandError, CacheInfo, ModelInfo, Pending, Pressed, RateLimit, Snap, SnapCred, SnapProvider, SnapSession, SnapWindow, StepInfo } from '../types'
 import { fmtDuration, moveWhy, W } from './wording'
 
 export { bandErrorText, fmtDuration, fmtWait, moveWhy } from './wording'
@@ -98,32 +98,19 @@ export function hitRate(cache: CacheInfo): number | null {
   return total > 0 ? cache.read / total : null
 }
 
-export type Layout = 'tiles6' | 'tiles5' | 'grid' | 'compact'
-
-// Tile widths: the session tile first, then the metric tiles. One column between tiles.
-const TILE_MINS = [24, 22, 22, 24, 22, 22]
+// Tile widths: a tile that carries a name (Account, and Context with the model) is at least 24
+// columns, a meter's 22, none over 48. One column between tiles.
+const NAMED = 24
+const METER = 22
 const TILE_MAX = 48
-// Two rows of three: Account, 5-hour, Weekly over Context, Cache, Accounts.
-const GRID_MINS = [24, 22, 22]
-const minsOf = (mode: TileLayout) => (mode === 'tiles6' ? TILE_MINS : mode === 'tiles5' ? TILE_MINS.slice(0, 5) : GRID_MINS)
-export type TileLayout = Exclude<Layout, 'compact'>
-const spanOf = (ws: number[]) => ws.reduce((a, b) => a + b, 0) + ws.length - 1
 
-/**
- * Six tiles in a row when they fit, else five without Accounts, else two rows of three when the
- * band has the height, else one row. One row also while Claude works.
- */
-export function layout(width: number, maxRows: number, working: boolean): Layout {
-  if (working || maxRows < 3) return 'compact'
-  if (width >= spanOf(TILE_MINS)) return 'tiles6'
-  if (width >= spanOf(TILE_MINS.slice(0, 5))) return 'tiles5'
-  return width >= spanOf(GRID_MINS) && maxRows >= 7 ? 'grid' : 'compact'
-}
+/** Width of a row of tiles, which the alert rows share. */
+export const spanOf = (ws: readonly number[]) => ws.reduce((a, b) => a + b, 0) + ws.length - 1
 
-/** Tile widths for a band `width` columns wide: spare columns go one at a time to the narrowest tile. */
-export function tileWidths(mode: TileLayout, width: number): number[] {
-  const ws = minsOf(mode).slice()
-  let spare = width - spanOf(ws)
+/** A row of tiles `span` columns wide: spare columns go one at a time to the narrowest tile. */
+function widened(mins: readonly number[], span: number): number[] {
+  const ws = mins.slice()
+  let spare = span - spanOf(ws)
   while (spare > 0) {
     const narrowest = Math.min(...ws)
     if (narrowest >= TILE_MAX) break
@@ -133,9 +120,26 @@ export function tileWidths(mode: TileLayout, width: number): number[] {
   return ws
 }
 
-/** Width of the whole row of tiles, which the alert rows share. */
-export function tilesSpan(mode: TileLayout, width: number): number {
-  return spanOf(tileWidths(mode, width))
+/**
+ * How the band's tiles sit in `width` columns, as the widths of each row's tiles, or null for one
+ * line (also while Claude works, and without the height). The tiles are Account, one per quota
+ * window shown (`quotas`), Context, Cache and, with `pool`, Accounts: all in a row when they fit,
+ * else in a row without Accounts, else, given the height, every tile in two rows of one width,
+ * Account and the quota over the rest.
+ */
+export function tiling(width: number, maxRows: number, working: boolean, quotas: number, pool: boolean): { rows: number[][]; pool: boolean } | null {
+  if (working || maxRows < 3) return null
+  const top = [NAMED, ...Array<number>(quotas).fill(METER)]
+  const rest = (withPool: boolean) => [NAMED, METER, ...(withPool ? [METER] : [])]
+  for (const withPool of pool ? [true, false] : [false]) {
+    const row = [...top, ...rest(withPool)]
+    if (width >= spanOf(row)) return { rows: [widened(row, width)], pool: withPool }
+  }
+  const rows = [top, rest(pool)]
+  if (maxRows < 7 || width < Math.max(...rows.map(spanOf))) return null
+  // Both rows as wide as the one with fewer tiles can grow.
+  const span = Math.min(width, ...rows.map(r => r.length * (TILE_MAX + 1) - 1))
+  return { rows: rows.map(r => widened(r, span)), pool }
 }
 
 export type SessionAccount = {
@@ -206,6 +210,18 @@ export function usedText(w: SnapWindow | undefined): string {
 
 const modelBucket = (model: string) =>
   /opus/i.test(model) ? '7d_opus' : /sonnet/i.test(model) ? '7d_sonnet' : /fable/i.test(model) ? '7d_fable' : ''
+
+/**
+ * Whether `model` is Fable, whose own weekly limit the band shows on a tile of its own (view.ts);
+ * another model's goes by `weeklyFor`.
+ */
+export const isFable = (model: string) => modelBucket(model) === '7d_fable'
+
+/**
+ * Whether a direct login's plan has no 5-hour limit. Claude Code reports the account's limits
+ * after a reply: once it has, one it does not name is one the plan does not have.
+ */
+export const lacksFiveHour = (limits: readonly RateLimit[]) => limits.length > 0 && !limits.some(r => r.kind === 'five_hour')
 
 /** The weekly window that limits `model` on an account: its own weekly window when lower than the plain one. */
 export function weeklyFor(cred: SnapCred | undefined, model: string): SnapWindow | undefined {

@@ -126,8 +126,8 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     const roomy = site.bodyColumns >= 140
     const meters: RenderChildren[] = []
     if (f.ctx) meters.push(mini('ctx', 'ctx', ring(15, [{ fill: 1 - f.ctx.left / 100, color: ringTone(f.ctx.left) }]), `${Math.round(100 - f.ctx.left)}%`, textTone(f.ctx.left), '', 'Context used'))
-    for (const [key, label, m] of [['5h', '5h', f.five], ['7d', '7d', f.week]] as const) {
-      if (m) meters.push(mini(key, label, ring(15, [{ fill: 1 - m.remaining / 100, color: m.stale ? RING.ink : ringTone(m.remaining) }]), usedPct(m), m.stale ? DESK.dim : textTone(m.remaining), roomy ? m.reset : '', `${m.label} quota used`))
+    for (const { short, meter: m } of f.quota) {
+      if (m) meters.push(mini(short, short, ring(15, [{ fill: 1 - m.remaining / 100, color: m.stale ? RING.ink : ringTone(m.remaining) }]), usedPct(m), m.stale ? DESK.dim : textTone(m.remaining), roomy ? m.reset : '', `${m.label} quota used`))
     }
     meters.push(mini('cache', 'cache', ring(15, [cacheRing]),
       f.isCodex ? cacheWord : c.state === 'unknown' ? '—' : cold ? 'cold' : fmtDuration(c.leftMs), cacheText, '', 'Prompt cache'))
@@ -194,10 +194,10 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     </Box>
   )
   const gauges: RenderChildren[] = []
-  gauges.push(gauge('five', '5-hour', meterRing(f.five), `5-hour quota: ${f.five ? `${usedPct(f.five)} used` : 'no reading'}`,
-    usedText(f.five), f.five ? resetText(f.five.reset) : f.fiveMissing))
-  gauges.push(gauge('week', f.week?.label ?? 'Weekly', meterRing(f.week), `${f.week?.label ?? 'Weekly'} quota: ${f.week ? `${usedPct(f.week)} used` : 'no reading'}`,
-    usedText(f.week), f.week ? resetText(f.week.reset) : f.weekMissing))
+  for (const { key, label, meter: m, missing } of f.quota) {
+    const name = m?.label ?? label
+    gauges.push(gauge(key, name, meterRing(m), `${name} quota: ${m ? `${usedPct(m)} used` : 'no reading'}`, usedText(m), m ? resetText(m.reset) : missing))
+  }
   const ctx = f.ctx
   gauges.push(gauge('ctx', 'Context',
     ring(40, [{ fill: ctx ? 1 - ctx.left / 100 : 0, color: ringTone(ctx?.left ?? 100) }]),
@@ -220,13 +220,13 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     pool?.caption ?? 'no quota data'))
 
   // Every card sits in a slot of one width, so the columns of every row line up: all in one row
-  // where they fit, else rows of three or two. With a card too many for full rows (a direct login
-  // has five), the account card takes the odd space: tall beside two rows of gauges, or a row of
-  // its own above them. No slot is left empty.
+  // where they fit, else in the most columns (four, three, two) that leave no slot empty. Full rows
+  // when the cards fill them; with a card too many (a direct login has five, a Fable session on a
+  // plan with a 5-hour limit seven), the account card takes the odd space: tall beside rows of
+  // gauges, or, in two columns, a row of its own above them.
   const MIN = 26
   const count = gauges.length + 1
-  const per = [count, 3, 2, 1].find(n => site.bodyColumns >= n * MIN + n - 1) ?? 1
-  const odd = count % per !== 0
+  const fits = (n: number) => site.bodyColumns >= n * MIN + n - 1
   const slot = (key: string, card: RenderChildren, grow = 1) => <Box key={key} flexGrow={grow} width={0} minWidth={0}>{card}</Box>
   const rows = (cards: RenderChildren[], size: number) => {
     const out: RenderChildren[] = []
@@ -235,16 +235,18 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     }
     return out
   }
-  const grid = !odd
-    ? rows([accountCard(), ...gauges], per)
-    : per === 3
-      ? [
-        <Box key="bento" gap={1}>
-          {slot('slot-account', accountCard())}
-          <Box key="gauges" flexGrow={2} width={0} minWidth={0} flexDirection="column" gap={1}>{rows(gauges, 2)}</Box>
-        </Box>,
-      ]
-      : [<Box key="row-account" gap={1}>{slot('slot-account', accountCard())}</Box>, ...rows(gauges, per)]
+  const full = [count, 4, 3, 2].find(n => n <= count && fits(n) && count % n === 0) ?? 1
+  const beside = [4, 3].find(n => n < count && fits(n) && gauges.length % (n - 1) === 0) ?? 0
+  const grid = beside > full
+    ? [
+      <Box key="bento" gap={1}>
+        {slot('slot-account', accountCard())}
+        <Box key="gauges" flexGrow={beside - 1} width={0} minWidth={0} flexDirection="column" gap={1}>{rows(gauges, beside - 1)}</Box>
+      </Box>,
+    ]
+    : full === 1 && fits(2)
+      ? [<Box key="row-account" gap={1}>{slot('slot-account', accountCard())}</Box>, ...rows(gauges, 2)]
+      : rows([accountCard(), ...gauges], full)
   return frame('band', [top, <Box key="cards" flexDirection="column" gap={1}>{grid}</Box>])
 }
 

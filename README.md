@@ -261,7 +261,8 @@ Cards while Claude waits, one line while it works:
 | On the band | Means |
 | --- | --- |
 | **Account** | The account the proxy gave this session (`expected` before its first request), its plan and the model. |
-| **5-hour**, **Weekly** | That account's use of each window, and when it resets. A plan without a 5-hour limit reads `no such limit`; a model with a weekly limit of its own (Fable) shows that one, as `Weekly Fable`, while it has less left than the week. |
+| **5-hour**, **Weekly** | That account's use of each window, and when it resets. A plan without a 5-hour limit has no 5-hour tile; `quota` says which limits the plan lacks. Another model's own weekly limit (Opus, Sonnet) takes the Weekly tile, under its name, while it has less left than the week. |
+| **Weekly Fable** | On a session that runs Fable: Fable's own weekly limit, always, beside the week. `no separate limit` when the account has none, so Fable draws on the week alone. |
 | **Context** | How full the conversation is. |
 | **Cache** | Time left before the prompt cache goes cold, with `kept warm 0/3` counting refreshes while keeping it warm is on; once cold, what the next turn rewrites and costs. |
 | **Accounts** | Every account's weekly use, and the one a switch or a new session gets next. |
@@ -271,7 +272,7 @@ Cards while Claude waits, one line while it works:
 | --- | --- |
 | `switch` | Moves this session to another account, or to another provider's model and back. While the cache is warm it first says what the move costs, and can hand off first. |
 | `hand off` | In the row when the context passes 60%, the next turn would start cold, or a move would. Claude writes a note (goal, done, not done, changes, watch out, next step, or [your own sections](#your-own-handoff-note)), the conversation clears, and a new one starts from it. `/handoff [message]` does it any time, with the message after the note. |
-| `quota` | Every account's windows and the band's settings; `/quota` opens the same. A session signed in to Claude directly has `settings` in its place. |
+| `quota` | Every account's windows, the limits no account has (`no such limit: 5-hour`), and the band's settings; `/quota` opens the same. A session signed in to Claude directly has `settings` in its place. |
 | `more` / `less` | Cards or one line, until the turn changes (**Expand** / **Collapse** in the desktop app). |
 
 **Before a cold turn.** The row says when the next turn would start cold and what it rewrites. Two
@@ -447,7 +448,8 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | The page or the band is slow while the Mac is busy | Homebrew runs the proxy as a low-priority service. Add `ProcessType` `Interactive` to `~/Library/LaunchAgents/sh.brew.cliproxyapi.plist` (`plutil -replace ProcessType -string Interactive <file>`), then load it again with `launchctl bootout gui/$(id -u)/sh.brew.cliproxyapi` and `launchctl bootstrap gui/$(id -u) <file>`. `brew services restart` writes the file anew. |
 | Codex sessions are missing from the page | Codex does not use the proxy yet (step 4). |
 | Codex says a hook exited with code 7 or 22 | No proxy answers at the hook's address (7), or quota-pilot is not on it (22). |
-| An account has no 5-hour window | Its plan has none (a Codex plan, a Claude plan without the 5-hour limit); the page and the band say so, and it is ranked by its week alone. |
+| An account has no 5-hour window | Its plan has none (a Codex plan, a Claude plan without the 5-hour limit). The page says so under the provider's name and the band's `quota` pane does too; the band draws no 5-hour tile, and the account is ranked by its week alone. |
+| The band has no `Weekly Fable` tile | It shows while the session's model is Fable, through the proxy. A session on another model has none, nor has one signed in to Claude directly: Claude Code reports no Fable limit there. From 0.1.19 it shows whichever of the two limits has less left; 0.1.18 hid it while Fable had more left than the week. |
 | A session on Fable stops when Fable's weekly limit runs out | Add `claude-fable: claude-opus-5-5` to `fallback_map`, and set `upstream.claude.model-level-cooling: true` in the proxy's config: without it CLIProxyAPI holds the whole account back, for every model, until the limit resets. |
 | The ledger has no `Weekly Fable` meter | Press **Refresh** and check any read failures. A no-limit note naming Fable means the displayed accounts report no separate Fable quota, so Fable uses their week. Without that note, its limit may still be unread. See [quota readings](docs/architecture.md#reading-quota). |
 | The band says `Switched d••• → k••• · reason not recorded` | quota-pilot is older than the band and does not record why a session moved: update it from the panel's Plugin Store. |

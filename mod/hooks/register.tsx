@@ -16,6 +16,7 @@ import {
   cacheTtlMs,
   coldConfirmed,
   isAnthropicHost,
+  lacksFiveHour,
   movedKey,
   parseModels,
   readBand,
@@ -1062,7 +1063,7 @@ export const register: Register = (on, options) => {
     const band = settingsRows({ settings, auto, unattended }, actsOf($))
     if (!sess.proxied || !snap) {
       const why = !sess.proxied
-        ? <Text key="why" color={P.dim}>This session signs in to Claude directly, not through the proxy: the band shows this account's own limits.</Text>
+        ? <Text key="why" color={P.dim}>{`This session signs in to Claude directly, not through the proxy: the band shows this account's own limits.${lacksFiveHour(sess.rateLimits) ? ' Its plan has no 5-hour limit.' : ''}`}</Text>
         : bandError
           ? <Text key="why" color={P.orange}>{`No quota data: ${bandErrorText(bandError)}`}</Text>
           : <Text key="why" color={P.dim}>No quota-pilot snapshot found. Is the proxy plugin running?</Text>
