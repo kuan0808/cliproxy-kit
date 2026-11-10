@@ -165,6 +165,31 @@ func TestManualOfferLeavesContextFitToTheRoute(t *testing.T) {
 	}
 }
 
+func TestExplicitProviderAliasesPassTheRouteIntercept(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		t.Run(provider, func(t *testing.T) {
+			s, c, in := fableSetup(t, Config{CrossProvider: "auto",
+				FallbackMap: map[string]string{"claude-fable": provider + ":team-opus"}, ContextLengths: map[string]int{"team-opus": 1000000}})
+			fableLeft(s, c, "claude-a", 0)
+			fableLeft(s, c, "claude-b", 0)
+			if d := s.Route(in); !d.Handled || d.Provider != provider || d.Model != "team-opus" {
+				t.Fatalf("alias route = %+v", d)
+			}
+			for _, tc := range []struct {
+				model string
+				stop  bool
+			}{{"team-opus", false}, {"TEAM-OPUS", false}, {fable, true}, {"gpt-6-sol", true}} {
+				if d := s.Intercept(InterceptInput{Session: "s1", RequestedModel: fable, Model: tc.model}); d.Terminate != tc.stop {
+					t.Fatalf("intercept model %s = %+v, want stop=%t", tc.model, d, tc.stop)
+				}
+			}
+			if d := s.Intercept(InterceptInput{Session: "s1", RequestedModel: fable, Model: "team-opus", Thread: "continue"}); !d.Terminate || d.ErrorCode != threadUnsupported {
+				t.Fatalf("alias thread continuation = %+v", d)
+			}
+		})
+	}
+}
+
 // A model whose own limit is used up on every account runs what the fallback map names for it, by
 // itself and within its provider; one account running out is not that.
 func TestAModelUsedUpOnEveryAccountRunsItsFallback(t *testing.T) {

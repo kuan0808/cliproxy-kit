@@ -344,7 +344,7 @@ func (s *State) Intercept(in InterceptInput) InterceptDecision {
 		}
 		// The router did not send it there (the conversation does not fit, or the provider has no
 		// account): stopped, rather than served by the original model unasked.
-		sent := ProviderOfModel(in.Model) == r.Provider && (r.Provider != from || strings.EqualFold(in.Model, r.Model))
+		sent := strings.EqualFold(in.Model, r.Model)
 		if !sent {
 			note := "the request could not be sent there"
 			if sess := s.sessions[root]; sess != nil && sess.RouteNote != "" {
