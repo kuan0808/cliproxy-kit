@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kuan0808/cliproxy-kit/plugin/core"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -28,7 +29,7 @@ func fallbackState() *core.State {
 func fableRoute(t *testing.T, body string) pluginapi.ModelRouteResponse {
 	t.Helper()
 	raw, err := json.Marshal(pluginapi.ModelRouteRequest{
-		RequestedModel: "claude-fable-5-2", AvailableProviders: []string{"claude"},
+		RequestedModel: "claude-fable-5-2", AvailableProviders: []string{"claude", "codex"},
 		Headers: http.Header{"X-Claude-Code-Session-Id": {"s1"}}, Body: []byte(body),
 	})
 	if err != nil {
@@ -128,4 +129,69 @@ func TestIdleRouteRefreshHasABoundedDeadline(t *testing.T) {
 			t.Fatalf("recovered source did not return without polling: %+v", d)
 		}
 	})
+}
+
+func TestInventoryRecheckCanRequestABoundedQuotaRefresh(t *testing.T) {
+	savedState, savedHost, savedPoll := state, callHost, pollTurn
+	defer func() { state, callHost, pollTurn = savedState, savedHost, savedPoll }()
+	for _, provider := range []string{"claude", "codex"} {
+		t.Run(provider, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				model := "claude-opus-5-5"
+				if provider == "codex" {
+					model = "gpt-6-sol"
+				}
+				state = fallbackState()
+				state.SetConfig(core.Config{CrossProvider: "auto", FallbackMap: map[string]string{"claude-fable": provider + ":" + model}})
+				state.UpdateInventory([]core.CredInfo{{ID: "a", Provider: "claude"}, {ID: "b", Provider: "claude"}, {ID: "x", Provider: "codex"}})
+				if d := fableRoute(t, `{"tools":[{"name":"Bash"}]}`); !d.Handled || d.TargetModel != model {
+					t.Fatalf("initial route = %+v", d)
+				}
+				time.Sleep(61 * time.Minute)
+				for _, id := range []string{"a", "b"} {
+					now := time.Now()
+					state.MergePoll(id, "claude", []core.Window{
+						{Kind: "7d", Remaining: 0.5, ObservedAt: now},
+						{Kind: "7d_fable", Remaining: 0, ObservedAt: now},
+						{Kind: "7d_opus", Remaining: 0, ObservedAt: now},
+					}, true)
+				}
+				state.MergePoll("x", "codex", []core.Window{{Kind: "7d", Remaining: 0, ObservedAt: time.Now()}}, false)
+				files := []pluginapi.HostAuthFileEntry{
+					{ID: "a", AuthIndex: "1", Provider: "claude"}, {ID: "b", AuthIndex: "2", Provider: "claude"},
+					{ID: "x", AuthIndex: "3", Provider: "codex"}, {ID: "c", AuthIndex: "4", Provider: "claude"},
+				}
+				if provider == "codex" {
+					files = append(files, pluginapi.HostAuthFileEntry{ID: "y", AuthIndex: "5", Provider: "codex"})
+				}
+				var calls []string
+				callHost = func(method string, _ any) (json.RawMessage, error) {
+					calls = append(calls, method)
+					return json.Marshal(map[string]any{"files": files})
+				}
+				pollTurn = make(chan struct{}, 1)
+				pollTurn <- struct{}{}
+				defer func() { <-pollTurn }()
+				started := time.Now()
+				d := fableRoute(t, `{"tools":[{"name":"Bash"}]}`)
+				if !d.Handled || d.Target != provider || d.TargetModel != model || time.Since(started) != 2*time.Second {
+					t.Fatalf("route after inventory added an unread account = %+v, elapsed %s", d, time.Since(started))
+				}
+				synctest.Wait()
+				if len(calls) != 1 || calls[0] != pluginabi.MethodHostAuthList {
+					t.Fatalf("host calls = %v, want one inventory recheck", calls)
+				}
+				if r := state.Build().Sessions["s1"].Route; r == nil || r.Model != model || !r.At.Equal(time.Now()) {
+					t.Fatalf("unconfirmed route did not stay active: %+v", r)
+				}
+				if d := state.Intercept(core.InterceptInput{Session: "s1", RequestedModel: "claude-fable-5-2", Model: d.TargetModel}); d.Terminate {
+					t.Fatalf("whole-history request was stopped: %+v", d)
+				}
+				started = time.Now()
+				if d := fableRoute(t, `{"tools":[{"name":"Bash"}]}`); !d.Handled || time.Since(started) != 0 || len(calls) != 1 {
+					t.Fatalf("ordinary routed request repeated a read: %+v, calls %v", d, calls)
+				}
+			})
+		})
+	}
 }

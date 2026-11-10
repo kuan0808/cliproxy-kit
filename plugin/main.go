@@ -477,30 +477,35 @@ func route(raw []byte) ([]byte, error) {
 		Turn:           conversationTurn(req.Body),
 	}
 	d := state.Route(in)
-	if d.Refresh {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			pollOnce(ctx, minRepoll, false)
-		}()
-		in.QuotaRead = "timeout"
-		select {
-		case <-done:
-			if ctx.Err() == nil {
-				in.QuotaRead = "done"
+	rechecked := false
+	for {
+		if d.Recheck && !rechecked {
+			rechecked = true
+			infos, ok := readInventory()
+			if !ok || len(infos) == 0 {
+				break
 			}
-		case <-ctx.Done():
+			state.UpdateInventory(infos)
+		} else if d.Refresh && in.QuotaRead == "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				pollOnce(ctx, minRepoll, false)
+			}()
+			in.QuotaRead = "timeout"
+			select {
+			case <-done:
+				if ctx.Err() == nil {
+					in.QuotaRead = "done"
+				}
+			case <-ctx.Done():
+			}
+		} else {
+			break
 		}
 		d = state.Route(in)
-	}
-	if d.Recheck {
-		// A takeover acts on every account being used up: on the host's list as it is now.
-		if infos, ok := readInventory(); ok && len(infos) > 0 {
-			state.UpdateInventory(infos)
-			d = state.Route(in)
-		}
 	}
 	if !d.Handled {
 		return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
@@ -1201,7 +1206,7 @@ func newBootID() string {
 
 // ---- host calls and envelopes ----
 
-func callHost(method string, payload any) (json.RawMessage, error) {
+var callHost = func(method string, payload any) (json.RawMessage, error) {
 	if hostClosed.Load() {
 		return nil, fmt.Errorf("host closed")
 	}
