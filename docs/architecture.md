@@ -432,9 +432,9 @@ rows carry `switch to k•••` (Switch now, in [When an account fails](#when-
 
 The quota cards are the account's windows, each with its reset (`view.ts`, `quota`):
 
-- **5-hour**, unless the plan has none: the snapshot's `absent` names `5h`, or, on a direct login,
-  Claude Code has reported limits without one. A limit the plan lacks gets no card; one not read
-  yet keeps its card and says so (`not reported yet`, `after the first reply`).
+- **5-hour**, unless its reading is missing and the snapshot's `absent` names `5h`, or, on a
+  direct login, Claude Code has reported limits without one. Without a known absence, an unread
+  window keeps its card and says so (`not reported yet`, `after the first reply`).
 - **Weekly**. For a model with a weekly window of its own and no separate card for it, that
   window takes this card, under its name, while it has less left than the week.
 - **Weekly Fable**, in the place freed by a missing 5-hour limit on a proxied Claude account:
@@ -447,11 +447,11 @@ The quota cards are the account's windows, each with its reset (`view.ts`, `quot
 In a terminal the tiles are Account, these, Context, Cache and Accounts: all in a row when they fit
 (a tile that carries a name is at least 24 columns, a meter's 22), else in a row without Accounts,
 else, given seven rows, every tile in two rows of one width, Account and the quota over the rest;
-else one line, which has a meter only for a window with a reading (`5h`, `7d`, `fable`) and, when
-both do not fit, drops whichever of the week and Fable's has more left first. A figure reads `64%
-used` where every quota tile has room for it beside its label, else `64%` on every tile. The desktop
-app's cards share one width per column: all in a row, else rows of three or two, the account card
-tall beside rows of gauges when there is a card too many.
+else compact meters on one or two lines. A quota meter appears only for a window with a reading
+(`5h`, `7d`, `fable`); when both do not fit, the week or Fable's with more left drops first. A figure
+reads `64% used` where every quota tile has room for it beside its label, else `64%` on every tile.
+The desktop app's cards share one width per column: all in a row, else rows of three or two, the
+account card tall beside rows of gauges when there is a card too many.
 
 The quota pane lists each account's windows, a row per kind any account of the provider reports
 or says it lacks. Each account's row keeps its meter space and says `no such limit` for a limit

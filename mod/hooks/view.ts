@@ -131,9 +131,8 @@ export type Facts = {
   effort: string
   isCodex: boolean
   /**
-   * The account's quota windows, each a tile: the 5-hour one unless the plan has none, the week,
-   * or Fable's own week in its place on a proxied Claude account, whichever has less left.
-   * Another model's own weekly limit takes the week's tile while it is the tighter one.
+   * Shared by both surfaces so quota visibility cannot diverge. A replacement Fable tile must
+   * survive model changes; other model limits still share the weekly tile.
    */
   quota: Quota[]
   ctx: { used: number; window: number; left: number } | null
