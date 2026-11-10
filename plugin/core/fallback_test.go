@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
@@ -27,6 +28,142 @@ func fableLeft(s *State, c *clock, id string, left float64) {
 }
 
 func routeOf(s *State) *Route { return s.Build().Sessions["s1"].Route }
+
+func TestSnapshotResolvesManualFallbackOffersWithZeroResets(t *testing.T) {
+	for _, mode := range []string{"off", "auto"} {
+		for _, tc := range []struct{ source, sourceKind, target, kind string }{
+			{fable, "7d_fable", "claude-opus-5-5", "5h"},
+			{fable, "7d_fable", "claude-opus-5-5", "7d"},
+			{fable, "7d_fable", "claude-opus-5-5", "7d_opus"},
+			{fable, "7d_fable", "claude-sonnet-5-5", "7d_sonnet"},
+			{"claude-opus-5-5", "7d_opus", fable, "7d_fable"},
+		} {
+			t.Run(mode+"/"+tc.kind, func(t *testing.T) {
+				s, c := newTestState()
+				s.UpdateInventory(inventory)
+				s.SetConfig(Config{CrossProvider: mode, FallbackMap: map[string]string{
+					tc.source: tc.target, tc.target: "codex:gpt-6-sol",
+				}})
+				for _, id := range []string{"claude-a", "claude-b"} {
+					s.MergePoll(id, "claude", []Window{{Kind: "7d", Remaining: 0.5, ObservedAt: c.t}}, false)
+				}
+				s.MergePoll("codex-a", "codex", []Window{{Kind: "7d", Remaining: 0.5, ObservedAt: c.t}}, false)
+				in := RouteInput{Session: "s1", RequestedModel: tc.source, Available: []string{"claude", "codex"}, Turn: true}
+				if d := s.Route(in); d.Handled {
+					t.Fatalf("a healthy source was routed: %+v", d)
+				}
+				for _, id := range []string{"claude-a", "claude-b"} {
+					s.MergeWindows(id, "claude", []Window{{Kind: tc.sourceKind, Remaining: 0, ObservedAt: c.t}})
+				}
+				if v := s.Build().Sessions["s1"]; v.Fallback == nil || *v.Fallback != (FallbackOffer{Provider: "claude", Model: tc.target}) {
+					t.Fatalf("skipped a target that can still serve: %+v", v.Fallback)
+				}
+				for _, id := range []string{"claude-a", "claude-b"} {
+					s.MergeWindows(id, "claude", []Window{{Kind: tc.kind, Remaining: 0, ObservedAt: c.t}})
+				}
+				raw, err := json.Marshal(s.BuildForBand("s1", tc.source, ""))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var wire struct {
+					Sessions map[string]struct {
+						Fallback *FallbackOffer `json:"fallback"`
+						Route    *Route         `json:"route"`
+					} `json:"sessions"`
+					Providers map[string]struct {
+						Credentials []struct {
+							Windows []struct {
+								Kind    string `json:"kind"`
+								ResetAt string `json:"reset_at"`
+							} `json:"windows"`
+						} `json:"credentials"`
+					} `json:"providers"`
+				}
+				if err := json.Unmarshal(raw, &wire); err != nil {
+					t.Fatal(err)
+				}
+				v := wire.Sessions["s1"]
+				if v.Fallback == nil || *v.Fallback != (FallbackOffer{Provider: "codex", Model: "gpt-6-sol"}) || v.Route != nil {
+					t.Fatalf("manual offer with %s: %s", mode, raw)
+				}
+				zeroes := 0
+				for _, cred := range wire.Providers["claude"].Credentials {
+					for _, w := range cred.Windows {
+						if w.Kind == tc.kind && w.ResetAt == "0001-01-01T00:00:00Z" {
+							zeroes++
+						}
+					}
+				}
+				if zeroes != 2 {
+					t.Fatalf("serialized snapshot lost unset %s resets: %s", tc.kind, raw)
+				}
+				if d := s.Route(in); d.Handled != (mode == "auto") || d.Handled && (d.Provider != "codex" || d.Model != "gpt-6-sol") {
+					t.Fatalf("manual offer changed automatic policy: %+v", d)
+				}
+			})
+		}
+	}
+}
+
+func TestSnapshotOmitsUnavailableManualFallbacks(t *testing.T) {
+	for _, mode := range []string{"off", "auto"} {
+		for _, reason := range []string{"healthy", "one account available", "unknown", "all targets exhausted", "no account", "no map", "cycle"} {
+			t.Run(mode+"/"+reason, func(t *testing.T) {
+				cfg := Config{CrossProvider: mode, FallbackMap: map[string]string{"claude-fable": "claude-opus-5-5", "claude": "codex:gpt-6-sol"}}
+				s, c, in := fableSetup(t, cfg)
+				s.Route(in)
+				if reason != "healthy" && reason != "unknown" {
+					fableLeft(s, c, "claude-a", 0)
+					if reason != "one account available" {
+						fableLeft(s, c, "claude-b", 0)
+					}
+				}
+				switch reason {
+				case "unknown":
+					c.add(26 * time.Minute)
+				case "all targets exhausted", "no account", "cycle":
+					for _, id := range []string{"claude-a", "claude-b"} {
+						weeklyOnly(s, c, id, 0, 3*24*time.Hour)
+					}
+					if reason == "all targets exhausted" {
+						s.MergeWindows("codex-a", "codex", []Window{{Kind: "7d", Remaining: 0, ObservedAt: c.t}})
+					} else if reason == "no account" {
+						s.UpdateInventory([]CredInfo{{ID: "claude-a", Provider: "claude"}, {ID: "claude-b", Provider: "claude"}})
+					} else {
+						cfg.FallbackMap["claude"] = fable
+						s.SetConfig(cfg)
+					}
+				case "no map":
+					s.SetConfig(Config{CrossProvider: mode})
+				}
+				if v := s.Build().Sessions["s1"]; v.Fallback != nil {
+					t.Fatalf("%s offered a fallback: %+v", reason, v.Fallback)
+				}
+			})
+		}
+	}
+}
+
+func TestManualOfferLeavesContextFitToTheRoute(t *testing.T) {
+	s, c, in := fableSetup(t, Config{FallbackMap: map[string]string{"claude-fable": "codex:proxy-model"}})
+	s.Route(in)
+	s.Observe(Usage{Provider: "claude", Model: fable, SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t})
+	fableLeft(s, c, "claude-a", 0)
+	fableLeft(s, c, "claude-b", 0)
+	if v := s.Build().Sessions["s1"]; v.Fallback == nil || *v.Fallback != (FallbackOffer{Provider: "codex", Model: "proxy-model"}) {
+		t.Fatalf("context check suppressed the manual offer: %+v", v.Fallback)
+	}
+	ack := s.Apply(Command{CommandID: "offer", Session: "s1", BootID: "boot-1", CreatedAt: c.t, Action: "route", Provider: "codex", Model: "proxy-model"})
+	if ack.Status != "applied" {
+		t.Fatalf("manual route command: %+v", ack)
+	}
+	if d := s.Route(in); d.Handled {
+		t.Fatalf("route ran without a known context size: %+v", d)
+	}
+	if d := s.Intercept(InterceptInput{Session: "s1", RequestedModel: fable, Model: fable}); !d.Terminate {
+		t.Fatalf("unfitted manual route returned to the source: %+v", d)
+	}
+}
 
 // A model whose own limit is used up on every account runs what the fallback map names for it, by
 // itself and within its provider; one account running out is not that.

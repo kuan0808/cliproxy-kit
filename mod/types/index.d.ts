@@ -53,6 +53,7 @@ export type SnapSession = {
   model: string
   requested_model?: string
   route_note?: string
+  fallback?: { provider: string; model: string }
   auth_id: string
   served_auth_id?: string
   auth_label: string

@@ -10,7 +10,7 @@ const test = (name: string, a: TestOptions | TestBody, b?: TestBody) =>
   typeof a === 'function' ? kitTest(name, { timeoutMs: 120_000 }, a) : kitTest(name, { timeoutMs: 120_000, ...a }, b!)
 
 import type { BandError, Move, SessionInfo, Snap, SnapSwitch, UiState } from '../types'
-import { settingsOf, stepAfter } from '../hooks/logic'
+import { parseSnap, settingsOf, stepAfter } from '../hooks/logic'
 import { bandFacts, nextTurn } from '../hooks/view'
 import { W } from '../hooks/wording'
 import MOVES from './moves.js'
@@ -1570,98 +1570,46 @@ describe('the live rows', () => {
     }, act).top
   const proxy = (skew: number) => NOW - skew
 
-  test('fallback_map grammar selects the same target for the alert and its command', () => {
-    const cases: { map: Record<string, string>; health: string; provider: string; model: string }[] = [
-      { map: { claude: 'gpt-6-sol' }, health: 'exhausted', provider: 'codex', model: 'gpt-6-sol' },
-      { map: { claude: 'codex:gpt-6-sol' }, health: 'exhausted', provider: 'codex', model: 'gpt-6-sol' },
-      { map: { 'claude-fable': 'codex:gpt-6-sol' }, health: 'healthy', provider: 'codex', model: 'gpt-6-sol' },
-      { map: { claude: 'codex:gpt-6-sol', 'claude-fable': 'claude-opus-5-5' }, health: 'healthy', provider: 'claude', model: 'claude-opus-5-5' },
-      { map: { claude: 'claude-sonnet-5-5', 'claude-fable': 'claude-opus-5-5', 'claude-fable-5-2': ' Codex : gpt-6-sol ' }, health: 'healthy', provider: 'codex', model: 'gpt-6-sol' },
-    ]
-    for (const { map, health, provider, model } of cases) {
-      const snap: Snap = {
-        ...SNAP,
-        config: { ...SNAP.config, fallback_map: map },
-        providers: { claude: { ...SNAP.providers.claude!, health, credentials: SNAP.providers.claude!.credentials.map(c => ({
-          ...c, windows: [...c.windows, { kind: '7d_fable', label: 'Weekly Fable', remaining: 0, reset_at: iso(H), observed_at: iso(0), stale: false }],
-        })) } },
-        sessions: { s1: { ...SNAP.sessions.s1!, model: 'claude-fable-5-2[1m]', blocked: ['claude-d', 'claude-k'] } },
-      }
-      const sent: Move[] = []
-      const input = {
-        snap, bandError: null, now: NOW, sess: { ...SESSION, model: 'claude-fable-5-2[1m]' },
-        cache: { ...cache, prompt: 0, lastAt: 0 }, ui, models: [], working: false,
-        settings: settingsOf({}), auto: { holdCold: null, keepWarm: null }, unattended: false,
-        live: { step: null, skew: 0 },
-      }
-      const facts = bandFacts(input, { ...act, send: move => sent.push(move) })
-      expect(facts.top?.title.startsWith('fable-5-2 is used up on every account')).toBe(true)
-      expect(facts.top?.acts.map(a => a.label)).toEqual([`use ${model}`])
-      facts.top?.acts[0]?.run?.()
-      expect(sent).toEqual([{ action: 'route', fields: { provider, model }, text: W.routeTo(model) }])
-      for (const blocked of [[], ['claude-d']]) {
-        const partial: Snap = {
-          ...snap,
-          providers: { claude: { ...snap.providers.claude!, health: 'healthy', credentials: snap.providers.claude!.credentials.map(c => ({
-            ...c, windows: c.windows.map(w => w.kind === '7d_fable' ? { ...w, remaining: blocked.includes(c.id) ? 0 : 0.5 } : w),
-          })) } },
-          sessions: { s1: { ...snap.sessions.s1!, blocked } },
-        }
-        expect(bandFacts({ ...input, snap: partial }, act).top?.acts.some(a => a.key === 'route') ?? false).toBe(false)
-      }
-    }
-  })
-
-  test('manual fallback follows the configured chain past exhausted targets only', () => {
-    const base: Snap = {
+  test('the band uses the serialized core offer despite zero-reset quota windows', () => {
+    const offered: Snap = {
       ...SNAP,
       config: { ...SNAP.config, fallback_map: { 'claude-fable': 'claude-opus-5-5', claude: 'codex:gpt-6-sol' } },
-      providers: {
-        claude: {
-          ...SNAP.providers.claude!,
-          credentials: SNAP.providers.claude!.credentials.map(c => ({ ...c, windows: [
-            ...c.windows,
-            { kind: '7d_fable', label: 'Weekly Fable', remaining: 0, reset_at: iso(H), observed_at: iso(0), stale: false },
-          ] })),
-        },
-        codex: { health: 'healthy', credentials: [{ ...SNAP.providers.claude!.credentials[0]!, id: 'codex-x', auth_index: '3', label: 'x•••' }] },
-      },
-      sessions: { s1: { ...SNAP.sessions.s1!, model: 'claude-fable-5-2', blocked: ['claude-d', 'claude-k'] } },
+      providers: { claude: { ...SNAP.providers.claude!, credentials: SNAP.providers.claude!.credentials.map(c => ({
+        ...c, windows: [...c.windows, ...['7d_fable', '7d_opus'].map(kind => ({
+          kind, label: kind, remaining: 0, reset_at: '0001-01-01T00:00:00Z', observed_at: iso(0), stale: false,
+        }))],
+      })) }, codex: { health: 'healthy', credentials: [{ ...SNAP.providers.claude!.credentials[0]!, id: 'codex-x', auth_index: '3', label: 'x•••' }] } },
+      sessions: { s1: { ...SNAP.sessions.s1!, model: 'claude-fable-5-2', fallback: { provider: 'codex', model: 'gpt-6-sol' } } },
     }
-    const input = (snap: Snap) => ({
-      snap, bandError: null, now: NOW, sess: { ...SESSION, model: 'claude-fable-5-2' },
+    const snap = parseSnap(JSON.stringify(offered))!
+    const input = {
+      snap, bandError: null, now: NOW, sess: { ...SESSION, model: 'fable[1m]' },
       cache: { ...cache, prompt: 0, lastAt: 0 }, ui, models: [], working: false,
       settings: settingsOf({}), auto: { holdCold: null, keepWarm: null }, unattended: false,
       live: { step: null, skew: 0 },
-    })
-    for (const kind of ['5h', '7d', '7d_opus']) {
-      const snap: Snap = { ...base, providers: { ...base.providers, claude: {
-        ...base.providers.claude!, credentials: base.providers.claude!.credentials.map(c => ({ ...c, windows: [
-          ...c.windows.filter(w => w.kind !== kind),
-          { kind, label: kind, remaining: 0, reset_at: iso(H), observed_at: iso(0), stale: false },
-        ] })),
-      } } }
-      const sent: Move[] = []
-      const facts = bandFacts(input(snap), { ...act, send: move => sent.push(move) })
-      expect(facts.top?.acts.map(a => a.label)).toEqual(['use gpt-6-sol'])
-      facts.top?.acts[0]?.run?.()
-      expect(sent).toEqual([{ action: 'route', fields: { provider: 'codex', model: 'gpt-6-sol' }, text: W.routeTo('gpt-6-sol') }])
     }
-    for (const mode of ['available', 'stale', 'reset']) {
-      const snap: Snap = { ...base, providers: { ...base.providers, claude: {
-        ...base.providers.claude!, credentials: base.providers.claude!.credentials.map((c, index) => ({ ...c, windows: [
-          ...c.windows,
-          { kind: '7d_opus', label: 'Weekly Opus', remaining: mode === 'available' && index === 0 ? 0.5 : 0, reset_at: iso(mode === 'reset' ? -1 : H), observed_at: iso(0), stale: mode === 'stale' },
-        ] })),
-      } } }
-      expect(bandFacts(input(snap), act).top?.acts.map(a => a.label)).toEqual(['use claude-opus-5-5'])
+    const sent: Move[] = []
+    const facts = bandFacts(input, { ...act, send: move => sent.push(move) })
+    expect(facts.top?.title.startsWith('fable-5-2 is used up on every account')).toBe(true)
+    expect(facts.top?.acts.map(a => a.label)).toEqual(['use gpt-6-sol'])
+    facts.top?.acts[0]?.run?.()
+    expect(sent).toEqual([{ action: 'route', fields: { provider: 'codex', model: 'gpt-6-sol' }, text: W.routeTo('gpt-6-sol') }])
+    const none: Snap = {
+      ...snap,
+      providers: { claude: { ...snap.providers.claude!, health: 'exhausted', credentials: snap.providers.claude!.credentials.map(c => ({
+        ...c, windows: c.windows.map(w => w.kind === '7d' ? { ...w, remaining: 0 } : w),
+      })) } },
+      sessions: { s1: { ...snap.sessions.s1!, fallback: undefined } },
     }
-    const cycle: Snap = {
-      ...base,
-      config: { ...base.config, fallback_map: { 'claude-fable': 'claude-opus-5-5', claude: 'claude-fable-5-2[1m]' } },
-      providers: { ...base.providers, claude: { ...base.providers.claude!, health: 'exhausted' } },
-    }
-    expect(bandFacts(input(cycle), act).top?.acts).toEqual([])
+    expect(bandFacts({ ...input, snap: none }, act).top?.acts.some(a => a.key === 'route') ?? false).toBe(false)
+    expect(bandFacts({ ...input, sess: { ...input.sess, model: 'claude-sonnet-5-5' } }, act).top?.acts.some(a => a.key === 'route') ?? false).toBe(false)
+    const routed: Snap = { ...snap, sessions: { s1: {
+      ...snap.sessions.s1!, model: 'claude-opus-5-5', requested_model: 'claude-fable-5-2',
+      route: { provider: 'claude', model: 'claude-opus-5-5', from: 'claude-fable-5-2', auto: true, at: iso(0) },
+    } } }
+    const next = bandFacts({ ...input, snap: routed }, act)
+    expect(next.top?.title.startsWith('opus-5-5 is used up on every account')).toBe(true)
+    expect(next.top?.acts.map(a => a.label)).toEqual(['use gpt-6-sol'])
   })
 
   test('a model-scoped route follows the local model selection before another proxy turn', () => {

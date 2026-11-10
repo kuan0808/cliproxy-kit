@@ -253,6 +253,11 @@ type WindowView struct {
 	Stale      bool      `json:"stale"`
 }
 
+type FallbackOffer struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
 // SessionView is one Claude Code session as displayed, keyed by its raw id. Provider, Model and
 // AuthID say where the session's next turn goes: the route's provider and model when routed,
 // else the provider of the model it asks for, and the account bound there. ServedAuthID is the
@@ -269,6 +274,9 @@ type SessionView struct {
 	Switched       bool    `json:"switched,omitempty"` // the user chose this account
 	Route          *Route  `json:"route,omitempty"`
 	LastSwitch     *Switch `json:"last_switch,omitempty"`
+
+	Fallback *FallbackOffer `json:"fallback,omitempty"`
+
 	// SwitchBack is the account the session last moved off, while it can take the session's model
 	// again (State.canTakeLocked); absent after the user's own switch.
 	SwitchBack string `json:"switch_back,omitempty"`
@@ -489,6 +497,15 @@ func (s *State) sessionViewLocked(root string, sess *session) *SessionView {
 	v.ElsewhereAt = s.elsewhere[episodeKey{v.Provider + "|" + root, modelKey(model)}]
 	if r, ok := s.routeOfLocked(root, sess); ok {
 		v.Route = &r
+	}
+	if s.healthLocked(v.Provider, v.Model, now) == "exhausted" {
+		available := map[string]bool{}
+		for _, c := range s.creds {
+			available[c.Provider] = true
+		}
+		if to, _ := s.fallbackLocked(v.Model, available, now, false); to.Model != "" {
+			v.Fallback = &FallbackOffer{Provider: to.Provider, Model: to.Model}
+		}
 	}
 	if b := s.bindings[v.Provider+"|"+root]; b != nil {
 		v.AuthID, v.BindingReason, v.Switched = b.AuthID, b.Reason, b.Reason == switchedReason

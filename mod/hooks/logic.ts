@@ -312,35 +312,7 @@ export function missingText(cred: SnapCred | undefined, kind: string): string {
  * `key` names what a dismissal hides, for alerts that can be dismissed; `short` is the whole row in
  * fewer words, for a row too narrow for it; `back` the account `switch back` returns to.
  */
-export type Alert = { level: 'warn' | 'info'; text: string; short?: string; action?: 'handoff' | 'route' | 'dismiss'; key?: string; back?: string; fallback?: { provider: string; model: string } }
-
-function modelExhausted(snap: Snap, provider: string, model: string, now: number): boolean {
-  const view = snap.providers[provider]
-  const kinds = ['5h', '7d', provider === 'claude' ? modelBucket(model) : '']
-  return view?.health === 'exhausted' || Boolean(view?.credentials.length && view.credentials.every(c =>
-    c.disabled || c.windows.some(w => kinds.includes(w.kind) && !w.stale && w.remaining <= 0 &&
-      (!w.reset_at || Date.parse(w.reset_at) > now))))
-}
-
-function fallbackFor(snap: Snap, model: string, now: number): Alert['fallback'] {
-  const map = snap.config.fallback_map
-  const seen = new Set([modelKey(model)])
-  for (let current = model; ;) {
-    const id = modelKey(current)
-    let key = providerOfModel(id)
-    for (const k of Object.keys(map)) {
-      if (k && id.startsWith(k) && (k.length > key.length || !id.startsWith(key))) key = k
-    }
-    const value = map[key]?.trim() ?? ''
-    const colon = value.indexOf(':')
-    const target = colon < 0 ? value : value.slice(colon + 1).trim()
-    const provider = colon < 0 ? providerOfModel(target) : value.slice(0, colon).trim().toLowerCase()
-    if (!provider || !target || seen.has(modelKey(target))) return undefined
-    seen.add(modelKey(target))
-    if (!modelExhausted(snap, provider, target, now)) return { provider, model: target }
-    current = target
-  }
-}
+export type Alert = { level: 'warn' | 'info'; text: string; short?: string; action?: 'handoff' | 'route' | 'dismiss'; key?: string; back?: string; fallback?: SnapSession['fallback'] }
 
 /** Whether the session's move is certain at its next turn: its account rests, or its retry got no answer. */
 const movesNextTurn = (s: SnapSession | undefined): boolean =>
@@ -358,12 +330,12 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
   if (!acct || !snap) return null
   const { session, view } = acct
   const route = routeFor(session, asked)
-  const model = currentModel(asked, session.requested_model || session.model)
+  const model = route?.model || currentModel(asked, session.model)
   if (session.route_note && (route || sameModel(modelKey(model), modelKey(session.requested_model || session.model)))) return { level: 'warn', text: session.route_note, action: 'handoff' }
-  if (!route && modelExhausted(snap, acct.provider, model, now)) {
-    const fallback = fallbackFor(snap, model, now)
+  if (session.fallback && modelKey(model) === modelKey(session.model)) {
+    const fallback = session.fallback
     const back = nextUp(view, '', now)
-    return { level: 'warn', ...W.exhausted(shortModel(model), back), action: fallback ? 'route' : undefined, fallback }
+    return { level: 'warn', ...W.exhausted(shortModel(model), back), action: 'route', fallback }
   }
   if (session.switch_imminent && movesNextTurn(session)) {
     // A resting account, or one whose retry got no answer, gives its session to the account the

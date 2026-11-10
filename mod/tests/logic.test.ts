@@ -339,7 +339,7 @@ describe('accounts', () => {
     expect(pickAlert(usedUp, sessionAccount(usedUp, 's1'), true, NOW)?.text).toBe('weekly quota used up on d••• · moves to k••• (7% used) once d••• stops answering')
     const disabled = imminent('disabled')
     expect(pickAlert(disabled, sessionAccount(disabled, 's1'), true, NOW)?.text).toBe('disabled on d••• · moves to k••• (7% used) on the next turn')
-    const exhausted = { ...SNAP, providers: { claude: { ...SNAP.providers.claude!, health: 'exhausted' } } }
+    const exhausted = { ...SNAP, providers: { claude: { ...SNAP.providers.claude!, health: 'exhausted' } }, sessions: { s1: { ...SNAP.sessions.s1!, fallback: { provider: 'codex', model: 'gpt-6-sol' } } } }
     expect(pickAlert(exhausted, sessionAccount(exhausted, 's1'), true, NOW)?.action).toBe('route')
     const at = iso(-5 * 60_000)
     const used = { ...SNAP.providers.claude!, credentials: SNAP.providers.claude!.credentials.map(c => c.id === 'claude-d' ? { ...c, tier: 3, reason: 'weekly quota used up' } : c) }

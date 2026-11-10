@@ -189,10 +189,15 @@ account first, as for any refusal.
 Only main conversation turns establish or reconsider an automatic route, including thread
 continuations that inherit their tools. Subagents and side requests do not. Selecting another
 main model ignores a model-scoped route while evaluating the newly requested model's own
-fallback; a new route replaces the old one. The band's manual fallback alert and action use the
-same map grammar, skipping targets known used up on every account, including model-specific
-limits; unknown readings do not prove exhaustion. The band checks a model-scoped route against
-Claude Code's current local selection before using it for the model, price, context, cache,
+fallback; a new route replaces the old one. Core publishes `session.fallback: {provider, model}`
+when the session's next-turn model is exhausted on every account. It uses the automatic route's
+resolver to skip exhausted targets, including model-specific limits, but allows crossing providers
+regardless of `cross_provider` because the offer needs the reader's press. Context fit is checked
+by `Route` when used, not while publishing the offer. Healthy or unknown source quota, unavailable
+targets and exhausted chains produce no offer. An unset reset does not make a fresh zero reading
+unknown. The band's alert and use-model action read this field; it does not classify exhaustion
+or walk the map. The pane still lists the configured map. The band checks a model-scoped route
+against Claude Code's current local selection before using it for the model, price, context, cache,
 alerts or controls, so `/model` takes effect before the next request reaches the proxy.
 
 - **Within a provider** the fallback happens by itself. It stands in for that model alone: the

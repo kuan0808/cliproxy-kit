@@ -139,7 +139,12 @@ func (s *State) Route(in RouteInput) RouteDecision {
 	// decides it afresh, so it clears once the reason is gone.
 	to, note := Route{}, ""
 	if s.healthLocked(from, in.RequestedModel, now) == "exhausted" {
-		to, note = s.fallbackLocked(in.RequestedModel, needOf(sess, in), available, now)
+		to, note = s.fallbackLocked(in.RequestedModel, available, now, true)
+		if to.Model != "" {
+			if note = s.fitsLocked(to.Model, needOf(sess, in)); note != "" {
+				to = Route{}
+			}
+		}
 	}
 	if to.Model == "" || !in.Turn {
 		if in.Turn {
@@ -180,16 +185,16 @@ func fallbackTarget(value string) (provider, model string) {
 
 // fallbackLocked follows the fallback map from a model that is used up on every account to the
 // first model that can serve: what the map names for it, and for that in turn when it is used up
-// too. It gives the route to take, or why there is none; neither when the next step would cross to
-// another provider, which happens by itself only under cross_provider auto.
-func (s *State) fallbackLocked(requested string, need int, available map[string]bool, now time.Time) (Route, string) {
+// too. It gives the route to take, or why there is none; neither when an automatic step would cross
+// to another provider without cross_provider auto.
+func (s *State) fallbackLocked(requested string, available map[string]bool, now time.Time, automatic bool) (Route, string) {
 	from := ProviderOfModel(requested)
 	seen := map[string]bool{modelKey(requested): true}
 	for model := requested; ; {
 		provider, target := s.fallbackOf(model)
 		crossing := provider != from
 		switch {
-		case crossing && s.cfg.CrossProvider != "auto":
+		case automatic && crossing && s.cfg.CrossProvider != "auto":
 			return Route{}, ""
 		case target == "" || provider == "" || seen[modelKey(target)]:
 			if model == requested {
@@ -203,9 +208,6 @@ func (s *State) fallbackLocked(requested string, need int, available map[string]
 		if s.healthLocked(provider, target, now) == "exhausted" {
 			model = target
 			continue
-		}
-		if note := s.fitsLocked(target, need); note != "" {
-			return Route{}, note
 		}
 		to := Route{Provider: provider, Model: target}
 		if !crossing {
