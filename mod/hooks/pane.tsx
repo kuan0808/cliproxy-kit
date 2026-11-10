@@ -56,15 +56,9 @@ export function accountsPart(els: Els, P: Palette, snap: Snap, acct: SessionAcco
       </Box>,
     )
     // Every kind any account of the provider reports, or says it has not, so the accounts line up
-    // row by row. A limit none of its accounts has is said once, under the provider's name, as the
-    // ledger says it, and gets no row: every account says it has not (a second credential of an
-    // account counts with that account), and no credential reports it.
-    const known = [...new Set(view.credentials.flatMap(c => [...c.windows.map(w => w.kind), ...(c.absent ?? [])]))]
+    // row by row.
+    const kinds = [...new Set(view.credentials.flatMap(c => [...c.windows.map(w => w.kind), ...(c.absent ?? [])]))]
       .sort((a, b) => (a === '5h' ? -1 : b === '5h' ? 1 : a === '7d' ? -1 : b === '7d' ? 1 : a.localeCompare(b)))
-    const accounts = view.credentials.filter(c => !c.same_as)
-    const none = known.filter(kind => accounts.every(c => c.absent?.includes(kind)) && !view.credentials.some(c => c.windows.some(w => w.kind === kind)))
-    const kinds = known.filter(kind => !none.includes(kind))
-    if (none.length) rows.push(<Text key={`none-${provider}`} color={P.dim}>{`no such limit: ${none.map(kindLabel).join(', ')}`}</Text>)
     for (const c of view.credentials) {
       const mine = acct?.session.auth_id === c.id
       const blocked = c.tier === 3
@@ -89,8 +83,7 @@ export function accountsPart(els: Els, P: Palette, snap: Snap, acct: SessionAcco
           <Box key={`w-${c.id}-${kind}`} width={cols} alignItems="center">
             <Box width={LABEL} flexShrink={0}><Text color={P.dim}>{label}</Text></Box>
             <Box width={PCT} flexShrink={0} justifyContent="flex-end"><Text bold color={tone}>{w ? `${100 - left}%${w.stale ? '~' : ''}` : '—'}</Text></Box>
-            {/* Without a reading there is no meter to draw: why not takes its place, whole. */}
-            {w ? <Box width={barCells + 2} paddingX={1} flexShrink={0}>{bar(1 - w.remaining, barCells, tone)}</Box> : <Box width={1} flexShrink={0} />}
+            <Box width={barCells + 2} paddingX={1} flexShrink={0}>{bar(w ? 1 - w.remaining : 0, barCells, tone)}</Box>
             <Text color={P.dim} wrap="truncate-end">{w ? untilIso(w.reset_at, now) : missingText(c, kind)}</Text>
           </Box>,
         )

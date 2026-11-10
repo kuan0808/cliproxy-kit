@@ -615,18 +615,22 @@ test('quota pane lists every window kind for every account and says what the set
   }
   stubSession(on, snap)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
-  const pane = await $.ui.mount({
-    plugin: 'quota-band', surface: 'terminal', component: 'Pane', requestId: 'quota',
-    props: { title: 'Accounts and quota', isFocused: true, bodyColumns: 56, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
-  } as never)
-  expect(await pane.find({ text: /^not reported yet$/ })).toBeDefined() // d••• has not said a Fable window
-  // A limit no account reports, one says it has not: its row is there to say so.
-  expect(await pane.find({ text: /^Weekly Opus$/ })).toBeDefined()
-  expect(await pane.find({ text: /^no such limit$/ })).toBeDefined()
-  expect(await pane.find({ text: /^this session$/ })).toBeDefined()
-  expect(await pane.find({ text: /^use gpt-6-sol \(Codex\)$/ })).toBeDefined()
-  expect(await pane.find({ text: /^off$/ })).toBeDefined()
-  await pane.unmount()
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const pane = await $.ui.mount({
+      plugin: 'quota-band', surface, component: 'Pane', requestId: 'quota',
+      props: { title: 'Accounts and quota', isFocused: true, bodyColumns: 56, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+    } as never)
+    expect(await pane.find({ text: /^not reported yet$/ })).toBeDefined() // d••• has not said a Fable window
+    // A limit no account reports, one says it has not: its row is there to say so.
+    expect(await pane.find({ text: /^Weekly Opus$/ })).toBeDefined()
+    expect(await pane.find({ text: /^no such limit$/ })).toBeDefined()
+    expect(await pane.find({ text: /^this session$/ })).toBeDefined()
+    expect(await pane.find({ text: /^use gpt-6-sol \(Codex\)$/ })).toBeDefined()
+    expect(await pane.find({ text: /^off$/ })).toBeDefined()
+    const unread = await pane.find({ key: 'w-claude-d-7d_fable' })
+    expect((unread?.children[2] as { props: { width: number } })?.props.width).toBe(26)
+    await pane.unmount()
+  }
 })
 
 test('switch walks from the provider to its newest models and routes the session', async ($, on) => {
@@ -753,6 +757,12 @@ test('band on a direct login to a plan with no 5-hour limit leaves its tile out,
   const [five, week] = await band()
   expect(five).toBe('')
   expect(week).toMatch(/12%/)
+  const desk = await $.ui.mount({ plugin: 'quota-band', surface: 'desktop', ...BAND(100, false) })
+  const rows = (await desk.find({ key: 'cards' }))?.children as { children: unknown[] }[]
+  expect(rows.map(r => r.children.length)).toEqual([2, 2])
+  expect(await desk.find({ key: 'five' })).toBeUndefined()
+  expect(await desk.find({ key: 'fable' })).toBeUndefined()
+  await desk.unmount()
   // The pane says it, once.
   const pane = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...PANE_MOUNT } as never)
   expect((await pane.findAll({ type: 'Text', text: /Its plan has no 5-hour limit\.$/ })).length).toBe(1)
@@ -772,13 +782,6 @@ const onPlan = (windows: SnapWindow[], absent: string[], model: string): Snap =>
 
 type Drawn = { props?: { key?: string }; children?: unknown[] }
 const keyOf = (node: unknown) => String((node as Drawn).props?.key ?? '')
-/** Every key under an element that starts with `prefix`, in document order. */
-const keysUnder = (node: unknown, prefix: string): string[] => {
-  if (!node || typeof node === 'string') return []
-  const own = keyOf(node).startsWith(prefix) ? [keyOf(node)] : []
-  return [...own, ...((node as Drawn).children ?? []).flatMap(c => keysUnder(c, prefix))]
-}
-
 /** The band's tiles in a terminal `columns` wide, row by row, each by its key. */
 const tileRows = async ($: Engine, columns: number): Promise<string[][]> => {
   const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(columns, false) })
@@ -788,7 +791,7 @@ const tileRows = async ($: Engine, columns: number): Promise<string[][]> => {
   return rows.some(r => keyOf(r).startsWith('row-')) ? rows.map(r => (r.children ?? []).map(keyOf)) : [rows.map(keyOf)]
 }
 
-test('a plan without a 5-hour limit has no 5-hour tile, card or meter; the quota pane says so once', async ($, on) => {
+test('a plan without a 5-hour limit has no 5-hour tile, card or meter; the pane keeps per-account rows', async ($, on) => {
   stubSession(on, onPlan([WEEK], ['5h', '7d_fable', '7d_opus', '7d_sonnet'], 'claude-opus-5-5'))
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -800,48 +803,53 @@ test('a plan without a 5-hour limit has no 5-hour tile, card or meter; the quota
       await ui.unmount()
     }
   }
-  // One tile fewer: the rest keep their order, in one row and in two.
-  expect(await tileRows($, 160)).toEqual([['account', 'week', 'ctx', 'cache', 'all']])
-  expect(await tileRows($, 100)).toEqual([['account', 'week', 'ctx', 'cache']])
-  expect(await tileRows($, 80)).toEqual([['account', 'week'], ['ctx', 'cache', 'all']])
-  const pane = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...PANE_MOUNT } as never)
-  // Said once for the provider, as the ledger does: a limit none of its accounts has gets no row.
-  expect((await pane.findAll({ type: 'Text', text: /^no such limit: 5-hour, Weekly Fable, Weekly Opus, Weekly Sonnet$/ })).length).toBe(1)
-  expect(await pane.find({ text: /^5-hour$/ })).toBeUndefined()
-  expect((await pane.findAll({ type: 'Text', text: /^Weekly$/ })).length).toBe(2)
-  await pane.unmount()
-})
-
-test("a session on Fable always shows Fable's own weekly limit beside the week, with its reset", async ($, on) => {
-  // As Claude's Ultra reports it: no 5-hour limit, and Fable's week with more left than the week.
-  stubSession(on, onPlan([WEEK, FABLE], ['5h', '7d_opus', '7d_sonnet'], 'claude-fable-5-2'))
-  selectedModel = 'claude-fable-5-2'
-  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, false) })
-    const [week, fable] = [await ui.find({ key: 'week' }), await ui.find({ key: 'fable' })]
-    expect(week?.text).toMatch(/Weekly.*64%.*resets in 2d 14h/)
-    expect(week?.text).not.toMatch(/Fable/)
-    expect(fable?.text).toMatch(/Weekly Fable.*16%.*resets in 4d 14h/)
-    await ui.unmount()
-    // On one line: the week, then Fable's.
-    const line = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, true) })
-    expect((await line.find({ key: 'meter-7d' }))?.text).toMatch(/64%/)
-    expect((await line.find({ key: 'meter-fable' }))?.text).toMatch(/16%/)
-    await line.unmount()
-  }
-  // In the place the 5-hour tile had.
   expect(await tileRows($, 160)).toEqual([['account', 'week', 'fable', 'ctx', 'cache', 'all']])
-  // At their narrowest the tiles have no room for "used" beside "Weekly Fable": every figure goes without.
-  const tight = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(142, false) })
-  expect((await tight.find({ key: 'fable' }))?.text).toMatch(/^Weekly Fable16%━/)
-  expect((await tight.find({ key: 'week' }))?.text).toMatch(/^Weekly64%━/)
-  expect((await tight.find({ key: 'ctx' }))?.text).toMatch(/^Context42%━/)
-  await tight.unmount()
   expect(await tileRows($, 100)).toEqual([['account', 'week', 'fable'], ['ctx', 'cache', 'all']])
+  expect(await tileRows($, 80)).toEqual([['account', 'week', 'fable'], ['ctx', 'cache', 'all']])
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const pane = await $.ui.mount({ plugin: 'quota-band', surface, ...PANE_MOUNT } as never)
+    for (const id of ['claude-d', 'claude-k']) {
+      for (const kind of ['5h', '7d_fable', '7d_opus', '7d_sonnet']) {
+        expect((await pane.find({ key: `w-${id}-${kind}` }))?.text).toMatch(/no such limit$/)
+      }
+    }
+    expect((await pane.findAll({ type: 'Text', text: /^Weekly$/ })).length).toBe(2)
+    await pane.unmount()
+  }
 })
 
-test("Fable's weekly limit shows for a Fable session alone, also once it is the tighter one; another model reads as before", async ($, on) => {
+for (const model of ['claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5']) {
+  test(`a plan without a 5-hour limit shows Fable beside the week on ${model}, even with more left`, async ($, on) => {
+    // As Claude's Ultra reports it: no 5-hour limit, and Fable's week with more left than the week.
+    stubSession(on, onPlan([WEEK, FABLE], ['5h', '7d_opus', '7d_sonnet'], model))
+    selectedModel = model
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, false) })
+      const [week, fable] = [await ui.find({ key: 'week' }), await ui.find({ key: 'fable' })]
+      expect(week?.text).toMatch(/Weekly.*64%.*resets in 2d 14h/)
+      expect(week?.text).not.toMatch(/Fable/)
+      expect(fable?.text).toMatch(/Weekly Fable.*16%.*resets in 4d 14h/)
+      await ui.unmount()
+      // On one line: the week, then Fable's.
+      const line = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, true) })
+      expect((await line.find({ key: 'meter-7d' }))?.text).toMatch(/64%/)
+      expect((await line.find({ key: 'meter-fable' }))?.text).toMatch(/16%/)
+      await line.unmount()
+    }
+    // In the place the 5-hour tile had.
+    expect(await tileRows($, 160)).toEqual([['account', 'week', 'fable', 'ctx', 'cache', 'all']])
+    // At their narrowest the tiles have no room for "used" beside "Weekly Fable": every figure goes without.
+    const tight = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(142, false) })
+    expect((await tight.find({ key: 'fable' }))?.text).toMatch(/^Weekly Fable16%━/)
+    expect((await tight.find({ key: 'week' }))?.text).toMatch(/^Weekly64%━/)
+    expect((await tight.find({ key: 'ctx' }))?.text).toMatch(/^Context42%━/)
+    await tight.unmount()
+    expect(await tileRows($, 100)).toEqual([['account', 'week', 'fable'], ['ctx', 'cache', 'all']])
+  })
+}
+
+test("Fable stays visible when tighter and across model changes; other models keep their weekly limit", async ($, on) => {
   const tight = { ...FABLE, remaining: 0.1 }
   const clock = stubSession(on, onPlan([WEEK, tight], ['5h', '7d_opus', '7d_sonnet'], 'claude-fable-5-2'))
   selectedModel = 'claude-fable-5-2'
@@ -855,20 +863,34 @@ test("Fable's weekly limit shows for a Fable session alone, also once it is the 
   expect(await narrow.find({ key: 'meter-fable' })).toBeDefined()
   expect(await narrow.find({ key: 'meter-7d' })).toBeUndefined()
   await narrow.unmount()
-  // Opus draws on the week alone: no Fable tile, and the week as it is.
   selectedModel = 'claude-opus-5-5'
   snapshot = { ...onPlan([WEEK, tight], ['5h', '7d_opus', '7d_sonnet'], 'claude-opus-5-5'), sequence: 8 }
   await clock.advance(10_000)
-  const opus = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
-  expect(await opus.find({ key: 'fable' })).toBeUndefined()
-  expect((await opus.find({ key: 'week' }))?.text).toMatch(/^Weekly64%/)
-  await opus.unmount()
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const opus = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, false) })
+    expect((await opus.find({ key: 'fable' }))?.text).toMatch(/^Weekly Fable90%/)
+    expect((await opus.find({ key: 'week' }))?.text).toMatch(/^Weekly64%/)
+    await opus.unmount()
+  }
   // A model with a weekly limit of its own and no tile for it still shows that one while it is the tighter.
-  snapshot = { ...onPlan([WEEK, { ...tight, kind: '7d_opus', label: 'Weekly Opus' }], ['5h'], 'claude-opus-5-5'), sequence: 9 }
+  snapshot = { ...onPlan([WEEK, FABLE, { ...tight, kind: '7d_opus', label: 'Weekly Opus' }], ['5h'], 'claude-opus-5-5'), sequence: 9 }
   await clock.advance(10_000)
   const own = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
   expect((await own.find({ key: 'week' }))?.text).toMatch(/^Weekly Opus90%/)
+  expect((await own.find({ key: 'fable' }))?.text).toMatch(/^Weekly Fable16%/)
   await own.unmount()
+})
+
+test('the expected account shows Fable before the first proxied request', async ($, on) => {
+  stubSession(on, { ...onPlan([WEEK, FABLE], ['5h'], 'claude-opus-5-5'), sessions: {} })
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, false) })
+    expect((await ui.find({ key: 'account' }))?.text).toMatch(/expected/)
+    expect((await ui.find({ key: 'fable' }))?.text).toMatch(/Weekly Fable.*16%/)
+    expect(await ui.find({ key: 'five' })).toBeUndefined()
+    await ui.unmount()
+  }
 })
 
 test('an account with no Fable limit of its own says so in the tile, and one not read yet says that', async ($, on) => {
@@ -878,7 +900,7 @@ test('an account with no Fable limit of its own says so in the tile, and one not
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, false) })
     const fable = (await ui.find({ key: 'fable' }))?.text ?? ''
-    expect(fable).toMatch(/Weekly Fable.*—.*no separate limit/)
+    expect(fable).toMatch(/^Weekly Fableno separate limit\s*$/)
     expect(fable).not.toMatch(/%/) // no figure where there is no limit
     await ui.unmount()
     // One line has meters only: none for a limit the account lacks.
@@ -893,24 +915,28 @@ test('an account with no Fable limit of its own says so in the tile, and one not
   await unread.unmount()
 })
 
-test("a plan with a 5-hour limit keeps its tile, and a Fable session's limit takes a tile of its own after the week", async ($, on) => {
-  stubSession(on, onPlan([FIVE, WEEK, FABLE], ['7d_opus', '7d_sonnet'], 'claude-fable-5-2'))
+test('a plan with a 5-hour limit retains two quota tiles and the tighter weekly reading', async ($, on) => {
+  const clock = stubSession(on, onPlan([FIVE, WEEK, FABLE], ['7d_opus', '7d_sonnet'], 'claude-fable-5-2'))
   selectedModel = 'claude-fable-5-2'
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
-  // Seven in a row where they fit, else without Accounts, else every tile in two rows: this session
-  // and its quota over context, cache and the accounts.
-  expect(await tileRows($, 165)).toEqual([['account', 'five', 'week', 'fable', 'ctx', 'cache', 'all']])
-  expect(await tileRows($, 150)).toEqual([['account', 'five', 'week', 'fable', 'ctx', 'cache']])
-  expect(await tileRows($, 120)).toEqual([['account', 'five', 'week', 'fable'], ['ctx', 'cache', 'all']])
-  const line = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, true) })
-  expect(keysUnder(await line.find({ type: 'Box' }), 'meter-')).toEqual(['meter-ctx', 'meter-5h', 'meter-7d', 'meter-fable', 'meter-cache'])
-  await line.unmount()
-  for (const [columns, rows] of [[200, 1], [120, 2], [90, 3]] as const) {
-    const desk = await $.ui.mount({ plugin: 'quota-band', surface: 'desktop', ...BAND(columns, false) })
-    expect((await desk.find({ key: 'fable' }))?.text).toMatch(/Weekly Fable.*16%.*resets in 4d 14h/)
-    // The account card beside, or in a row with, the six gauges: one row, two rows of three, three of two.
-    expect(keysUnder(await desk.find({ key: 'cards' }), 'row-').length).toBe(rows)
-    await desk.unmount()
+  expect(await tileRows($, 165)).toEqual([['account', 'five', 'week', 'ctx', 'cache', 'all']])
+  expect(await tileRows($, 120)).toEqual([['account', 'five', 'week', 'ctx', 'cache']])
+  expect(await tileRows($, 100)).toEqual([['account', 'five', 'week'], ['ctx', 'cache', 'all']])
+  for (const remaining of [0.84, 0.1]) {
+    snapshot = { ...onPlan([FIVE, WEEK, { ...FABLE, remaining }], ['7d_opus', '7d_sonnet'], 'claude-fable-5-2'), sequence: snapshot.sequence + 1 }
+    await clock.advance(10_000)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, false) })
+      expect(await ui.find({ key: 'fable' })).toBeUndefined()
+      expect((await ui.find({ key: 'five' }))?.text).toMatch(/5-hour.*88%/)
+      expect((await ui.find({ key: 'week' }))?.text).toMatch(remaining === 0.84 ? /Weekly64%/ : /Weekly Fable90%/)
+      await ui.unmount()
+      const line = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, true) })
+      expect(await line.find({ key: 'meter-fable' })).toBeUndefined()
+      expect(await line.find({ key: 'meter-5h' })).toBeDefined()
+      expect((await line.find({ key: 'meter-7d' }))?.text).toMatch(remaining === 0.84 ? /64%/ : /90%/)
+      await line.unmount()
+    }
   }
 })
 

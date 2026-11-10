@@ -196,7 +196,17 @@ export function terminalBand(els: Els, i: BandInput, f: Facts, act: Do, site: Ba
     </Box>,
   )
   for (const q of f.quota) {
-    tiles.push(tile(q.key, q.meter?.label ?? q.label, used(q.meter), meterBar(q.meter), caption(q.meter ? resetText(q.meter.reset) : q.missing)))
+    if (q.key === 'fable' && !q.meter) {
+      tiles.push(
+        <Box key={q.key} width={tws[tiles.length]} paddingX={2} flexDirection="column" backgroundColor={C.tile}>
+          {caption(q.label)}
+          {caption(q.missing)}
+          {caption(' ')}
+        </Box>,
+      )
+    } else {
+      tiles.push(tile(q.key, q.meter?.label ?? q.label, used(q.meter), meterBar(q.meter), caption(q.meter ? resetText(q.meter.reset) : q.missing)))
+    }
   }
   tiles.push(tile('ctx', 'Context', ctxLeft != null ? figure(ctxLeft) : dim('—'),
     cells => ctxLeft != null ? usedBar(ctxLeft, cells, sev(ctxLeft)) : bar(0, cells, C.track),

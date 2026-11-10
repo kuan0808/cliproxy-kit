@@ -132,7 +132,7 @@ export type Facts = {
   isCodex: boolean
   /**
    * The account's quota windows, each a tile: the 5-hour one unless the plan has none, the week,
-   * and Fable's own week for a session on Fable through the proxy, whichever has less left.
+   * or Fable's own week in its place through the proxy, whichever has less left.
    * Another model's own weekly limit takes the week's tile while it is the tighter one.
    */
   quota: Quota[]
@@ -220,18 +220,14 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     note = 'no quota data'
   }
   const shownCred = acct?.cred ?? likely?.cred
-  // Fable's own weekly limit has a tile of its own, so the week's tile shows the week. Claude Code
-  // reports no such window on a direct login.
-  const fable = sess.proxied && isFable(model)
-  if (shownCred) {
-    five = meterOf(windowOf(shownCred, '5h'))
-    week = meterOf(fable ? windowOf(shownCred, '7d') : weeklyFor(shownCred, model))
-  }
+  if (shownCred) five = meterOf(windowOf(shownCred, '5h'))
   // On a direct login Claude Code reports the account's limits after a reply: once it has, one it
   // does not name is one the plan does not have.
   const reported = !sess.proxied && sess.rateLimits.length > 0
   // A limit the plan does not have gets no tile; the quota pane says so.
   const noFive = !five && (sess.proxied ? Boolean(shownCred?.absent?.includes('5h')) : lacksFiveHour(sess.rateLimits))
+  const fable = sess.proxied && noFive
+  if (shownCred) week = meterOf(fable && isFable(model) ? windowOf(shownCred, '7d') : weeklyFor(shownCred, model))
   const quota: Quota[] = []
   if (!noFive) quota.push({ key: 'five', short: '5h', label: '5-hour', meter: five, missing: missingText(shownCred, '5h') })
   quota.push({ key: 'week', short: '7d', label: 'Weekly', meter: week, missing: reported ? 'no such limit' : missingText(shownCred, '7d') })

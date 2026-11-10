@@ -211,10 +211,6 @@ export function usedText(w: SnapWindow | undefined): string {
 const modelBucket = (model: string) =>
   /opus/i.test(model) ? '7d_opus' : /sonnet/i.test(model) ? '7d_sonnet' : /fable/i.test(model) ? '7d_fable' : ''
 
-/**
- * Whether `model` is Fable, whose own weekly limit the band shows on a tile of its own (view.ts);
- * another model's goes by `weeklyFor`.
- */
 export const isFable = (model: string) => modelBucket(model) === '7d_fable'
 
 /**

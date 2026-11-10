@@ -435,12 +435,13 @@ The quota cards are the account's windows, each with its reset (`view.ts`, `quot
 - **5-hour**, unless the plan has none: the snapshot's `absent` names `5h`, or, on a direct login,
   Claude Code has reported limits without one. A limit the plan lacks gets no card; one not read
   yet keeps its card and says so (`not reported yet`, `after the first reply`).
-- **Weekly**. For a model with a weekly window of its own and no card for it (Opus, Sonnet), that
+- **Weekly**. For a model with a weekly window of its own and no separate card for it, that
   window takes this card, under its name, while it has less left than the week.
-- **Weekly Fable**, on a session whose next turn runs Fable through the proxy: Fable's own weekly
-  window, always, whichever of the two has less left. An account that reports no such window
+- **Weekly Fable**, in the place freed by a missing 5-hour limit on a proxied account: Fable's own
+  weekly window, for every session model, whichever of the two has less left. An account that reports no such window
   (`absent` names `7d_fable`) reads `no separate limit`, as Fable then draws on the week alone. A
-  direct login has no such card: Claude Code reports the 5-hour and weekly windows only.
+  direct login has no such card: Claude Code reports the 5-hour and weekly windows only. Plans
+  with a 5-hour limit keep the existing two quota cards.
 
 In a terminal the tiles are Account, these, Context, Cache and Accounts: all in a row when they fit
 (a tile that carries a name is at least 24 columns, a meter's 22), else in a row without Accounts,
@@ -448,14 +449,13 @@ else, given seven rows, every tile in two rows of one width, Account and the quo
 else one line, which has a meter only for a window with a reading (`5h`, `7d`, `fable`) and, when
 both do not fit, drops whichever of the week and Fable's has more left first. A figure reads `64%
 used` where every quota tile has room for it beside its label, else `64%` on every tile. The desktop
-app's cards share one width per column: all in a row, else the most columns that leave no slot
-empty, the account card tall beside rows of gauges when there is a card too many.
+app's cards share one width per column: all in a row, else rows of three or two, the account card
+tall beside rows of gauges when there is a card too many.
 
-The quota pane lists each account's windows, a row per kind any account of the provider reports. A
-kind every account says it lacks is said once, under the provider's name (`no such limit: 5-hour,
-Weekly Opus`), by the ledger's rule: a second credential of an account counts with that account,
-and a window on any credential keeps the kind's row. On a direct login the pane's first line says
-when the plan has no 5-hour limit.
+The quota pane lists each account's windows, a row per kind any account of the provider reports
+or says it lacks. Each account's row keeps its meter space and says `no such limit` for a limit
+its plan lacks, or `not reported yet` for a window it has not reported. On a direct login the
+pane's first line says when the plan has no 5-hour limit.
 
 Everything it shows of accounts comes from `/band`, read every 10 seconds at `ANTHROPIC_BASE_URL`
 with `ANTHROPIC_AUTH_TOKEN` (else `ANTHROPIC_API_KEY`, else no key, for a proxy without `api-keys`),

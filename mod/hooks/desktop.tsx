@@ -196,7 +196,16 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
   const gauges: RenderChildren[] = []
   for (const { key, label, meter: m, missing } of f.quota) {
     const name = m?.label ?? label
-    gauges.push(gauge(key, name, meterRing(m), `${name} quota: ${m ? `${usedPct(m)} used` : 'no reading'}`, usedText(m), m ? resetText(m.reset) : missing))
+    if (key === 'fable' && !m) {
+      gauges.push(card(key, [
+        <Box flexDirection="column" minWidth={0}>
+          <Text color={MUTED} wrap="truncate-end">{name}</Text>
+          <Text color={MUTED} wrap="truncate-end">{missing}</Text>
+        </Box>,
+      ]))
+    } else {
+      gauges.push(gauge(key, name, meterRing(m), `${name} quota: ${m ? `${usedPct(m)} used` : 'no reading'}`, usedText(m), m ? resetText(m.reset) : missing))
+    }
   }
   const ctx = f.ctx
   gauges.push(gauge('ctx', 'Context',
@@ -220,13 +229,13 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     pool?.caption ?? 'no quota data'))
 
   // Every card sits in a slot of one width, so the columns of every row line up: all in one row
-  // where they fit, else in the most columns (four, three, two) that leave no slot empty. Full rows
-  // when the cards fill them; with a card too many (a direct login has five, a Fable session on a
-  // plan with a 5-hour limit seven), the account card takes the odd space: tall beside rows of
-  // gauges, or, in two columns, a row of its own above them.
+  // where they fit, else rows of three or two. With a card too many for full rows (a direct login
+  // has five), the account card takes the odd space: tall beside two rows of gauges, or a row of
+  // its own above them. No slot is left empty.
   const MIN = 26
   const count = gauges.length + 1
-  const fits = (n: number) => site.bodyColumns >= n * MIN + n - 1
+  const per = [count, 3, 2, 1].find(n => site.bodyColumns >= n * MIN + n - 1 && (n !== 3 || count % 3 === 0 || gauges.length % 2 === 0)) ?? 1
+  const odd = count % per !== 0
   const slot = (key: string, card: RenderChildren, grow = 1) => <Box key={key} flexGrow={grow} width={0} minWidth={0}>{card}</Box>
   const rows = (cards: RenderChildren[], size: number) => {
     const out: RenderChildren[] = []
@@ -235,18 +244,16 @@ export function desktopBand(els: Els, i: BandInput, f: Facts, act: Do, site: Des
     }
     return out
   }
-  const full = [count, 4, 3, 2].find(n => n <= count && fits(n) && count % n === 0) ?? 1
-  const beside = [4, 3].find(n => n < count && fits(n) && gauges.length % (n - 1) === 0) ?? 0
-  const grid = beside > full
-    ? [
-      <Box key="bento" gap={1}>
-        {slot('slot-account', accountCard())}
-        <Box key="gauges" flexGrow={beside - 1} width={0} minWidth={0} flexDirection="column" gap={1}>{rows(gauges, beside - 1)}</Box>
-      </Box>,
-    ]
-    : full === 1 && fits(2)
-      ? [<Box key="row-account" gap={1}>{slot('slot-account', accountCard())}</Box>, ...rows(gauges, 2)]
-      : rows([accountCard(), ...gauges], full)
+  const grid = !odd
+    ? rows([accountCard(), ...gauges], per)
+    : per === 3
+      ? [
+        <Box key="bento" gap={1}>
+          {slot('slot-account', accountCard())}
+          <Box key="gauges" flexGrow={2} width={0} minWidth={0} flexDirection="column" gap={1}>{rows(gauges, 2)}</Box>
+        </Box>,
+      ]
+      : [<Box key="row-account" gap={1}>{slot('slot-account', accountCard())}</Box>, ...rows(gauges, per)]
   return frame('band', [top, <Box key="cards" flexDirection="column" gap={1}>{grid}</Box>])
 }
 

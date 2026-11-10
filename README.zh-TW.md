@@ -216,18 +216,31 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | 額度列上的 | 意思 |
 | --- | --- |
 | **Account** | proxy 分給這個 session 的帳號（第一個請求之前標成 `expected`）、方案和模型。 |
-| **5-hour**、**Weekly** | 那個帳號在各個額度週期的用量，以及何時重置。方案沒有 5 小時限制時，不顯示 5-hour 這一格；`quota` 會列出方案沒有哪些限制。其他模型自己的每週額度（Opus、Sonnet）剩得比整週少時，會用它的名稱顯示在 Weekly 這一格。 |
-| **Weekly Fable** | session 用 Fable 時顯示：Fable 自己的每週額度，永遠顯示在整週額度旁邊。帳號沒有另設 Fable 額度時寫 `no separate limit`，表示 Fable 只扣整週額度。 |
+| **5-hour**、**Weekly** | 那個帳號在各個額度週期的用量，以及何時重置。方案沒有 5 小時限制時，不顯示 5-hour 這一格；`quota` 會列出方案沒有哪些限制。模型自己的每週額度剩得比整週少時，會用它的名稱顯示在 Weekly 這一格，已經獨立顯示的除外。 |
+| **Weekly Fable** | 經過 proxy 的帳號沒有 5 小時限制時，空出的位置會顯示 Fable 自己的每週額度，不受 session 的模型或哪個額度剩得較少影響。帳號沒有另設 Fable 額度時寫 `no separate limit`，表示 Fable 只扣整週額度。 |
 | **Context** | 對話用了多少 context。 |
 | **Cache** | prompt 快取還剩多久變冷；保持快取打開時，用 `kept warm 0/3` 計算刷新次數；變冷後顯示下一輪要重寫多少、花多少。 |
 | **Accounts** | 所有帳號的每週用量，以及下次切換或新 session 會分到的帳號。 |
 | **上方那一列** | 一次一件事：要你決定的問題、剛做完的結果，或提醒（proxy 正在 `retrying` 你的帳號、某個帳號 `resting`、還沒有回應、下一輪會冷啟動、session 換了帳號、context 快滿了）。 |
 
+<details>
+<summary>沒有 5 小時限制：更新前後</summary>
+
+0.1.18：Fable 剩得比整週多時會被藏起來。
+
+![0.1.18](docs/images/zh-TW/fable-before.png)
+
+0.1.19：所有模型都會在空出的位置顯示 Fable。
+
+![0.1.19](docs/images/zh-TW/fable-after.png)
+
+</details>
+
 | 按鈕 | 作用 |
 | --- | --- |
 | `switch` | 把這個 session 換到另一個帳號，或另一個供應商的模型，也能換回來。快取還熱著時，會先說切換要花多少，也可以先交接。 |
 | `hand off` | context 超過 60%、下一輪會冷啟動，或切換會造成冷啟動時，出現在上方那一列。Claude 寫一份交接筆記（目標、已完成、未完成、修改內容、注意事項、下一步，或[你自己定的段落](#自訂交接筆記)），清空對話，新的對話從筆記開始。輸入 `/handoff [訊息]` 隨時都能交接，訊息會接在筆記後面。 |
-| `quota` | 所有帳號的各個額度週期、所有帳號都沒有的限制（`no such limit: 5-hour`），以及額度列的設定；輸入 `/quota` 也一樣。直接登入 Claude 的 session 在同一個位置是 `settings`。 |
+| `quota` | 所有帳號的各個額度週期，各帳號沒有的限制會在該帳號的列寫 `no such limit`，以及額度列的設定；輸入 `/quota` 也一樣。直接登入 Claude 的 session 在同一個位置是 `settings`。 |
 | `more` / `less` | 在換輪之前固定顯示方塊或一行（桌面版是 **Expand** / **Collapse**）。 |
 
 **冷啟動之前。** 下一輪會冷啟動時，上方那一列會說要重寫多少。另外有兩個自動功能，預設都關閉，要你自己打開：
@@ -357,8 +370,8 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Mac 很忙時，頁面或額度列變慢 | Homebrew 把 proxy 當成低優先的服務執行。在 `~/Library/LaunchAgents/sh.brew.cliproxyapi.plist` 加上 `ProcessType` `Interactive`（`plutil -replace ProcessType -string Interactive <檔案>`），再用 `launchctl bootout gui/$(id -u)/sh.brew.cliproxyapi` 和 `launchctl bootstrap gui/$(id -u) <檔案>` 重新載入。`brew services restart` 會重寫這個檔案。 |
 | 用量頁看不到 Codex 的 session | Codex 還沒經過 proxy（步驟 4）。 |
 | Codex 說 hook 以代碼 7 或 22 結束 | hook 的位址沒有 proxy 回應（7），或那個 proxy 上沒有 quota-pilot（22）。 |
-| 帳號沒有 5 小時視窗 | 它的方案本來就沒有（Codex 的方案、沒有 5 小時限制的 Claude 方案）。頁面會在供應商名稱下方標明，額度列的 `quota` 面板也會；額度列不畫 5-hour 這一格，排序時只看每週額度。 |
-| 額度列沒有 `Weekly Fable` 這一格 | session 的模型是 Fable 而且經過 proxy 時才顯示。用其他模型的 session 沒有這一格，直接登入 Claude 的 session 也沒有：Claude Code 在那裡不回報 Fable 的額度。從 0.1.19 起，兩個額度不管哪個剩得少都會顯示；0.1.18 在 Fable 剩得比整週多時會把它藏起來。 |
+| 帳號沒有 5 小時視窗 | 它的方案本來就沒有（Codex 的方案、沒有 5 小時限制的 Claude 方案）。頁面會在供應商名稱下方標明，額度列的 `quota` 面板會在各帳號的列標明；額度列不畫 5-hour 這一格，排序時只看每週額度。 |
+| 額度列沒有 `Weekly Fable` 這一格 | 從 0.1.19 起，經過 proxy 的帳號沒有 5 小時限制時，所有模型都會在空出的位置顯示 Fable，不受哪個額度剩得較少影響。有 5 小時限制的方案維持原本兩格，模型自己的每週額度只有剩得比整週少時才會顯示。直接登入 Claude 的 session 沒有獨立的 Fable 格：Claude Code 在那裡不回報 Fable 的額度。 |
 | Fable 的每週額度用完時，用 Fable 的 session 就停住 | 在 `fallback_map` 加上 `claude-fable: claude-opus-5-5`，並在 proxy 的設定裡把 `upstream.claude.model-level-cooling` 設為 `true`：否則 CLIProxyAPI 會讓整個帳號的所有模型一起停用，直到那個額度重置。 |
 | 帳本裡沒有 `每週 Fable` 的量表 | 按 **Refresh**，確認是否有讀取失敗。供應商下方若列出 Fable 沒有獨立額度，表示畫面中的帳號回報沒有另設 Fable 額度，Fable 用的是整週額度。沒有這段說明時，也可能是還沒讀到額度。詳見[額度讀取規則](docs/architecture.md#reading-quota)。 |
 | 額度列顯示 `Switched d••• → k••• · reason not recorded` | quota-pilot 比額度列舊，不會記錄 session 換帳號的原因：到面板的插件商店更新它。 |

@@ -304,16 +304,11 @@ describe('accounts', () => {
     expect(shape(100, 6, false)).toBe('line') // two rows of tiles need the height
     expect(shape(200, 2, false)).toBe('line')
     expect(shape(200, 20, true)).toBe('line')
-    // One window (a plan without a 5-hour limit, a model without a tile of its own): a tile fewer.
+    // A direct login without a 5-hour limit: a tile fewer.
     expect(shape(118, 20, false, 1)).toBe('5 pool')
     expect(shape(117, 20, false, 1)).toBe('4')
     expect(shape(94, 20, false, 1)).toBe('2+3 pool')
     expect(shape(69, 20, false, 1)).toBe('line')
-    // Three (a 5-hour limit, the week, Fable's own week).
-    expect(shape(164, 20, false, 3)).toBe('7 pool')
-    expect(shape(163, 20, false, 3)).toBe('6')
-    expect(shape(140, 20, false, 3)).toBe('4+3 pool')
-    expect(shape(92, 20, false, 3)).toBe('line')
     // A direct login has no Accounts tile.
     expect(shape(118, 20, false, 2, false)).toBe('5')
     expect(shape(117, 20, false, 2, false)).toBe('3+2')
@@ -330,13 +325,12 @@ describe('accounts', () => {
     expect(tiling(160, 20, false, 2, true)!.rows).toEqual([[26, 26, 26, 26, 26, 25]])
     expect(tiling(141, 20, false, 2, true)!.rows).toEqual([[24, 22, 22, 24, 22, 22]])
     expect(tiling(100, 20, false, 2, true)!.rows).toEqual([[33, 33, 32], [33, 33, 32]])
-    expect(tiling(120, 20, false, 3, true)!.rows).toEqual([[30, 29, 29, 29], [40, 39, 39]])
     expect(tiling(80, 20, false, 1, true)!.rows).toEqual([[40, 39], [26, 26, 26]])
     // No tile grows past 48 columns: both rows stop where the one with fewer tiles does.
     expect(tiling(117, 20, false, 2, false)!.rows).toEqual([[32, 32, 31], [48, 48]])
   })
 
-  test("Fable has a tile of its own; a direct login's plan lacks a 5-hour limit once its limits are reported without one", async () => {
+  test("Fable models are recognized; a direct login's plan lacks a 5-hour limit once its limits are reported without one", async () => {
     expect(['claude-fable-5-2', 'fable', 'claude-fable-5-1[1m]'].map(isFable)).toEqual([true, true, true])
     expect(['claude-opus-5-5', 'sonnet', 'gpt-6.1-sol', ''].map(isFable)).toEqual([false, false, false, false])
     expect(lacksFiveHour([])).toBe(false) // nothing reported yet
