@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -91,7 +93,8 @@ func TestThreadContinuationsCreateFallbackRoutes(t *testing.T) {
 func TestIdleRouteRefreshHasABoundedDeadline(t *testing.T) {
 	saved := state
 	savedPoll := pollTurn
-	defer func() { state, pollTurn = saved, savedPoll }()
+	savedHost := callHost
+	defer func() { state, pollTurn, callHost = saved, savedPoll, savedHost }()
 	synctest.Test(t, func(t *testing.T) {
 		pollTurn = make(chan struct{}, 1)
 		state = fallbackState()
@@ -124,11 +127,68 @@ func TestIdleRouteRefreshHasABoundedDeadline(t *testing.T) {
 				{Kind: "7d_fable", Remaining: 1, ResetAt: now.Add(7 * 24 * time.Hour), ObservedAt: now},
 			}, true)
 		}
+		callHost = func(string, any) (json.RawMessage, error) { return nil, fmt.Errorf("inventory unavailable") }
 		started := time.Now()
-		if d := fableRoute(t, `{"thread":{"type":"continue"}}`); d.Handled || time.Since(started) != 0 {
-			t.Fatalf("recovered source did not return without polling: %+v", d)
+		if d := fableRoute(t, `{"tools":[{"name":"Bash"}]}`); !d.Handled || d.TargetModel != "claude-opus-5-5" || time.Since(started) != 0 {
+			t.Fatalf("failed inventory recheck did not keep serving the route: %+v", d)
+		}
+		if r := state.Build().Sessions["s1"].Route; r == nil || !r.At.Equal(time.Now()) {
+			t.Fatalf("failed inventory recheck did not record route activity: %+v", r)
+		}
+		if d := state.Intercept(core.InterceptInput{Session: "s1", RequestedModel: "claude-fable-5-2", Model: "claude-opus-5-5"}); d.Terminate {
+			t.Fatalf("kept route stopped the whole-history request: %+v", d)
 		}
 	})
+}
+
+func TestFailedQuotaReadsKeepServingTheRoute(t *testing.T) {
+	savedState, savedHost, savedPoll := state, callHost, pollTurn
+	savedPolled, savedPlan, savedEmpty := polledAt, planReadAt, emptiedSince
+	defer func() {
+		state, callHost, pollTurn = savedState, savedHost, savedPoll
+		polledAt, planReadAt, emptiedSince = savedPolled, savedPlan, savedEmpty
+	}()
+	for _, failure := range []string{"inventory", "login"} {
+		t.Run(failure, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				state = fallbackState()
+				pollTurn = make(chan struct{}, 1)
+				polledAt, planReadAt = map[string]time.Time{}, map[string]time.Time{}
+				if d := fableRoute(t, `{"tools":[{"name":"Bash"}]}`); !d.Handled {
+					t.Fatalf("initial route = %+v", d)
+				}
+				time.Sleep(61 * time.Minute)
+				var lists, logins atomic.Int32
+				callHost = func(method string, _ any) (json.RawMessage, error) {
+					if method == pluginabi.MethodHostAuthList {
+						lists.Add(1)
+						if failure == "inventory" {
+							return nil, fmt.Errorf("inventory unavailable")
+						}
+						return json.Marshal(map[string]any{"files": []pluginapi.HostAuthFileEntry{
+							{ID: "a", AuthIndex: "1", Provider: "claude"}, {ID: "b", AuthIndex: "2", Provider: "claude"},
+						}})
+					}
+					logins.Add(1)
+					return nil, fmt.Errorf("login unavailable")
+				}
+				d := fableRoute(t, `{"tools":[{"name":"Bash"}]}`)
+				if !d.Handled || d.TargetModel != "claude-opus-5-5" {
+					t.Fatalf("failed quota read did not keep serving the route: %+v", d)
+				}
+				synctest.Wait()
+				if lists.Load() != 1 || failure == "login" && logins.Load() != 2 {
+					t.Fatalf("quota read repeated or skipped: lists=%d logins=%d", lists.Load(), logins.Load())
+				}
+				if r := state.Build().Sessions["s1"].Route; r == nil || !r.At.Equal(time.Now()) {
+					t.Fatalf("failed quota read did not record route activity: %+v", r)
+				}
+				if d := state.Intercept(core.InterceptInput{Session: "s1", RequestedModel: "claude-fable-5-2", Model: d.TargetModel}); d.Terminate {
+					t.Fatalf("kept route stopped the whole-history request: %+v", d)
+				}
+			})
+		})
+	}
 }
 
 func TestInventoryRecheckCanRequestABoundedQuotaRefresh(t *testing.T) {

@@ -272,6 +272,88 @@ func TestChangingModelsEvaluatesItsOwnFallback(t *testing.T) {
 	}
 }
 
+func TestFallbackChainsKeepExplicitProviders(t *testing.T) {
+	for _, mode := range []string{"off", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			s, c, in := fableSetup(t, Config{CrossProvider: mode, FallbackMap: map[string]string{
+				"claude-fable": "codex:proxy-model", "codex": "claude-opus-5-5",
+			}})
+			s.Route(in)
+			s.Observe(Usage{Provider: "claude", Model: fable, SessionID: "claude:s1", AuthID: "claude-a", RequestedAt: c.t})
+			for _, id := range []string{"claude-a", "claude-b"} {
+				fableLeft(s, c, id, 0)
+			}
+			s.MergePoll("codex-a", "codex", []Window{{Kind: "7d", Remaining: 0, ObservedAt: c.t}}, false)
+			if v := s.BuildForBand("s1", fable, "").Sessions["s1"]; v.Fallback == nil || *v.Fallback != (FallbackOffer{Provider: "claude", Model: "claude-opus-5-5"}) {
+				t.Fatalf("manual offer lost the intermediate provider: %+v", v.Fallback)
+			}
+			if d := s.Route(in); d.Handled != (mode == "auto") || d.Handled && (d.Provider != "claude" || d.Model != "claude-opus-5-5") {
+				t.Fatalf("automatic chain lost the intermediate provider: %+v", d)
+			}
+			if a := s.Apply(Command{CommandID: "custom", Session: "s1", BootID: "boot-1", CreatedAt: c.t, Action: "route", Provider: "codex", Model: "proxy-model"}); a.Status != "applied" {
+				t.Fatalf("custom route = %+v", a)
+			}
+			if v := s.BuildForBand("s1", fable, "").Sessions["s1"]; v.Provider != "codex" || v.Model != "proxy-model" || v.Fallback == nil || *v.Fallback != (FallbackOffer{Provider: "claude", Model: "claude-opus-5-5"}) {
+				t.Fatalf("snapshot lost its known provider: %+v", v)
+			}
+		})
+	}
+}
+
+func TestAttemptedRouteReadsAlwaysFinalize(t *testing.T) {
+	for _, target := range []string{"claude-opus-5-5", "codex:gpt-6-sol"} {
+		for _, inventoryFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/inventoryFirst=%t", target, inventoryFirst), func(t *testing.T) {
+				s, c, in := fableSetup(t, Config{CrossProvider: "auto", FallbackMap: map[string]string{"claude-fable": target}})
+				for _, id := range []string{"claude-a", "claude-b"} {
+					fableLeft(s, c, id, 0)
+				}
+				initial := s.Route(in)
+				if !initial.Handled {
+					t.Fatalf("initial route = %+v", initial)
+				}
+				c.add(61 * time.Minute)
+				if inventoryFirst {
+					weeklyOnly(s, c, "claude-a", 0.5, 7*24*time.Hour)
+					fableLeft(s, c, "claude-a", 1)
+					if d := s.Route(in); !d.Recheck || d.Refresh {
+						t.Fatalf("first read = %+v, want inventory", d)
+					}
+					list := append([]CredInfo{}, inventory...)
+					list[0].Disabled = true
+					list = append(list, CredInfo{ID: "new-account", Provider: "claude"})
+					s.UpdateInventory(list)
+					in.InventoryRead = "done"
+					if d := s.Route(in); !d.Refresh || d.Recheck {
+						t.Fatalf("second read = %+v, want quota", d)
+					}
+					in.QuotaRead = "failed"
+				} else {
+					if d := s.Route(in); !d.Refresh || d.Recheck {
+						t.Fatalf("first read = %+v, want quota", d)
+					}
+					weeklyOnly(s, c, "claude-a", 0.5, 7*24*time.Hour)
+					fableLeft(s, c, "claude-a", 1)
+					in.QuotaRead = "done"
+					if d := s.Route(in); !d.Recheck || d.Refresh {
+						t.Fatalf("second read = %+v, want inventory", d)
+					}
+					in.InventoryRead = "failed"
+				}
+				if d := s.Route(in); !d.Handled || d.Refresh || d.Recheck || d.Provider != initial.Provider || d.Model != initial.Model {
+					t.Fatalf("attempted reads left an unfinished route: %+v", d)
+				}
+				if r := routeOf(s); r == nil || !r.At.Equal(c.t) {
+					t.Fatalf("kept route did not advance: %+v", r)
+				}
+				if d := s.Intercept(InterceptInput{Session: "s1", RequestedModel: fable, Model: initial.Model}); d.Terminate {
+					t.Fatalf("kept route stopped the whole-history request: %+v", d)
+				}
+			})
+		}
+	}
+}
+
 func TestIdleAutomaticRoutesRefreshUnknownQuota(t *testing.T) {
 	for _, target := range []string{"claude-opus-5-5", "codex:gpt-6-sol"} {
 		for _, recovered := range []bool{true, false} {
@@ -331,7 +413,7 @@ func TestActiveFallbacksSurviveQuotaReadTimeoutsAndRestarts(t *testing.T) {
 					t.Fatalf("idle route did not request a reading: %+v", d)
 				}
 				s.TakeDirty()
-				in.QuotaRead = "timeout"
+				in.QuotaRead = "failed"
 				if d := s.Route(in); !d.Handled || d.Refresh {
 					t.Fatalf("timeout did not finalize the routed request: %+v", d)
 				}

@@ -46,6 +46,7 @@ type RouteInput struct {
 	Attachments    int // images and documents it carries
 	MaxOutput      int // the answer it allows (max_tokens); 0 when it does not say
 	Available      []string
+	InventoryRead  string
 	QuotaRead      string
 	// Turn marks a turn of the main conversation: it offers tools or continues a thread, and comes from no subagent.
 	// Only a turn says what the conversation asks for and whether it still fits a route.
@@ -99,17 +100,20 @@ func (s *State) Route(in RouteInput) RouteDecision {
 	}
 	// An automatic route is decided again when going back costs nothing (what it stood in for can
 	// serve, and the session has rested past its cache), or when its own target has run out.
-	if routed && r.Auto && in.Turn && in.QuotaRead != "timeout" {
+	if routed && r.Auto && in.Turn && in.InventoryRead != "failed" && in.QuotaRead != "failed" {
 		rested := now.Sub(r.At) >= cacheGone
 		health := s.healthLocked(from, in.RequestedModel, now)
 		free := rested && health == "healthy"
 		if free || s.healthLocked(r.Provider, r.Model, now) == "exhausted" {
 			if now.Sub(s.inventoryAt) > inventoryFresh {
-				return RouteDecision{Recheck: true}
+				if in.InventoryRead == "" {
+					return RouteDecision{Recheck: true}
+				}
+			} else {
+				delete(s.routes, root)
+				s.dirty = true
+				routed = false
 			}
-			delete(s.routes, root)
-			s.dirty = true
-			routed = false
 		} else if rested && health == "unknown" && in.QuotaRead == "" {
 			return RouteDecision{Refresh: true}
 		}
@@ -142,7 +146,7 @@ func (s *State) Route(in RouteInput) RouteDecision {
 	// decides it afresh, so it clears once the reason is gone.
 	to, note := Route{}, ""
 	if s.healthLocked(from, in.RequestedModel, now) == "exhausted" {
-		to, note = s.fallbackLocked(in.RequestedModel, available, now, true)
+		to, note = s.fallbackLocked(from, in.RequestedModel, available, now, true)
 		if to.Model != "" {
 			if note = s.fitsLocked(to.Model, needOf(sess, in)); note != "" {
 				to = Route{}
@@ -156,7 +160,7 @@ func (s *State) Route(in RouteInput) RouteDecision {
 		return RouteDecision{}
 	}
 	if now.Sub(s.inventoryAt) > inventoryFresh {
-		return RouteDecision{Recheck: true}
+		return RouteDecision{Recheck: in.InventoryRead == ""}
 	}
 	to.At, to.Auto = now, true
 	s.routes[root] = to
@@ -167,8 +171,8 @@ func (s *State) Route(in RouteInput) RouteDecision {
 
 // fallbackOf is what the fallback map names for a model: the entry of the longest key its id
 // starts with, else its provider's. A value is a model, or provider:model.
-func (s *State) fallbackOf(model string) (provider, target string) {
-	id, key := modelKey(model), ProviderOfModel(model)
+func (s *State) fallbackOf(source, model string) (provider, target string) {
+	id, key := modelKey(model), source
 	for k := range s.cfg.FallbackMap {
 		if k != "" && strings.HasPrefix(id, k) && (len(k) > len(key) || !strings.HasPrefix(id, key)) {
 			key = k
@@ -190,16 +194,15 @@ func fallbackTarget(value string) (provider, model string) {
 // first model that can serve: what the map names for it, and for that in turn when it is used up
 // too. It gives the route to take, or why there is none; neither when an automatic step would cross
 // to another provider without cross_provider auto.
-func (s *State) fallbackLocked(requested string, available map[string]bool, now time.Time, automatic bool) (Route, string) {
-	from := ProviderOfModel(requested)
-	seen := map[string]bool{modelKey(requested): true}
-	for model := requested; ; {
-		provider, target := s.fallbackOf(model)
+func (s *State) fallbackLocked(from, requested string, available map[string]bool, now time.Time, automatic bool) (Route, string) {
+	seen := map[string]bool{from + ":" + modelKey(requested): true}
+	for source, model := from, requested; ; {
+		provider, target := s.fallbackOf(source, model)
 		crossing := provider != from
 		switch {
 		case automatic && crossing && s.cfg.CrossProvider != "auto":
 			return Route{}, ""
-		case target == "" || provider == "" || seen[modelKey(target)]:
+		case target == "" || provider == "" || seen[provider+":"+modelKey(target)]:
 			if model == requested {
 				return Route{}, from + " is used up and no fallback is configured"
 			}
@@ -207,9 +210,9 @@ func (s *State) fallbackLocked(requested string, available map[string]bool, now 
 		case !available[provider]:
 			return Route{}, from + " is used up and its fallback " + provider + " has no account on the proxy"
 		}
-		seen[modelKey(target)] = true
+		seen[provider+":"+modelKey(target)] = true
 		if s.healthLocked(provider, target, now) == "exhausted" {
-			model = target
+			source, model = provider, target
 			continue
 		}
 		to := Route{Provider: provider, Model: target}

@@ -477,27 +477,29 @@ func route(raw []byte) ([]byte, error) {
 		Turn:           conversationTurn(req.Body),
 	}
 	d := state.Route(in)
-	rechecked := false
 	for {
-		if d.Recheck && !rechecked {
-			rechecked = true
+		if d.Recheck && in.InventoryRead == "" {
+			in.InventoryRead = "failed"
 			infos, ok := readInventory()
-			if !ok || len(infos) == 0 {
-				break
+			if ok && len(infos) > 0 {
+				state.UpdateInventory(infos)
+				in.InventoryRead = "done"
 			}
-			state.UpdateInventory(infos)
 		} else if d.Refresh && in.QuotaRead == "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			done := make(chan struct{})
+			done := make(chan bool, 1)
 			go func() {
-				defer close(done)
-				pollOnce(ctx, minRepoll, false)
+				complete, outcomes := pollOnce(ctx, minRepoll, false)
+				for _, outcome := range outcomes {
+					complete = complete && outcome.Failure == ""
+				}
+				done <- complete
 			}()
-			in.QuotaRead = "timeout"
+			in.QuotaRead = "failed"
 			select {
-			case <-done:
-				if ctx.Err() == nil {
+			case complete := <-done:
+				if complete && ctx.Err() == nil {
 					in.QuotaRead = "done"
 				}
 			case <-ctx.Done():

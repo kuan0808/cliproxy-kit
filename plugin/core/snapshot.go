@@ -503,7 +503,7 @@ func (s *State) sessionViewLocked(root string, sess *session) *SessionView {
 		for _, c := range s.creds {
 			available[c.Provider] = true
 		}
-		if to, _ := s.fallbackLocked(v.Model, available, now, false); to.Model != "" {
+		if to, _ := s.fallbackLocked(v.Provider, v.Model, available, now, false); to.Model != "" {
 			v.Fallback = &FallbackOffer{Provider: to.Provider, Model: to.Model}
 		}
 	}
