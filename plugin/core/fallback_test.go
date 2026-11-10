@@ -303,6 +303,7 @@ func TestIdleAutomaticRoutesRefreshUnknownQuota(t *testing.T) {
 					fableLeft(s, c, id, left)
 				}
 				in.QuotaRead = "done"
+				s.UpdateInventory(inventory)
 				d := s.Route(in)
 				if d.Refresh || d.Handled == recovered {
 					t.Fatalf("after refreshed quota, recovered=%t: %+v", recovered, d)
@@ -377,6 +378,7 @@ func TestAnAutomaticRouteEndsOnceItCostsNothing(t *testing.T) {
 		t.Fatalf("setup route = %+v", d)
 	}
 	fresh := func() {
+		s.UpdateInventory(inventory)
 		for _, id := range []string{"claude-a", "claude-b"} {
 			weeklyOnly(s, c, id, 0.5, 3*24*time.Hour)
 			s.MergeWindows(id, "claude", []Window{{Kind: "7d_fable", Remaining: 1, ResetAt: c.t.Add(7 * 24 * time.Hour), ObservedAt: c.t}})
@@ -391,6 +393,57 @@ func TestAnAutomaticRouteEndsOnceItCostsNothing(t *testing.T) {
 	fresh()
 	if d := s.Route(in); d.Handled || routeOf(s) != nil {
 		t.Fatalf("after an hour's rest with Fable back: %+v route %+v", d, routeOf(s))
+	}
+}
+
+func TestAutomaticRouteChangesWaitForFreshInventory(t *testing.T) {
+	for _, target := range []string{"claude-opus-5-5", "codex:gpt-6-sol"} {
+		for _, replace := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/replace=%t", target, replace), func(t *testing.T) {
+				s, c, in := fableSetup(t, Config{CrossProvider: "auto", FallbackMap: map[string]string{"claude-fable": target}})
+				for _, id := range []string{"claude-a", "claude-b"} {
+					fableLeft(s, c, id, 0)
+				}
+				if d := s.Route(in); !d.Handled {
+					t.Fatalf("initial route = %+v", d)
+				}
+				before := *routeOf(s)
+				c.add(time.Minute)
+				if !replace {
+					c.add(time.Hour)
+				}
+				for _, id := range []string{"claude-a", "claude-b"} {
+					weeklyOnly(s, c, id, 0.5, 3*24*time.Hour)
+					left := 0.0
+					if !replace && id == "claude-a" {
+						left = 1
+					}
+					fableLeft(s, c, id, left)
+					if replace && before.Provider == "claude" {
+						s.MergeWindows(id, "claude", []Window{{Kind: "7d_opus", Remaining: 0, ObservedAt: c.t}})
+					}
+				}
+				list := append([]CredInfo{}, inventory...)
+				if replace {
+					if before.Provider == "codex" {
+						s.MergePoll("codex-a", "codex", []Window{{Kind: "7d", Remaining: 0, ObservedAt: c.t}}, false)
+					}
+					list = append(list, CredInfo{ID: "new-account", Provider: before.Provider})
+				} else {
+					list[0].Disabled = true
+				}
+				if d := s.Route(in); !d.Recheck || d.Handled || d.Refresh {
+					t.Fatalf("stale inventory did not stop route change: %+v", d)
+				}
+				if r := routeOf(s); r == nil || *r != before {
+					t.Fatalf("route changed before inventory was read: %+v", r)
+				}
+				s.UpdateInventory(list)
+				if d := s.Route(in); !d.Handled || d.Recheck || d.Refresh || d.Model != before.Model || d.Provider != before.Provider {
+					t.Fatalf("fresh inventory did not preserve the working route: %+v", d)
+				}
+			})
+		}
 	}
 }
 

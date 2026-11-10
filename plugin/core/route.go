@@ -104,6 +104,9 @@ func (s *State) Route(in RouteInput) RouteDecision {
 		health := s.healthLocked(from, in.RequestedModel, now)
 		free := rested && health == "healthy"
 		if free || s.healthLocked(r.Provider, r.Model, now) == "exhausted" {
+			if now.Sub(s.inventoryAt) > inventoryFresh {
+				return RouteDecision{Recheck: true}
+			}
 			delete(s.routes, root)
 			s.dirty = true
 			routed = false

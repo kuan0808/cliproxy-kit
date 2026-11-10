@@ -165,7 +165,7 @@ export const W = {
   context: (used: number) => ({ title: `Context ${used}% used`, detail: 'hand off to a new session that starts from a summary?' }),
   // The proxy's alerts.
   stale: (age: string): Words => ({ text: `quota data is ${age} old; is the proxy running?` }),
-  exhausted: (model: string, back: string): Words => ({ text: `${model} is used up on every account · ${back}` }),
+  exhausted: (model: string, fallback: string): Words => ({ text: `${model} is used up on every account · fallback: ${fallback}` }),
   /** An account read as used up: the session moves once it refuses, or at the next turn. */
   limited: (reason: string, label: string, next: string | null, used: string, when: string): Words => ({
     text: `${reason} on ${label} · ${next ? `moves to ${next} (${used}) ${when}` : 'no other account has quota'}`,

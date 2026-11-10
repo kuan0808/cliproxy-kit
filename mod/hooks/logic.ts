@@ -334,8 +334,7 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
   if (session.route_note && (route || sameModel(modelKey(model), modelKey(session.requested_model || session.model)))) return { level: 'warn', text: session.route_note, action: 'handoff' }
   if (session.fallback && modelKey(model) === modelKey(session.model)) {
     const fallback = session.fallback
-    const back = nextUp(view, '', now)
-    return { level: 'warn', ...W.exhausted(shortModel(model), back), action: 'route', fallback }
+    return { level: 'warn', ...W.exhausted(shortModel(model), fallback.model), action: 'route', fallback }
   }
   if (session.switch_imminent && movesNextTurn(session)) {
     // A resting account, or one whose retry got no answer, gives its session to the account the

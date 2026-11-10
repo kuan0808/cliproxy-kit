@@ -330,6 +330,19 @@ describe('accounts', () => {
     expect(pickAlert(chosen, sessionAccount(chosen, 's1'), true, NOW)).toBe(null)
   })
 
+  test('an exhausted model alert names the core offer instead of a provider-wide account', () => {
+    const snap: Snap = {
+      ...SNAP,
+      sessions: { s1: { ...SNAP.sessions.s1!, model: 'claude-fable-5-2', fallback: { provider: 'codex', model: 'gpt-6-sol' } } },
+    }
+    expect(pickAlert(snap, sessionAccount(snap, 's1'), true, NOW)).toEqual({
+      level: 'warn', text: 'fable-5-2 is used up on every account · fallback: gpt-6-sol',
+      action: 'route', fallback: { provider: 'codex', model: 'gpt-6-sol' },
+    })
+    const none: Snap = { ...snap, sessions: { s1: { ...snap.sessions.s1!, fallback: undefined } } }
+    expect(pickAlert(none, sessionAccount(none, 's1'), true, NOW)).toBeNull()
+  })
+
   test('alerts: stale data, imminent switch, exhausted provider', async () => {
     expect(pickAlert(SNAP, sessionAccount(SNAP, 's1'), true, NOW)).toBe(null)
     expect(pickAlert({ ...SNAP, generated_at: iso(-10 * 60_000) }, null, true, NOW)?.text).toMatch(/old/)
