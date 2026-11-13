@@ -31,6 +31,10 @@ not run there at all. CLIProxyAPI 8.0.49 to 8.0.65 load it, and there a retry's 
 request with the 503: every retry is one of Claude Code's own, which sends the request again up to
 10 times over about three minutes. Updating
 needs the proxy first: an older quota-pilot, built for 8.0.16, loads and keeps its retries on 8.0.66
-and later, so the proxy can be updated before quota-pilot and not the other way round. A release
+and later, so the proxy can be updated before quota-pilot and not the other way round. From
+8.0.68 the proxy also holds a request that continues a Claude message thread on the account that
+answered the thread, which would undo a move; quota-pilot keeps its moves by answering such a
+continuation `400 thread_unsupported_request` once the session should run elsewhere
+([When an account fails](../architecture.md#when-an-account-fails)). A release
 that carries this raises the oldest CLIProxyAPI it needs, so it moves the version's middle number
 ([AGENTS.md](../../AGENTS.md)): this release is 0.2.0.

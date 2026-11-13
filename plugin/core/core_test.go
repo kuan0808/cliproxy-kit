@@ -1630,3 +1630,43 @@ func TestTheBandIsToldTheAccountANewSessionGets(t *testing.T) {
 		}
 	}
 }
+
+// From CLIProxyAPI 8.0.68 a thread continuation runs only on the account its thread lives on. After
+// the user's switch quota-pilot answers it thread_unsupported_request, so Claude Code sends the turn
+// again without the thread; so too for a binding kept by an older quota-pilot, which recorded no
+// thread account: its thread lives on the account it was bound to.
+func TestAContinuationAfterASwitchIsSentAgainWithoutItsThread(t *testing.T) {
+	continuation := InterceptInput{Session: "s1", Format: "claude", Model: "claude-opus-5-5", RequestedModel: "claude-opus-5-5", Thread: "continue", Tools: 20}
+	for _, older := range []bool{false, true} {
+		s, c := newTestState()
+		setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+		setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+		served(s, c, "claude:s1", pick(s, "claude:s1", "claude-opus-5-5", both).AuthID, true)
+		if d := s.Intercept(continuation); d.Terminate {
+			t.Fatalf("older %v: a continuation where its thread lives was stopped: %+v", older, d)
+		}
+		if older {
+			saved := s.Export()
+			for k, b := range saved.Bindings {
+				b.ThreadAuth = ""
+				saved.Bindings[k] = b
+			}
+			s, c = newTestState()
+			setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+			setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+			s.Import(saved)
+			pick(s, "claude:s1", "claude-opus-5-5", both)
+		}
+		if ack := s.Apply(Command{CommandID: "c1", Session: "s1", BootID: "boot-1", CreatedAt: c.t, Action: "switch", AuthID: "claude-b"}); ack.Status != "applied" {
+			t.Fatalf("older %v: switch ack = %+v", older, ack)
+		}
+		if d := s.Intercept(continuation); !d.Terminate || d.ErrorCode != threadUnsupported {
+			t.Fatalf("older %v: a continuation after the switch = %+v", older, d)
+		}
+		stateless := continuation
+		stateless.Thread = ""
+		if d := s.Intercept(stateless); d.Terminate {
+			t.Fatalf("older %v: the turn sent again without its thread was stopped: %+v", older, d)
+		}
+	}
+}

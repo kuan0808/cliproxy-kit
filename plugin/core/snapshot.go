@@ -104,7 +104,12 @@ func (s *State) applyLocked(cmd Command, root string, sess *session, now time.Ti
 		} else if served := s.creds[sess.ServedAuth]; served != nil && served.Provider == c.Provider {
 			from = served.ID
 		}
-		s.bindings[key] = &Binding{AuthID: c.ID, Reason: switchedReason, LastUsed: now, At: now, Kind: MoveUser, Cause: cause}
+		thread := from
+		if b := s.bindings[key]; b != nil {
+			thread = b.threadAuth()
+		}
+		s.bindings[key] = &Binding{AuthID: c.ID, Reason: switchedReason, LastUsed: now, At: now, Kind: MoveUser, Cause: cause,
+			ThreadAuth: thread}
 		delete(s.failures, key)
 		// A switch ends any retry episode and mark, and a record sent before it says nothing of them.
 		s.endEpisodesOfLocked(root)

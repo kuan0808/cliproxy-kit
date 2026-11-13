@@ -275,6 +275,7 @@ func (s *State) contextLengthLocked(model string) int {
 // InterceptInput is the part of a request about to run upstream that the core needs.
 type InterceptInput struct {
 	Session        string // Claude Code's own session id
+	Canonical      string // the proxy's id of the request's thread of the session, "" when not known
 	TraceID        string // id of the inbound HTTP request, shared with its usage records
 	Format         string // the client's protocol: "claude" for Claude Code, "openai-response" for Codex
 	Model          string // the model about to run, after any route
@@ -353,6 +354,18 @@ func (s *State) Intercept(in InterceptInput) InterceptDecision {
 			return InterceptDecision{Terminate: true, Message: fmt.Sprintf(
 				"quota-pilot: this session is routed to %s (%s), but %s. Use back to %s in the band to leave the route.",
 				r.Provider, r.Model, note, from)}
+		}
+	}
+	// A thread continuation the proxy would hold on the thread's account, where the session should
+	// no longer run: Claude Code sends it again without the thread, and the pick decides.
+	if in.Format == "claude" && in.Thread == "continue" {
+		canonical := in.Canonical
+		if canonical == "" {
+			canonical = root
+		}
+		if !s.threadStaysLocked(canonical, root, in.Model, now) {
+			return InterceptDecision{Terminate: true, ErrorCode: threadUnsupported,
+				Message: "quota-pilot: this session runs on another account now; its message thread stays on the one it left"}
 		}
 	}
 	return InterceptDecision{}

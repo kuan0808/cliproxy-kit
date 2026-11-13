@@ -120,6 +120,9 @@ type Binding struct {
 	// Kind and Cause say why the thread came to this account, as its switch record does.
 	Kind  string `json:"kind,omitempty"`
 	Cause *Cause `json:"cause,omitempty"`
+	// ThreadAuth is the account the session's Claude message thread lives on: the one that last
+	// answered a request carrying it. A switch or a move leaves it behind (threadStaysLocked).
+	ThreadAuth string `json:"thread_auth,omitempty"`
 }
 
 // Route sends a session's requests to another model: the band's choice, or the proxy's own by the
@@ -1031,6 +1034,14 @@ func (s *State) failedLocked(u Usage, provider, root, model string, compact bool
 func (s *State) commitLocked(provider, canonical, root, authID, model string, threaded, side bool, at, now time.Time) {
 	key := provider + "|" + canonical
 	b := s.bindings[key]
+	if threaded {
+		// Whatever becomes of the binding, the thread's latest message is on authID now.
+		defer func() {
+			if b := s.bindings[key]; b != nil {
+				b.ThreadAuth = authID
+			}
+		}()
+	}
 	m := modelKey(model)
 	why, displaced := s.displaced[key][m]
 	moved := threaded || (displaced && !side)
@@ -1070,7 +1081,8 @@ func (s *State) commitLocked(provider, canonical, root, authID, model string, th
 		// It failed and now rests: the move says both.
 		kind, cause = MoveRest, c.health.cause()
 	}
-	s.bindings[key] = &Binding{AuthID: authID, Reason: reason, LastUsed: now, At: at, Kind: kind, Cause: cause}
+	s.bindings[key] = &Binding{AuthID: authID, Reason: reason, LastUsed: now, At: at, Kind: kind, Cause: cause,
+		ThreadAuth: b.threadAuth()}
 	delete(s.failures, key)
 	for ek := range s.episodes {
 		if ek.binding == key {
@@ -1128,6 +1140,39 @@ func (s *State) movedLocked(provider, canonical, root, from, to, model, reason, 
 
 // canTakeLocked tells whether an account can take a session's model now, by evidence only: held,
 // enabled, not used up for it, and listed by a pick for that model since it last failed.
+// threadAuth is the account the binding's thread lives on: the one it last answered on, else, for
+// a binding from before that was kept, its own account.
+func (b *Binding) threadAuth() string {
+	if b == nil {
+		return ""
+	}
+	if b.ThreadAuth != "" {
+		return b.ThreadAuth
+	}
+	return b.AuthID
+}
+
+// threadStaysLocked tells whether a Claude request that continues its session's message thread may
+// run where the thread lives. From CLIProxyAPI 8.0.68 the proxy offers such a request only the
+// account that answered the message it continues, so it may only while that is the bound account
+// and quota-pilot would still give the session that account: no failure there since its last
+// success, no retry waiting, not marked hung, and an account that can take the model.
+func (s *State) threadStaysLocked(canonical, root, model string, now time.Time) bool {
+	key, b := s.boundLocked([]string{"claude"}, canonical, root)
+	if b == nil {
+		return true
+	}
+	if b.threadAuth() != b.AuthID {
+		return false
+	}
+	ek := episodeKey{key, modelKey(model)}
+	if s.failures[key][ek.model] != nil || s.episodes[ek] != nil || s.hung[ek] {
+		return false
+	}
+	c := s.creds[b.AuthID]
+	return c != nil && !c.Disabled && !c.health.resting(now) && !s.classifyLocked(c, model, now).Blocked
+}
+
 func (s *State) canTakeLocked(id, model string, now time.Time) bool {
 	c := s.creds[id]
 	if c == nil || c.Disabled || c.health.resting(now) || s.classifyLocked(c, model, now).Blocked {

@@ -574,8 +574,10 @@ func intercept(raw []byte) ([]byte, error) {
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
 		return nil, errUnmarshal
 	}
+	canonical, _ := req.Metadata["canonical_session_id"].(string)
 	d := state.Intercept(core.InterceptInput{
 		Session:        sessionOf(req.Headers, req.Metadata),
+		Canonical:      canonical,
 		TraceID:        req.TraceID,
 		Format:         req.SourceFormat,
 		Model:          req.Model,

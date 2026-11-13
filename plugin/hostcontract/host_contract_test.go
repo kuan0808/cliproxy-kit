@@ -50,7 +50,10 @@ func (u *upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	account := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")[0]
 	u.mu.Lock()
 	u.attempts = append(u.attempts, account)
-	reply := answer
+	// Each answer's message id names the account and the attempt, as a thread continuation names
+	// the message it continues.
+	id := fmt.Sprintf("msg_%s_%d", account, len(u.attempts))
+	reply := func(w http.ResponseWriter) { answer(w, id) }
 	if left := u.script[account]; len(left) > 0 {
 		reply, u.script[account] = left[0], left[1:]
 	}
@@ -74,11 +77,11 @@ func (u *upstream) take() []string {
 	return out
 }
 
-func answer(w http.ResponseWriter) {
+func answer(w http.ResponseWriter, id string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
 	for _, e := range []string{
-		`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"` + model + `","content":[],"usage":{"input_tokens":12,"output_tokens":1}}}`,
+		`{"type":"message_start","message":{"id":"` + id + `","type":"message","role":"assistant","model":"` + model + `","content":[],"usage":{"input_tokens":12,"output_tokens":1}}}`,
 		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
 		`{"type":"content_block_stop","index":0}`,

@@ -134,6 +134,16 @@ sent before it never starts a retry, as its request has moved on. A switch, a ro
 advance the session's generation, which ends any episode, and a record sent before says nothing of
 it.
 
+**A message thread.** From CLIProxyAPI 8.0.68 a request that continues a Claude message thread goes
+only to the account that answered the message it continues: the pick is offered that account
+alone, so a move would be undone at the session's next continuation, and the request would fail
+while that account cannot serve. So quota-pilot answers a continuation `400
+thread_unsupported_request`, which makes Claude Code send the turn again without the thread, once
+the thread no longer lives on the bound account (after a switch or a move) or the bound account
+should not take it (a failure there since its last success, a retry waiting, a `hung` mark, an
+account resting, used up, disabled or removed). The turn sent again goes where quota-pilot chooses,
+and that session then runs without a server-side thread on that model, as on a route.
+
 **Switch now.** While a turn waits (the band's hang watch, waiting and running rows), the band
 offers `switch to k•••`, k••• being the account a failover would take now (the snapshot's
 `takeover`), only while the step's request is surely still on the bound account: no pick of the
@@ -753,6 +763,13 @@ that changes any of this fails that test:
   the client gets HTTP 200 then, a retry on A inside the request is still one response, and a
   failure handed back reaches the client as an `event: error` in the stream, a 529 as an
   `overloaded_error` (`TestAfterKeepAlivesAFailureReachesTheClientAsAnEventUnder200`).
+- From 8.0.68 a request continuing a Claude message thread is offered only the account that
+  answered the message it continues. Through the built plugin (`plugin/hostcontract`): on the bound
+  account it runs there; after the user's switch, and after the bound account's failure, it is
+  answered `400 thread_unsupported_request` before any attempt, and the turn sent again without the
+  thread goes to another account (`TestAContinuationOfAThreadOnTheBoundAccountRunsThere`,
+  `TestAfterTheUsersSwitchAContinuationIsSentAgainWithoutItsThread`,
+  `TestAfterTheBoundAccountFailsAContinuationIsSentAgainWithoutItsThread`).
 - A client's cancel during an attempt records a 499 with its wait, with no `ttft` when nothing came
   and one once the stream had started (`TestAClientCancelRecords499WithItsWait`).
 
@@ -769,6 +786,13 @@ for a user:
   is still one long request.
 - Plugin schema 10, from 8.0.49: a quota-pilot built against the newest proxy does not load on an
   older one, so updating takes the proxy first.
+- From 8.0.68 a continuation of a Claude message thread goes only to the account that answered it,
+  which would undo quota-pilot's moves of a session that continues a thread, or fail it when that
+  account cannot serve. quota-pilot now answers such a continuation `400 thread_unsupported_request`
+  once the session should run elsewhere ([A message thread](#when-an-account-fails)), so a move
+  holds and Claude Code sends the turn again without the thread. Whether Claude Code 2.1.323 sends
+  message threads through a proxy is not established: four runs against the contract harness (print
+  and interactive, feature flags on and off, an API key and an auth token) sent none.
 
 Claude Code, checked against 2.1.296 and again against 2.1.302: through a proxy it sets no limit on
 the wait for a first byte (its first-byte watchdog runs only against Anthropic's own API); its
