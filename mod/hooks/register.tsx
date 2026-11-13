@@ -102,6 +102,27 @@ async function bandInput($: $T, working: boolean, fresh = false): Promise<BandIn
 
 // ---- data refresh ----
 
+/** How long a read of the proxy, and a step's wait for the band's read after it, may take. */
+const READ_DEADLINE_MS = 3_000
+
+/**
+ * What `call` answers, or `late()` once the deadline passed first: `$.http.fetch` takes no time
+ * limit, so a timer is raced against it. A call that lost goes on unheard.
+ */
+function inTime<T>($: $T, call: Promise<T>, late: () => T): Promise<T> {
+  let timer: Timer | undefined
+  const gaveUp = new Promise<void>(resolve => {
+    timer = $.clock.after(READ_DEADLINE_MS, resolve)
+  })
+  return Promise.race([call, gaveUp.then(late)]).finally(() => timer?.cancel())
+}
+
+/** A read of the proxy that rejects as a network error once it outlasts the deadline. */
+const fetchInTime = ($: $T, url: string, headers: Record<string, string>) =>
+  inTime($, $.http.fetch(url, { headers }), () => {
+    throw new Error(W.readGaveUp(READ_DEADLINE_MS))
+  })
+
 // One refresh runs at a time, so a slow one never writes over the result of a newer one, and at
 // most one waits behind it, standing for every request made meanwhile (a full one if any was):
 // a slow network read never builds a queue.
@@ -162,11 +183,11 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
     const auth: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
     if (full) {
       try {
-        const r = await $.http.fetch(`${url}/v1/models`, { headers: auth })
+        const r = await fetchInTime($, `${url}/v1/models`, auth)
         const list = r.ok ? parseModels(r.text) : null
         if (list) await update($, modelsA, () => list)
       } catch {
-        // The switch menu then offers accounts only.
+        // The switch menu then offers accounts only, and the read of /band goes on.
       }
     }
     // What only this device knows of the session goes in headers, kept out of the proxy's request
@@ -187,7 +208,7 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
     if (outbox.length) void refresh($, false)
     let error: BandError | null = null
     try {
-      const r = await $.http.fetch(`${url}/v0/resource/plugins/quota-pilot/band`, { headers })
+      const r = await fetchInTime($, `${url}/v0/resource/plugins/quota-pilot/band`, headers)
       ;({ snap, error } = readBand(r.status, r.text))
     } catch (err) {
       error = { kind: 'network', message: err instanceof Error ? err.message : String(err) }
@@ -949,6 +970,9 @@ export const register: Register = (on, options) => {
     const inner = next(e)
     let r: Awaited<ReturnType<typeof inner.next>>['value'] | undefined
     let done = false
+    // Content moves the step's time at most once a second (stepAfter): until a second has passed
+    // since the chunk last counted, a chunk costs no host call.
+    let quiet: Timer | null = null
     try {
       for (;;) {
         const item = await inner.next()
@@ -958,8 +982,11 @@ export const register: Register = (on, options) => {
           break
         }
         const chunk = item.value
-        if (watched && chunk.kind !== 'engine' && chunk.kind !== 'stop') {
+        if (watched && !quiet && chunk.kind !== 'engine' && chunk.kind !== 'stop') {
           const at = await $.clock.now()
+          quiet = $.clock.after(1000, () => {
+            quiet = null
+          })
           let answered = false
           await update($, liveA, l => {
             const step = mine(l) ? stepAfter(l.step, chunk, at) : l.step
@@ -971,6 +998,7 @@ export const register: Register = (on, options) => {
         yield chunk
       }
     } finally {
+      quiet?.cancel()
       if (!done) await inner.return?.(undefined as never)
       if (watched) {
         await update($, liveA, l => (mine(l) ? { ...l, step: null } : l))
@@ -981,7 +1009,8 @@ export const register: Register = (on, options) => {
     // A step of another conversation (one a /clear or a resume left) is not this one's.
     if (gen === generation && !ownStep(e) && r?.usage) {
       const u = r.usage
-      const snap = await refresh($, false)
+      // A read that gives up leaves the route not known, as a failed one does.
+      const snap = await inTime($, refresh($, false), () => null)
       const sess = await read($, sessA)
       // Only a reply that read or wrote the cache says it is warm; one that did neither, as one under
       // the provider's smallest cached prompt, leaves it unknown.

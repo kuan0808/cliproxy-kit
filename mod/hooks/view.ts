@@ -391,14 +391,14 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
   const handoff: Act = { key: 'alert-handoff', label: 'hand off', main: true, run: () => act.ui({ confirm: 'handoff' }) }
   // Without quota data from the proxy, the reason it gave goes first.
   if (bandError) return { key: 'alert', tone: 'warn', title: bandErrorText(bandError), detail: '', acts: [] }
-  const alert = pickAlert(snap, acct, i.sess.proxied, now, ui.dismissedSwitch, ui.pressed, i.sess.model)
+  const alert = pickAlert(snap, acct, now, ui.dismissedSwitch, ui.pressed, i.sess.model)
   const live = liveRows(i, acct)
   // The proxy's alerts go before a cold turn: a retry of the session's account, waiting or running,
   // first; then the plugin's warnings; then the band's own hang watch. That the session moved, or
   // stayed, comes after the cold turn.
   // Each live row offers `switch to k•••` while a press could stop the waiting turn (pressAct).
   const liveAct = live && pressAct(i, acct, menu, act)
-  if (live?.kind === 'retry' && !alert?.text.startsWith('quota data is')) return liveRow(live, liveAct)
+  if (live?.kind === 'retry') return liveRow(live, liveAct)
   if (alert && alert.action !== 'dismiss') {
     const fallback = alert.fallback
     const acts: Act[] = alert.action === 'route' && fallback && menu.canSend

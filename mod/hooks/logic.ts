@@ -334,13 +334,9 @@ const movesNextTurn = (s: SnapSession | undefined): boolean =>
  * The single alert the band shows, most important first. Confirmations and notices are drawn
  * by the caller before this.
  */
-export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxied: boolean, now: number, dismissed: string | readonly string[] = [], pressed: Pressed | null = null, asked = acct?.session.requested_model || acct?.session.model || ''): Alert | null {
+export function pickAlert(snap: Snap | null, acct: SessionAccount | null, now: number, dismissed: string | readonly string[] = [], pressed: Pressed | null = null, asked = acct?.session.requested_model || acct?.session.model || ''): Alert | null {
   // Each note is dismissed for itself, by its key (0.1.19 kept the last key alone, as a string).
   const hidden = [dismissed].flat()
-  if (proxied && snap) {
-    const age = now - Date.parse(snap.generated_at)
-    if (age > 3 * MIN) return { level: 'warn', ...W.stale(fmtDuration(age)) }
-  }
   if (!acct || !snap) return null
   const { session, view } = acct
   const route = routeFor(session, asked)

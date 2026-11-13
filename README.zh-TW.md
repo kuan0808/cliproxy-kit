@@ -365,7 +365,6 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | 桌面版的額度列還沒有額度 | 桌面版的 session 在第一則回覆時才回報額度。 |
 | 插件底下沒有 quota-pilot | 重新整理面板，並確認 `plugins.enabled: true`。 |
 | 額度列說這把 key 送出請求後才有額度資料 | 送出一個 prompt：proxy 最近一週還沒接受過這把 key 的請求。 |
-| 額度列說額度資料太舊 | proxy 或裡面的插件停了：重新啟動 CLIProxyAPI。 |
 | Claude Code 把訊息退回輸入框，寫著「held by quota-band」 | 攔下訊息已打開，而且下一輪會冷啟動：按 **Enter** 送出，或用 `/hold-cold off` 不再攔。會自動輸入內容到 Claude Code 的程式，啟動時設定 `QUOTA_BAND_UNATTENDED=1`。 |
 | Mac 很忙時，頁面或額度列變慢 | Homebrew 把 proxy 當成低優先的服務執行。在 `~/Library/LaunchAgents/sh.brew.cliproxyapi.plist` 加上 `ProcessType` `Interactive`（`plutil -replace ProcessType -string Interactive <檔案>`），再用 `launchctl bootout gui/$(id -u)/sh.brew.cliproxyapi` 和 `launchctl bootstrap gui/$(id -u) <檔案>` 重新載入。`brew services restart` 會重寫這個檔案。 |
 | 用量頁看不到 Codex 的 session | Codex 還沒經過 proxy（步驟 4）。 |

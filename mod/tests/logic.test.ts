@@ -342,17 +342,17 @@ describe('accounts', () => {
     const route = { provider: 'claude', model: 'claude-opus-5-5', auto: true, from: 'claude-fable-5-2', at: iso(-60_000) }
     const fell = { ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, model: 'claude-opus-5-5', requested_model: 'claude-fable-5-2', route } } }
     const key = 'fallback:claude-fable-5-2:claude-opus-5-5'
-    expect(pickAlert(fell, sessionAccount(fell, 's1'), true, NOW)).toEqual({
+    expect(pickAlert(fell, sessionAccount(fell, 's1'), NOW)).toEqual({
       level: 'info',
       text: 'fable-5-2 is used up on every account · running opus-5-5 until it is back and this session has rested an hour',
       short: 'fable-5-2 used up · on opus-5-5',
       action: 'dismiss',
       key,
     })
-    expect(pickAlert(fell, sessionAccount(fell, 's1'), true, NOW, key)).toBe(null)
+    expect(pickAlert(fell, sessionAccount(fell, 's1'), NOW, key)).toBe(null)
     // A route the reader set, or one to another provider, is theirs: nothing to tell.
     const chosen = { ...fell, sessions: { s1: { ...fell.sessions.s1!, route: { ...route, auto: false, from: undefined } } } }
-    expect(pickAlert(chosen, sessionAccount(chosen, 's1'), true, NOW)).toBe(null)
+    expect(pickAlert(chosen, sessionAccount(chosen, 's1'), NOW)).toBe(null)
   })
 
   test('a note is dismissed for itself: ok on one never brings another back, and the one key 0.1.19 kept still reads', () => {
@@ -369,7 +369,7 @@ describe('accounts', () => {
       } },
     }
     const fallback = 'fallback:claude-fable-5-2:claude-opus-5-5'
-    const note = (dismissed?: string | string[]) => pickAlert(snap, sessionAccount(snap, 's1'), true, NOW, dismissed)?.short ?? ''
+    const note = (dismissed?: string | string[]) => pickAlert(snap, sessionAccount(snap, 's1'), NOW, dismissed)?.short ?? ''
     const [fell, kept, left] = ['fable-5-2 used up · on opus-5-5', 'Stayed on k••• · retry worked', 'Switched d••• → k••• · d••• Weekly Fable quota used up']
     expect(note()).toBe(fell)
     expect(note([fallback])).toBe(kept)
@@ -389,25 +389,27 @@ describe('accounts', () => {
       ...SNAP,
       sessions: { s1: { ...SNAP.sessions.s1!, model: 'claude-fable-5-2', fallback: { provider: 'codex', model: 'gpt-6-sol' } } },
     }
-    expect(pickAlert(snap, sessionAccount(snap, 's1'), true, NOW)).toEqual({
+    expect(pickAlert(snap, sessionAccount(snap, 's1'), NOW)).toEqual({
       level: 'warn', text: 'fable-5-2 is used up on every account · fallback: gpt-6-sol',
       action: 'route', fallback: { provider: 'codex', model: 'gpt-6-sol' },
     })
     const none: Snap = { ...snap, sessions: { s1: { ...snap.sessions.s1!, fallback: undefined } } }
-    expect(pickAlert(none, sessionAccount(none, 's1'), true, NOW)).toBeNull()
+    expect(pickAlert(none, sessionAccount(none, 's1'), NOW)).toBeNull()
   })
 
-  test('alerts: stale data, imminent switch, exhausted provider', async () => {
-    expect(pickAlert(SNAP, sessionAccount(SNAP, 's1'), true, NOW)).toBe(null)
-    expect(pickAlert({ ...SNAP, generated_at: iso(-10 * 60_000) }, null, true, NOW)?.text).toMatch(/old/)
+  test('alerts: imminent switch, exhausted provider', async () => {
+    expect(pickAlert(SNAP, sessionAccount(SNAP, 's1'), NOW)).toBe(null)
+    // An old snapshot is not a row of its own: a read that fails or gives up says why instead.
+    const old = { ...SNAP, generated_at: iso(-10 * 60_000) }
+    expect(pickAlert(old, sessionAccount(old, 's1'), NOW)).toBe(null)
     // A used-up account often answers a while longer; a disabled one is not offered at all.
     const imminent = (switch_reason: string) => ({ ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, switch_imminent: true, switch_reason, next_auth_id: 'claude-k' } } })
     const usedUp = imminent('weekly quota used up')
-    expect(pickAlert(usedUp, sessionAccount(usedUp, 's1'), true, NOW)?.text).toBe('weekly quota used up on d••• · moves to k••• (7% used) once d••• stops answering')
+    expect(pickAlert(usedUp, sessionAccount(usedUp, 's1'), NOW)?.text).toBe('weekly quota used up on d••• · moves to k••• (7% used) once d••• stops answering')
     const disabled = imminent('disabled')
-    expect(pickAlert(disabled, sessionAccount(disabled, 's1'), true, NOW)?.text).toBe('disabled on d••• · moves to k••• (7% used) on the next turn')
+    expect(pickAlert(disabled, sessionAccount(disabled, 's1'), NOW)?.text).toBe('disabled on d••• · moves to k••• (7% used) on the next turn')
     const exhausted = { ...SNAP, providers: { claude: { ...SNAP.providers.claude!, health: 'exhausted' } }, sessions: { s1: { ...SNAP.sessions.s1!, fallback: { provider: 'codex', model: 'gpt-6-sol' } } } }
-    expect(pickAlert(exhausted, sessionAccount(exhausted, 's1'), true, NOW)?.action).toBe('route')
+    expect(pickAlert(exhausted, sessionAccount(exhausted, 's1'), NOW)?.action).toBe('route')
     const at = iso(-5 * 60_000)
     const used = { ...SNAP.providers.claude!, credentials: SNAP.providers.claude!.credentials.map(c => c.id === 'claude-d' ? { ...c, tier: 3, reason: 'weekly quota used up' } : c) }
     const switched = {
@@ -417,11 +419,11 @@ describe('accounts', () => {
     }
     // A record from an older plugin, without a kind: its reason names where the session went, so
     // the band says nothing of why it left, and never reads it from d•••'s state now.
-    const alert = pickAlert(switched, sessionAccount(switched, 's1'), true, NOW)
+    const alert = pickAlert(switched, sessionAccount(switched, 's1'), NOW)
     expect(alert).toEqual({ level: 'info', text: 'Switched d••• → k••• · reason not recorded', short: 'Switched d••• → k••• · reason not recorded', action: 'dismiss', key: at })
-    expect(pickAlert(switched, sessionAccount(switched, 's1'), true, NOW, at)).toBe(null)
+    expect(pickAlert(switched, sessionAccount(switched, 's1'), NOW, at)).toBe(null)
     const later = { ...switched, generated_at: iso(20 * 60_000) }
-    expect(pickAlert(later, sessionAccount(later, 's1'), true, NOW + 20 * 60_000)).toBe(null)
+    expect(pickAlert(later, sessionAccount(later, 's1'), NOW + 20 * 60_000)).toBe(null)
   })
 
   test("the switch list leaves out accounts that cannot serve the session's model, and says why", async () => {

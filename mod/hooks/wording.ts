@@ -164,7 +164,6 @@ export const W = {
   coldTurn: (why: string, rewrite: string, brief: string) => ({ title: 'Next turn starts cold', detail: `${why}; it ${rewrite}`, brief: `${why}; ${brief}` }),
   context: (used: number) => ({ title: `Context ${used}% used`, detail: 'hand off to a new session that starts from a summary?' }),
   // The proxy's alerts.
-  stale: (age: string): Words => ({ text: `quota data is ${age} old; is the proxy running?` }),
   exhausted: (model: string, fallback: string): Words => ({ text: `${model} is used up on every account · fallback: ${fallback}` }),
   /** An account read as used up: the session moves once it refuses, or at the next turn. */
   limited: (reason: string, label: string, next: string | null, used: string, when: string): Words => ({
@@ -210,6 +209,8 @@ export const W = {
   refused: (what: string, reason = 'rejected') => `${what}: ${reason}`,
   restarted: (what: string) => `${what}: the proxy restarted before confirming it`,
   unanswered: (what: string) => `${what}: no answer from the proxy; is it running?`,
+  /** A read of the proxy that gave up: why there is no quota data. */
+  readGaveUp: (ms: number) => `no answer within ${Math.round(ms / 1000)}s`,
   pluginDown: 'The proxy plugin is not running',
   handoffBusy: 'The band was busy: try the handoff again in a moment',
   writingNote: (own: boolean) => `Writing the handoff note${own ? ' with your prompt' : ''}…`,

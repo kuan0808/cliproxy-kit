@@ -86,6 +86,8 @@ let snapshot: Snap
 let stampReads = false
 /** When set, how /band fails instead: refused, or not reached. */
 let failure: OpEventResult<'http.fetch'> | undefined
+/** The reads the proxy takes and never answers, by URL: a connection accepted and then silent. */
+let hang: RegExp | undefined
 /** How many times the band read /band. */
 let bandReads = 0
 /** The proxy's model list. */
@@ -141,6 +143,7 @@ function stubSession(
   transcript = TITLED
   snapshot = snap
   failure = undefined
+  hang = undefined
   stampReads = false
   models = []
   sentTo = ''
@@ -209,12 +212,13 @@ function stubSession(
   }))
   const ok = (body: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } })
   on('http.fetch', (_$, e) => {
-    if (!e.url.endsWith('/band')) return ok({ data: models })
+    const silent = hang?.test(e.url) ? new Promise<never>(() => undefined) : undefined
+    if (!e.url.endsWith('/band')) return silent ?? ok({ data: models })
     bandReads++
     sentTo = e.url
     sent = { ...(e.init?.headers as Record<string, string> | undefined) }
     if (sent['X-Band-Command']) commands.push(JSON.parse(decodeURIComponent(sent['X-Band-Command'])))
-    return failure ?? ok(stampReads ? { ...snapshot, generated_at: new Date(clock.now()).toISOString() } : snapshot)
+    return silent ?? failure ?? ok(stampReads ? { ...snapshot, generated_at: new Date(clock.now()).toISOString() } : snapshot)
   })
   on('session.root', () => ({ value: root }))
   on('session.repo', () => ({ value: repo as never }))
@@ -1148,7 +1152,7 @@ for (const [transition, before, after] of [
   })
 }
 
-for (const confirmation of ['network failure', 'missing session'] as const) {
+for (const confirmation of ['network failure', 'missing session', 'a read that gave up'] as const) {
   test(`an unconfirmed cached reply records an unknown route after ${confirmation}`, { options: { holdColdDefault: true, keepWarmDefault: true } }, async ($, on) => {
     const clock = stubSession(on, routeSnapshotForReply('', 7), { ...LOCAL_ENV, CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
     selectedModel = 'claude-fable-5-2'
@@ -1159,13 +1163,20 @@ for (const confirmation of ['network failure', 'missing session'] as const) {
     duringStep = () => {
       snapshot = routeSnapshotForReply('claude-opus-5-5', 8)
       if (confirmation === 'network failure') failure = { deny: 'connect ECONNREFUSED 127.0.0.1:8317' }
-      else snapshot = { ...snapshot, sessions: {} }
+      else if (confirmation === 'missing session') snapshot = { ...snapshot, sessions: {} }
+      else hang = /\/band$/
     }
     await $.turn.start({ text: 'go on', turnId: 'r1' } as never)
-    for await (const chunk of $.turn.step({ turnId: 'r1', index: 0, model: 'claude-fable-5-2' } as never)) void chunk
+    const stepped = (async () => {
+      for await (const chunk of $.turn.step({ turnId: 'r1', index: 0, model: 'claude-fable-5-2' } as never)) void chunk
+    })()
+    // The step's read gives up at the deadline.
+    if (confirmation === 'a read that gave up') await clock.advance(3_000)
+    await stepped
     await $.turn.complete({ turnId: 'r1', answer: 'Done.', durationMs: 1, isAborted: false, reason: 'answer' } as never)
     await clock.settle()
     failure = undefined
+    hang = undefined
     snapshot = routeSnapshotForReply('claude-opus-5-5', 9)
     await clock.advance(10_000)
     expect(await rowText($)).not.toContain('Next turn starts cold')
@@ -2689,4 +2700,115 @@ describe('a notice and the warnings', () => {
       expect(top({ noticeAt: NOW - 60_000, notice: 'Switch to k•••…', pending: [sending] }, world), name).toMatchObject({ key: 'notice', title: 'Switch to k•••…', close: undefined })
     }
   })
+})
+
+// ---- a read of the proxy has a deadline ----
+
+/** Runs a main step that answers at once, unawaited: `returned` says when the band gave its result back. */
+const stepOn = ($: Engine, turnId: string) => {
+  const run = { returned: false, done: Promise.resolve() }
+  run.done = (async () => {
+    for await (const chunk of $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5' } as never)) void chunk
+    run.returned = true
+  })()
+  return run
+}
+
+test('a /band the proxy never answers gives up after 3 s: the step returns, the row says why, and the next read clears it', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  stepReplies(on)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  hang = /\/band$/
+  const reads = bandReads
+  await $.turn.start({ text: 'go on', turnId: 'h1' } as never)
+  const step = stepOn($, 'h1')
+  await clock.advance(2_999)
+  expect(step.returned).toBe(false) // the step waits for the band's read, up to the deadline
+  await clock.advance(1)
+  expect(step.returned).toBe(true)
+  await step.done
+  expect(await rowText($)).toBe('! cannot reach the proxy for quota data: no answer within 3s ')
+  // The single flight is free: the next periodic read is made, and a good answer clears the error.
+  hang = undefined
+  await clock.advance(10_000)
+  expect(bandReads).toBeGreaterThan(reads + 1)
+  expect(await rowText($)).toBe('')
+})
+
+test('a model list the proxy never answers gives up after 3 s: the read of /band goes on, and so do later refreshes', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  hang = /\/v1\/models$/
+  const reads = bandReads
+  const started = $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await clock.settle()
+  expect(bandReads).toBe(reads)
+  await clock.advance(3_000)
+  await started
+  expect(bandReads).toBe(reads + 1)
+  // The band shows quota, and the switch menu its accounts.
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+  expect(await ui.find({ text: /next up: k••• 7% used/ })).toBeDefined()
+  await ui.press({ key: 'switch' })
+  expect(await ui.find({ key: 'to-claude-k' })).toBeDefined()
+  await ui.unmount()
+  // A full refresh again, which gives up on the list the same way.
+  const quota = $.command.run({ command: 'quota', args: '', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await clock.advance(3_000)
+  await quota
+  expect(bandReads).toBe(reads + 2)
+  await clock.advance(10_000)
+  expect(bandReads).toBe(reads + 3)
+})
+
+for (const where of [/\/v1\/models$/, /\/band$/]) {
+  test(`a step that ends while a full refresh hangs on ${where.source.includes('models') ? 'the model list' : '/band'} returns within the deadline`, async ($, on) => {
+    const clock = stubSession(on, SNAP)
+    stepReplies(on)
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    hang = where
+    const quota = $.command.run({ command: 'quota', args: '', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+    await clock.settle()
+    await $.turn.start({ text: 'go on', turnId: 'h1' } as never)
+    const step = stepOn($, 'h1')
+    await clock.advance(3_000)
+    expect(step.returned).toBe(true)
+    await step.done
+    hang = undefined
+    await clock.advance(3_000)
+    await quota
+  })
+}
+
+test('chunks within a second of each other cost one write of the step, and no host call after it', async ($, on) => {
+  // The step's state read and written, counted where the host answers them (the mock clock owns `clock.now`).
+  const calls = { get: 0, set: 0 }
+  const marks: (typeof calls)[] = []
+  let clock: MockClock | undefined
+  on('turn.step', async function* (_$, e) {
+    yield TEXT as never
+    marks.push({ ...calls })
+    for (let n = 0; n < 20; n++) yield { kind: 'text', index: 0, text: ` ${n}` } as never
+    marks.push({ ...calls })
+    await clock!.advance(1_000)
+    yield { kind: 'text', index: 0, text: ' a second later' } as never
+    marks.push({ ...calls })
+    return { turnId: e.turnId, index: e.index, answer: 'Done.', toolUses: [], stopReason: 'end_turn', usage: WARM_STEP } as never
+  })
+  clock = stubSession(on, SNAP)
+  on('state.get', (_$, e, next) => {
+    if ((e as { key?: string }).key === 'live') calls.get++
+    return next(e)
+  })
+  on('state.set', (_$, e, next) => {
+    if ((e as { key?: string }).key === 'live') calls.set++
+    return next(e)
+  })
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await $.turn.start({ text: 'go on', turnId: 'c1' } as never)
+  for await (const chunk of $.turn.step({ turnId: 'c1', index: 0, model: 'claude-opus-5-5' } as never)) void chunk
+  const [first, within, later] = marks as [typeof calls, typeof calls, typeof calls]
+  expect(first.get).toBeGreaterThan(0)
+  expect(first.set).toBeGreaterThan(0)
+  expect(within).toEqual(first)
+  expect(later).toEqual({ get: within.get + 1, set: within.set + 1 })
 })

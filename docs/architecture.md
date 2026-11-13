@@ -174,6 +174,7 @@ back in 5m`.
 | Takeover margin | 1 s before the step's start | The proxy's clock and the band's agree to within a read's latency |
 | Acknowledgement wait | 5 s for a press's switch; then 5 s after the stop before saying it is not confirmed | The proxy answers within one read; a turn's end comes at once unless a hook holds it |
 | Switch now's notices | 10 s for a refusal or no answer | Long enough to read; then the waiting row and its control come back |
+| Read deadline | 3 s for each read of the proxy, and for a step's wait on the band's read | A local read answers in milliseconds; a step never waits on the proxy for longer |
 | A band notice on top | 5 s for a command that worked; 10 s for one that waits for `ok` | Long enough to read; a warning that came meanwhile is never hidden for longer |
 
 ### Running another model when one is used up
@@ -473,12 +474,17 @@ that does not serve the model).
 Resources are read-only routes, so a switch, route or back goes with the next read in
 `X-Band-Command`, and the snapshot that read returns acknowledges it; one not acknowledged within a
 minute, or across a proxy restart, says so. When `/band` gives nothing the band says why (a key the
-proxy has not accepted yet, no plugin there, no answer) and keeps the last snapshot, marked old.
+proxy has not accepted yet, no plugin there, no answer) and keeps the last snapshot beside the reason.
+Each read, `/band` and the model list a full refresh reads first, gives up after the read deadline
+(the host's fetch takes no time limit, so a timer is raced against it): a `/band` that gave up is
+`no answer within 3s`, a model list that gave up leaves the switch menu with accounts only, and the
+next read goes on as usual.
 The switch list leaves out accounts that cannot serve the session's model and second credentials
 of an account.
 
 After a main reply, the band confirms its route with a fresh `/band` read before recording the
-cache. A failed read or a response without this session records an unknown route (`null`),
+cache, waiting for it no longer than the read deadline. A failed read, one that gave up, or a
+response without this session records an unknown route (`null`),
 separately from a confirmed unrouted reply (`''`). The next cold-turn decision and keep-warm use
 that record, so route creation, replacement and return during the reply do not invent a second
 cold write. A clear or resume while confirmation is pending leaves the new conversation untouched.
@@ -521,7 +527,7 @@ reads `↪ Switched d••• → k••• · by you after waiting 2m 55s; se
 turn starts (the band keeps what it saw in its state, so a reload says the same); with nothing
 stopped, without the tail. A refusal and no answer within the acknowledgement wait are told for a
 while, after which the waiting row and its control come back. Of the proxy's alerts, a retry waiting
-or running goes first (unless quota data is old), then the plugin's warnings, then the hang watch.
+or running goes first, then the plugin's warnings, then the hang watch.
 Every row's text and short form come from one table, `wording.ts`, checked against the same fixture.
 
 A session signed in to Claude directly reads no proxy. The desktop app's are: it points them at

@@ -456,7 +456,6 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | The band in the desktop app shows no quota yet | The app's session reports its limits with its first reply. |
 | No quota-pilot page under Plugins | Refresh the panel, and check `plugins.enabled: true`. |
 | The band says quota data comes once this key has sent a request | Send one prompt: the proxy has not accepted that key for a request in the last week. |
-| The band says quota data is old | The proxy, or the plugin in it, stopped: restart CLIProxyAPI. |
 | Claude Code gives a message back with "held by quota-band" | Holding is on and the next turn would start cold: **Enter** sends it, `/hold-cold off` stops holding. A program that types into Claude Code starts it with `QUOTA_BAND_UNATTENDED=1`. |
 | The page or the band is slow while the Mac is busy | Homebrew runs the proxy as a low-priority service. Add `ProcessType` `Interactive` to `~/Library/LaunchAgents/sh.brew.cliproxyapi.plist` (`plutil -replace ProcessType -string Interactive <file>`), then load it again with `launchctl bootout gui/$(id -u)/sh.brew.cliproxyapi` and `launchctl bootstrap gui/$(id -u) <file>`. `brew services restart` writes the file anew. |
 | Codex sessions are missing from the page | Codex does not use the proxy yet (step 4). |
