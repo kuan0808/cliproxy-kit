@@ -265,8 +265,8 @@ Cards while Claude waits, one line while it works:
 | **Weekly Fable** | On a proxied Claude account with no 5-hour limit: Fable's own weekly limit fills the freed place, whatever the session's model and whichever limit has less left. `no separate limit` when the account has none, so Fable draws on the week alone. |
 | **Context** | How full the conversation is. |
 | **Cache** | Time left before the prompt cache goes cold, with `kept warm 0/3` counting refreshes while keeping it warm is on; once cold, what the next turn rewrites and costs. |
-| **Accounts** | Every account's weekly use, and the one a switch or a new session gets next: never one that cannot serve this session's model, with the weekly limit that holds that model back, as the switch menu shows it. |
-| **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy `retrying` your account or an account `resting`, no answer yet, a cold next turn, a session moved, a context filling up). |
+| **Accounts** | Every account's weekly use, and the one a switch or a new session gets next: never one that cannot serve this session's model, with the weekly limit that holds that model back, as the switch menu shows it. When none is ready, a known reset counts down. |
+| **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy `retrying` your account or an account `resting`, no answer yet, a cold next turn, a session moved, a context filling up). A command's `done` goes after 5 s and never covers a warning. Switch now's refusal or no answer stays above the waiting row for 10 s. |
 
 <details>
 <summary>No 5-hour limit: before and after</summary>

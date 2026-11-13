@@ -158,9 +158,6 @@ export type Facts = {
   top: Row | null
 }
 
-/** How long a notice stays above the warnings from when it was set. */
-export const NOTICE_TOP_MS = 10_000
-
 /** How many dismissed notes the band remembers: one older than 15 minutes is not drawn again. */
 const DISMISSED_KEPT = 8
 
@@ -385,9 +382,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
       close: ui.busy || onItsWay ? undefined : { key: 'dismiss', label: 'ok', run: () => act.ui({ notice: '' }) },
     }
     : null
-  // What came of a press is on top while it has time left, runs or is on its way, and for its
-  // first moments; a notice older than that, which only `ok` ends, never covers a warning.
-  if (notice && (life || ui.busy || onItsWay || now - (ui.noticeAt || 0) < NOTICE_TOP_MS)) return notice
+  if (notice && (ui.busy || onItsWay)) return notice
   const handoff: Act = { key: 'alert-handoff', label: 'hand off', main: true, run: () => act.ui({ confirm: 'handoff' }) }
   // Without quota data from the proxy, the reason it gave goes first.
   if (bandError) return { key: 'alert', tone: 'warn', title: bandErrorText(bandError), detail: '', acts: [] }
@@ -398,7 +393,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
   // stayed, comes after the cold turn.
   // Each live row offers `switch to k•••` while a press could stop the waiting turn (pressAct).
   const liveAct = live && pressAct(i, acct, menu, act)
-  if (live?.kind === 'retry') return liveRow(live, liveAct)
+  if (live?.kind === 'retry') return notice && life?.press && !acct?.session.retry?.try_started_at ? notice : liveRow(live, liveAct)
   if (alert && alert.action !== 'dismiss') {
     const fallback = alert.fallback
     const acts: Act[] = alert.action === 'route' && fallback && menu.canSend
@@ -407,7 +402,6 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
     return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts }
   }
   if (live?.kind === 'watch') return liveRow(live, liveAct)
-  if (notice) return notice
   const cold = c.cold
   if (cold && !working && cold.tokens >= COLD_NOTICE_FLOOR && !coldConfirmed(cold, ui.coldDismissed)) {
     return {
@@ -415,13 +409,19 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
       acts: [handoff], close: { key: 'cold-ok', label: 'ok', run: () => act.ui({ coldDismissed: cold.key }) },
     }
   }
+  if (notice) return notice
   if (alert) {
     // Back to the account a move left, by today's switch and its question about a cold turn.
     const back = alert.back && acct && menu.canSend ? acct.view.credentials.find(c => c.id === alert.back) : undefined
     const acts: Act[] = back
       ? [{ key: 'switch-back', label: 'switch back', run: () => menu.pick({ action: 'switch', fields: { auth_id: back.id }, text: W.switchTo(back.label) }) }]
       : []
-    return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts, close: { key: 'alert-ok', label: 'ok', run: () => act.ui({ dismissedSwitch: [...[ui.dismissedSwitch ?? []].flat(), alert.key ?? ''].slice(-DISMISSED_KEPT) }) } }
+    const route = routeFor(acct?.session, i.sess.model)
+    const fallback = route?.auto && route.from ? `fallback:${route.from}:${route.model}` : ''
+    const dismissed = [...[ui.dismissedSwitch ?? []].flat(), alert.key ?? '']
+    const kept = dismissed.filter(key => !key.startsWith('fallback:')).slice(-DISMISSED_KEPT)
+    if (dismissed.includes(fallback)) kept.unshift(fallback)
+    return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts, close: { key: 'alert-ok', label: 'ok', run: () => act.ui({ dismissedSwitch: kept }) } }
   }
   const used = f.ctx ? Math.round(100 - f.ctx.left) : 0
   if (settings.handoffAt > 0 && used >= settings.handoffAt && !working && (!ui.handoffDismissedAt || used >= ui.handoffDismissedAt + 10)) {

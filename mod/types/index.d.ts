@@ -311,12 +311,7 @@ export type UiState = {
    * answer): when it goes by itself, on the band's clock, and its short form. Any other notice
    * stays until `ok`.
    */
-  noticeLife: { text: string; short: string; until: number } | null
-  /**
-   * When the notice was set, on the band's clock: for a while from then it stays above the
-   * warnings, as while it has time left. 0 for one 0.1.19 set.
-   */
-  noticeAt: number
+  noticeLife: { text: string; short: string; until: number; press?: true } | null
   /** A press of `switch to k•••` under way, and what came of the last one that switched. */
   press: Press | null
   pressed: Pressed | null

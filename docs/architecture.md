@@ -175,7 +175,7 @@ back in 5m`.
 | Acknowledgement wait | 5 s for a press's switch; then 5 s after the stop before saying it is not confirmed | The proxy answers within one read; a turn's end comes at once unless a hook holds it |
 | Switch now's notices | 10 s for a refusal or no answer | Long enough to read; then the waiting row and its control come back |
 | Read deadline | 3 s for each read of the proxy, and for a step's wait on the band's read | A local read answers in milliseconds; a step never waits on the proxy for longer |
-| A band notice on top | 5 s for a command that worked; 10 s for one that waits for `ok` | Long enough to read; a warning that came meanwhile is never hidden for longer |
+| A command's done notice | 5 s, below warnings | Goes by itself and never covers a warning |
 
 ### Running another model when one is used up
 
@@ -430,12 +430,13 @@ decided once (`view.ts`: the facts, and the one row above the band) and drawn pe
 character cells in a terminal (`terminal.tsx`), and as cards in the desktop app (`desktop.tsx`),
 whose font is proportional, whose widths are CSS lengths and whose colours follow its light or dark
 theme. Both show cards while Claude waits and one line while it works (also when another mod draws
-above the prompt), and the row says one thing at a time: a question, what came of an action, or an alert
-(the proxy's, a cold next turn, a session moved or kept, a full context), in that order. What came of
-an action stays on top while it has time left (a switch, route or back that worked says so for 5 s
-and goes by itself), while it runs or is on its way, and for its first 10 s; after that, a notice
-that waits for `ok` gives way to the proxy's alerts (no quota data, a retry, the plugin's warnings,
-the hang watch) and comes back after them. `ok` on a note dismisses that note alone. The waiting
+above the prompt), and the row says one thing at a time. Questions and actions still running or
+on their way come first. Completed notices yield immediately to read errors, waiting or running
+retries, the plugin's warnings, the hang watch and a cold next turn. A switch, route or back that
+worked says so for 5 s and goes by itself; other completed notices wait for `ok` below warnings.
+Only Switch now's refusal and no-answer notices stay above a waiting retry for their 10 s.
+`ok` on a note dismisses that note alone; the current fallback's dismissal survives later move
+and stayed-note dismissals, while the eight most recent other keys are kept. The waiting
 rows carry `switch to k•••` (Switch now, in [When an account fails](#when-an-account-fails)).
 
 The quota cards are the account's windows, each with its reset (`view.ts`, `quota`):
@@ -483,11 +484,13 @@ proxy has not accepted yet, no plugin there, no answer) and keeps the last snaps
 Each read, `/band` and the model list a full refresh reads first, gives up after the read deadline
 (the host's fetch takes no time limit, so a timer is raced against it): a `/band` that gave up is
 `no answer within 3s`, a model list that gave up leaves the switch menu with accounts only, and the
-next read goes on as usual.
+next read goes on as usual. A command-bearing request holds the outbox until its HTTP call
+actually answers or fails, even after the deadline; reads without commands continue meanwhile.
 The switch list leaves out accounts that cannot serve the session's model (the snapshot's `blocked`)
 and second credentials of an account; the Accounts tile's `next up` follows the same rule, and
 both give an account's use of the weekly window that limits the session's model. Before the proxy
-has seen the session, `next up` is the first ready account by the plain week.
+has seen the session, `next up` is the first ready account by the plain week. When no account is
+ready, an enabled alternative with a known reset still counts down even if it is `blocked`.
 
 After a main reply, the band confirms its route with a fresh `/band` read before recording the
 cache, waiting for it no longer than the read deadline. A failed read, one that gave up, or a

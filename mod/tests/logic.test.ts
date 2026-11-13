@@ -228,6 +228,8 @@ describe('accounts', () => {
     // Only its 5-hour window stops it: back when that one resets, not at the weekly reset.
     const fiveOnly = { ...view, credentials: view.credentials.map(c => c.id === 'claude-k' ? { ...c, tier: 3, reason: '5-hour quota used up', back_at: iso(2 * H) } : c) }
     expect(nextUp(fiveOnly, 'claude-d', NOW)).toBe('k••• back in 2h')
+    expect(nextUp(fiveOnly, 'claude-d', NOW, { model: 'claude-opus-5-5', blocked: ['claude-k'] })).toBe('k••• back in 2h')
+    expect(nextUp(used, 'claude-d', NOW, { model: 'claude-opus-5-5', blocked: ['claude-k'] })).toBe('k••• back in 4d 2h')
     const disabled = { ...view, credentials: view.credentials.map(c => c.id === 'claude-k' ? { ...c, disabled: true, tier: 3, reason: 'disabled', back_at: iso(2 * H) } : c) }
     expect(blockedOthers(disabled, 'claude-d', NOW)).toBe('k••• disabled')
     expect(nextUp(disabled, 'claude-d', NOW)).toBe('single account')

@@ -85,7 +85,7 @@ let snapshot: Snap
 /** Whether each read of /band stamps the snapshot with the test clock's time, as a live proxy does. */
 let stampReads = false
 /** When set, how /band fails instead: refused, or not reached. */
-let failure: OpEventResult<'http.fetch'> | undefined
+let failure: OpEventResult<'http.fetch'> | Promise<OpEventResult<'http.fetch'>> | undefined
 /** The reads the proxy takes and never answers, by URL: a connection accepted and then silent. */
 let hang: RegExp | undefined
 /** How many times the band read /band. */
@@ -1585,7 +1585,7 @@ test('a held question left in the band draws only while holding is on', () => {
   const ui: UiState = {
     switchStep: '', confirm: 'send', move: null, held: 'the login page next', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
     pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: [],
-    noticeLife: null, noticeAt: 0, press: null, pressed: null,
+    noticeLife: null, press: null, pressed: null,
   }
   const input = (holdColdDefault: boolean) => ({
     snap: SNAP, bandError: null, now: NOW, sess: SESSION, cache, ui, models: [], working: false,
@@ -1892,7 +1892,7 @@ describe('the live rows', () => {
   const ui: UiState = {
     switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
     pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: [],
-    noticeLife: null, noticeAt: 0, press: null, pressed: null,
+    noticeLife: null, press: null, pressed: null,
   }
   const cache = { lastAt: NOW - 60_000, prompt: 160_000, read: 150_000, creation: 10_000, input: 10, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
   /** The row at band time NOW, the band's clock `skew` ahead of the proxy's, its step as given. */
@@ -2456,7 +2456,7 @@ describe('switch now at the view', () => {
   const ui: UiState = {
     switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
     pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: [],
-    noticeLife: null, noticeAt: 0, press: null, pressed: null,
+    noticeLife: null, press: null, pressed: null,
   }
   const cache = { lastAt: 0, prompt: 0, read: 0, creation: 0, input: 0, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
   const STEP = { turnId: 't1', index: 0, startedAt: NOW - 60_000, contentAt: 0, generation: 3 }
@@ -2579,16 +2579,15 @@ test('a switch that worked says so for 5 s and goes without a press; a command o
   expect(await rowText($, 'notice')).toBe('')
 })
 
-test('a done notice gives its place to an account read as used up when its 5 s end', async ($, on) => {
+test('a done notice never covers an account read as used up, even with its 5 s left', async ($, on) => {
   const clock = stubSession(on, USED_UP)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
   expect(await rowText($)).toBe(USED_UP_ROW)
   await switchToK($)
   applied(clock)
   await clock.advance(10_000)
-  // What came of the press, while it has time left; then the warning, with no ok pressed.
-  expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
-  expect(await rowText($)).toBe('')
+  expect(await rowText($, 'notice')).toBe('')
+  expect(await rowText($)).toBe(USED_UP_ROW)
   await clock.advance(5_000)
   expect(await rowText($, 'notice')).toBe('')
   expect(await rowText($)).toBe(USED_UP_ROW)
@@ -2663,6 +2662,20 @@ test('ok on the fallback note and on the move note, in turn: neither comes back'
   expect(await rowText($)).toBe('')
   await clock.advance(10_000)
   expect(await rowText($)).toBe('')
+  for (let n = 0; n < 10; n++) {
+    const at = new Date(clock.now()).toISOString()
+    const session = snapshot.sessions.s1!
+    snapshot = { ...snapshot, sequence: snapshot.sequence + 1, sessions: { s1: {
+      ...session,
+      ...(n % 2 === 0
+        ? { last_switch: { ...session.last_switch!, at } }
+        : { retry_outcome: { account: 'claude-k', cause: { kind: 'overloaded', status: 529 }, tries: 1, after_ms: 61_000, cache_read: 400_000, at } }),
+    } } }
+    await clock.advance(10_000)
+    expect(await rowText($)).toMatch(n % 2 === 0 ? /^↪ Switched d•••/ : /^↪ Stayed on k•••/)
+    await ok()
+    expect(await rowText($)).toBe('')
+  }
 })
 
 describe('a notice and the warnings', () => {
@@ -2671,40 +2684,56 @@ describe('a notice and the warnings', () => {
   const ui: UiState = {
     switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
     pending: [], notice: HANDED, noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: [],
-    noticeLife: null, noticeAt: NOW - 3_000, press: null, pressed: null,
+    noticeLife: null, press: null, pressed: null,
   }
   const cache = { lastAt: 0, prompt: 0, read: 0, creation: 0, input: 0, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
-  const top = (patch: Partial<UiState>, world: { snap?: Snap; bandError?: BandError; step?: { startedAt: number; contentAt: number } } = {}) =>
+  const top = (patch: Partial<UiState>, world: { snap?: Snap; bandError?: BandError; step?: { startedAt: number; contentAt: number }; cold?: true } = {}) =>
     bandFacts({
-      snap: world.snap ?? SNAP, bandError: world.bandError ?? null, now: NOW, sess: SESSION, cache, ui: { ...ui, ...patch }, models: [], working: Boolean(world.step),
+      snap: world.snap ?? SNAP, bandError: world.bandError ?? null, now: NOW, sess: SESSION, cache: world.cold ? { ...cache, prompt: 100_000, lastAt: NOW - 2 * H } : cache, ui: { ...ui, ...patch }, models: [], working: Boolean(world.step),
       settings: settingsOf({}), auto: { holdCold: null, keepWarm: null }, unattended: false, live: { step: world.step ? { turnId: 't1', index: 0, generation: 3, ...world.step } : null, skew: 0 },
     }, act).top
   const takeover: Snap = { ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, takeover: 'claude-k' } } }
   /** Each warning a notice must not cover, with how its row begins. */
   const warnings: [string, Parameters<typeof top>[1], RegExp][] = [
     ['a read error', { bandError: { kind: 'network', message: 'connect ECONNREFUSED' } }, /^cannot reach the proxy/],
+    ['an HTTP error', { bandError: { kind: 'status', status: 404 } }, /quota-pilot/],
+    ['an invalid snapshot', { bandError: { kind: 'body' } }, /quota data is not in a form this band reads/],
     ['a waiting retry', { snap: retrying(NOW, 10_000), step: { startedAt: NOW - 20_000, contentAt: 0 } }, /^d••• returned HTTP 529 · retrying it/],
+    ['a running retry', { snap: retrying(NOW, 10_000, { try_started_at: iso(-2_000) }), step: { startedAt: NOW - 20_000, contentAt: 0 } }, /^d••• returned HTTP 529 · retrying it/],
     ["the plugin's warning", { snap: USED_UP }, /^weekly quota used up on d•••/],
     ['the hang watch', { snap: takeover, step: { startedAt: NOW - 45_000, contentAt: 0 } }, /^no answer for 45s/],
+    ['a cold next turn', { cold: true }, /^Next turn starts cold/],
   ]
 
-  test('a notice with no time limit stays on top for its first 10 s, then gives way to each warning and stays under it', () => {
+  test('completed notices immediately yield to every warning, even with time left', () => {
     for (const [name, world, row] of warnings) {
-      expect(top({}, world), name).toMatchObject({ key: 'notice', title: HANDED })
-      expect(top({ noticeAt: NOW - 10_000 }, world)?.title, name).toMatch(row)
-      // As 0.1.19 left it, with no time of its own.
-      expect(top({ noticeAt: undefined as never }, world)?.title, name).toMatch(row)
+      for (const notice of [HANDED, 'Switch to k•••: done', 'Switch to k•••: rejected', 'Switch to k•••: no answer from the proxy; is it running?', 'Switch to k•••: the proxy restarted before confirming it']) {
+        expect(top({ notice }, world)?.title, name).toMatch(row)
+        expect(top({ notice, noticeLife: { text: notice, short: '', until: NOW + 5_000 } }, world)?.title, name).toMatch(row)
+      }
     }
-    // With nothing wrong it stays until ok.
-    expect(top({ noticeAt: NOW - 3_600_000 })).toMatchObject({ key: 'notice', title: HANDED, close: { label: 'ok' } })
+    expect(top({})).toMatchObject({ key: 'notice', title: HANDED, close: { label: 'ok' } })
+    expect(top({ noticeLife: { text: HANDED, short: '', until: NOW + 1 } })).toMatchObject({ key: 'notice', title: HANDED })
+    expect(top({ noticeLife: { text: HANDED, short: '', until: NOW } })).toBeNull()
   })
 
-  test('a notice with time left, of something running, or of a command on its way stays on top of every warning', () => {
+  test('something running or a command on its way stays on top of every warning', () => {
     const sending = { id: 'c1', text: 'Switch to k•••', boot: 'b1', at: NOW - 30_000 }
     for (const [name, world] of warnings) {
-      expect(top({ noticeAt: NOW - 60_000, noticeLife: { text: HANDED, short: '', until: NOW + 1 } }, world), name).toMatchObject({ key: 'notice', title: HANDED })
-      expect(top({ noticeAt: NOW - 60_000, busy: true }, world), name).toMatchObject({ key: 'notice', busy: true, close: undefined })
-      expect(top({ noticeAt: NOW - 60_000, notice: 'Switch to k•••…', pending: [sending] }, world), name).toMatchObject({ key: 'notice', title: 'Switch to k•••…', close: undefined })
+      expect(top({ busy: true }, world), name).toMatchObject({ key: 'notice', busy: true, close: undefined })
+      expect(top({ notice: 'Switch to k•••…', pending: [sending] }, world), name).toMatchObject({ key: 'notice', title: 'Switch to k•••…', close: undefined })
+    }
+  })
+
+  test('Switch now responses only cover a waiting retry during their 10 s life', () => {
+    for (const notice of ['Could not switch to k•••: the session moved meanwhile', 'No answer from the proxy within 5s; the turn keeps waiting']) {
+      const noticeLife = { text: notice, short: '', until: NOW + 10_000, press: true as const }
+      for (const [name, world, row] of warnings) {
+        const result = top({ notice, noticeLife }, world)
+        if (name === 'a waiting retry') expect(result, name).toMatchObject({ key: 'notice', title: notice })
+        else expect(result?.title, name).toMatch(row)
+        expect(top({ notice, noticeLife: { ...noticeLife, until: NOW } }, world)?.title, name).toMatch(row)
+      }
     }
   })
 })
@@ -2766,6 +2795,64 @@ test('a model list the proxy never answers gives up after 3 s: the read of /band
   await clock.advance(10_000)
   expect(bandReads).toBe(reads + 3)
 })
+
+for (const [first, second] of [['switch', 'route'], ['route', 'unroute'], ['unroute', 'switch']] as const) {
+  for (const outcome of ['answered', 'failed'] as const) {
+    test(`a timed-out ${first} cannot be overtaken by ${second} until its request ${outcome}, while reads and steps go on`, async ($, on) => {
+      const routed: Snap = {
+        ...SNAP,
+        providers: { ...SNAP.providers, codex: { health: 'healthy', credentials: [
+          { id: 'codex-a', auth_index: '3', label: 'a•••', order: 1, tier: 1, reason: '', sessions: 0, windows: [] },
+          { id: 'codex-b', auth_index: '4', label: 'b•••', order: 2, tier: 1, reason: '', sessions: 0, windows: [] },
+        ] } },
+        sessions: { s1: {
+          ...SNAP.sessions.s1!, provider: 'codex', model: 'gpt-6.1-sol', requested_model: 'claude-opus-5-5', auth_id: 'codex-a', auth_label: 'a•••',
+          route: { provider: 'codex', model: 'gpt-6.1-sol', auto: false, at: iso(-60_000) },
+        } },
+      }
+      const clock = stubSession(on, routed)
+      models = [{ id: 'gpt-6.1-sol', owned_by: 'openai', created: 2 }, { id: 'gpt-6-astra', owned_by: 'openai', created: 1 }]
+      stepReplies(on)
+      let release: (reply: OpEventResult<'http.fetch'>) => void = () => undefined
+      const held = new Promise<OpEventResult<'http.fetch'>>(resolve => { release = resolve })
+      await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+      const pick = async (action: typeof first | typeof second) => {
+        const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+        if (action === 'unroute') await ui.press({ key: 'unroute' })
+        else {
+          await ui.press({ key: 'switch' })
+          if (action === 'switch') await ui.press({ key: 'to-codex-b' })
+          else {
+            await ui.press({ key: 'prov-codex' })
+            await ui.press({ key: 'model-gpt-6-astra' })
+          }
+        }
+        await ui.unmount()
+      }
+      failure = held
+      await pick(first)
+      await clock.advance(3_000)
+      expect(commands.map(c => c.action)).toEqual([first])
+      failure = undefined
+      await clock.advance(7_000)
+      await pick(second)
+      const readCount = bandReads
+      await clock.advance(30_000)
+      expect(bandReads).toBeGreaterThan(readCount)
+      expect(commands.map(c => c.action)).toEqual([first])
+      await $.turn.start({ text: 'go on', turnId: 'ordered' } as never)
+      const step = stepOn($, 'ordered')
+      await clock.advance(3_000)
+      expect(step.returned).toBe(true)
+      await step.done
+      release(outcome === 'failed'
+        ? { deny: 'connection closed' }
+        : { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(snapshot) } })
+      await clock.settle()
+      expect(commands.map(c => c.action)).toEqual([first, second])
+    })
+  }
+}
 
 for (const where of [/\/v1\/models$/, /\/band$/]) {
   test(`a step that ends while a full refresh hangs on ${where.source.includes('models') ? 'the model list' : '/band'} returns within the deadline`, async ($, on) => {

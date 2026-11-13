@@ -268,7 +268,7 @@ export function nextUp(view: SnapProvider, current: string, now: number, session
   const ready = able.find(c => c.tier < 3 && !restingNow(c, now)) ?? able.find(c => c.tier < 3)
   if (ready) return `next up: ${ready.label} ${usedText(session ? weeklyFor(ready, session.model) : windowOf(ready, '7d'))}`
   // When the window that stops each account resets: the plugin knows which one it is.
-  const back = able
+  const back = others
     .map(c => ({ c, t: Date.parse(c.back_at ?? '') }))
     .filter(x => Number.isFinite(x.t) && x.t > now)
     .sort((a, b) => a.t - b.t)[0]
@@ -459,16 +459,16 @@ const DONE_MS = 5_000
  */
 export function settlePending(pending: readonly Pending[], snap: Snap | null, now: number): {
   left: Pending[]
-  notice: { text: string; isError: boolean; short?: string; lifeMs?: number } | null
+  notice: { text: string; isError: boolean; short?: string; lifeMs?: number; press?: true } | null
 } {
   const left: Pending[] = []
-  let notice: { text: string; isError: boolean; short?: string; lifeMs?: number } | null = null
+  let notice: { text: string; isError: boolean; short?: string; lifeMs?: number; press?: true } | null = null
   for (const p of pending) {
     const ack = snap?.acks.find(a => a.command_id === p.id)
     if (p.press !== undefined) {
       // Switch now words its own outcome: an applied switch by the move's note, a refusal for 10 s.
       // The proxy's silence it told at 5 s.
-      if (ack?.status === 'rejected') notice = { ...W.pressRefused(p.press, ack.reason ?? 'rejected'), isError: false, lifeMs: 10_000 }
+      if (ack?.status === 'rejected') notice = { ...W.pressRefused(p.press, ack.reason ?? 'rejected'), isError: false, lifeMs: 10_000, press: true }
       else if (!ack && !(snap && snap.boot_id !== p.boot) && now - p.at <= PENDING_MS) left.push(p)
       continue
     }
