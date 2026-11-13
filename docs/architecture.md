@@ -58,7 +58,8 @@ count again. Only a 429 is a quota refusal. A failure marks only its model, but 
 elsewhere that follows moves the whole thread binding: a session that left its account for Opus has
 left it for Sonnet too. A request's send time goes with its
 binding, and moves on with each later request its account serves, so an answer sent before
-either and arriving late does not take the thread elsewhere.
+either and arriving late changes neither the binding nor its recorded message-thread owner
+(`TestAnOlderThreadedSuccessDoesNotMoveAFresherBinding` in `plugin/core/core_test.go`).
 An account read as used up often answers a while longer, so its sessions stay until it turns a
 request away; from then on each of them leaves at its next request for a ready account, without
 waiting to be refused itself. It also moves when its session has been idle for an hour, so its
@@ -148,8 +149,8 @@ a failure nor a listing recorded after restart, the continuation keeps its threa
 on a low account also sends again without its thread when the existing idle-move rule has a known
 eligible, ready alternative. The
 check uses the child's own binding for a subagent with its own thread, else its parent's. Before
-that check, a bound Claude continuation rereads the host inventory when it is over five seconds
-old, using the retry episode's account-list age. A failed read leaves the held inventory in use.
+that check, a bound Claude continuation rereads the host inventory when it is older than the
+account-list age below. A failed read leaves the held inventory in use.
 The turn sent again goes where quota-pilot chooses, and that session then runs without a server-side
 thread on that model, as on a route.
 
@@ -184,7 +185,7 @@ back in 5m`.
 | Hang | no response in 30 s, after waiting 30 s | Longer than any first response to a large cold prompt, far shorter than a stuck connection |
 | Hang watch | 30 s with no content in the band's main step | The same span: the band warns as soon as quota-pilot would call it a hang |
 | Record wait | 200 ms | The proxy delivers an attempt's record a moment after the attempt ends |
-| Account list age | 5 s while an episode runs | An account removed or disabled ends the wait within seconds |
+| Account list age | 5 s during retry episodes and before bound Claude continuations | Notice removed or disabled accounts without waiting for the quota poll |
 | Failure moment | 10 s | Requests that hung together, or several sessions at once, are one event, not several |
 | Second moment | within 15 min of the first | Two separate failures close together; one failure is not a pattern |
 | First rest | 5 min | Longer than the proxy's 60 s pause after a 529, short enough to lose little |

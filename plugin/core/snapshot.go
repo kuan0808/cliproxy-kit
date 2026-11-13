@@ -76,9 +76,9 @@ func (s *State) Apply(cmd Command) Ack {
 func (s *State) applyLocked(cmd Command, root string, sess *session, now time.Time) string {
 	switch cmd.Action {
 	case "switch":
-		// The session's next thread request reaches the new account, which answers that it
-		// has no such thread; Claude Code then replays the conversation there once. Subagents
-		// already running keep their own threads where they are.
+		// A switch leaves the message thread behind: Intercept requests a stateless replay before
+		// the host can pin a continuation to its old account. Subagents with their own bindings
+		// keep them.
 		c := s.creds[cmd.AuthID]
 		if c == nil {
 			return "unknown account"

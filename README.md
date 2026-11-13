@@ -317,13 +317,9 @@ band's row stops waiting: the session moves to k•••, the turn stops, and y
 there. An account that keeps failing rests. There is nothing to set; the rules and every number are
 in [docs/architecture.md](docs/architecture.md#when-an-account-fails).
 
-A Claude message thread follows the same rules, including a move off a low account after an hour
-idle. When its account should change, or an older saved switch or move left its thread's owner
-unknown, Claude Code sends the turn again without that thread. A failure on its account in any
-session or model also requires replay until a later pick lists that account for the thread's model
-again. A subagent with its own thread uses its own binding. Before checking a bound continuation,
-quota-pilot rereads the proxy's account list if it is over five seconds old; a failed read keeps the
-held list.
+A Claude message thread follows the same rules. When a continuation cannot safely stay on its
+thread's account, Claude Code sends the turn again without that thread. See the
+[thread eligibility and replay rules](docs/architecture.md#when-an-account-fails).
 
 | Situation | What happens | What the band shows |
 | --- | --- | --- |

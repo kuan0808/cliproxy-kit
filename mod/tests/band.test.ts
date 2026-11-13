@@ -3162,7 +3162,10 @@ for (const surface of ['terminal', 'desktop'] as const) {
       expect((await step.next()).value).toEqual(TEXT)
       release()
       const ui = await mounting
-      await ui.press({ key: 'switch-now' })
+      // A redraw can remove the stale button before the test dispatches its press.
+      await ui.press({ key: 'switch-now' }).catch(error => {
+        expect(String(error)).toBe(`HooksError: press: no Button of quota-band keyed "switch-now" is drawn in this AbovePrompt on the ${surface} surface`)
+      })
       await clock.advance(2_000)
       expect(commands).toEqual([])
       expect(aborts).toEqual([])

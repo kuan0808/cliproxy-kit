@@ -32,8 +32,8 @@ const (
 	// the attempt it just answered with it: the proxy publishes it before the next attempt, but
 	// delivers it a moment later.
 	recordWait = 200 * time.Millisecond
-	// inventoryAge is how old the host's account list may be while an episode runs: an account
-	// removed or disabled ends the episode within seconds, not at its give-up.
+	// inventoryAge bounds the host's account-list age during retry episodes and before bound
+	// Claude continuations, so removals and disables are noticed without waiting for the poll.
 	inventoryAge = 5 * time.Second
 	// defaultPause is the proxy's own pause after a recoverable failure with no Retry-After
 	// (transientErrorCooldown), for the decline's estimate of when the account is offered again.
