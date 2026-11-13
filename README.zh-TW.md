@@ -352,7 +352,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 ## 更新與移除
 
 - **更新：** 面板的插件商店會提供 quota-pilot 的新版本，商店一裝好，proxy 就改跑新版，不必重新啟動。手動用同一個檔名蓋掉舊的程式庫，要等 proxy 重新啟動才會跑新版，重新啟動會中斷所有正在經過它的請求。額度列用 `claude plugin update quota-band@cliproxy-kit` 更新，或在 `/plugin` 的 **Marketplaces** 開啟自動更新；執行中的 session 用 `/reload-plugins` 載入新版。從 0.1.19 升到 0.1.20 只要更新額度列，proxy 外掛的行為沒有變更。
-- **先更新 CLIProxyAPI：** quota-pilot 需要 CLIProxyAPI 8.0.66 以上。先更新並重新啟動 proxy，再更新 quota-pilot：現在跑的 quota-pilot 在新版 proxy 上照常運作，重試也一樣；新版 quota-pilot 則不會在 CLIProxyAPI 8.0.48 以前的版本載入。
+- **從 0.2.0 升級：** quota-pilot 需要 CLIProxyAPI 8.0.66 以上。先更新並重新啟動 proxy，再更新 quota-pilot：現在跑的 quota-pilot 在新版 proxy 上照常運作，重試也一樣；新版 quota-pilot 則不會在 CLIProxyAPI 8.0.48 以前的版本載入。
 - **從 0.1.16 升級：** 失敗的請求會先在 session 原本的帳號上重試，一直失敗的帳號會暫停使用，每次切換都會說明原因，按 `switch to k•••` 就不必再等。額度列和 quota-pilot 請一起更新，額度列的文字兩邊都要新版：舊版額度列會把新版插件的每次切換都寫成 `was unavailable`，新版額度列則把舊版插件做的切換寫成 `reason not recorded`。
 - **從 0.1.14 升級：** 冷啟動前攔下訊息和保持快取都改成預設關閉，要用時在 `/config` 對所有 session 打開，或用 `/hold-cold on`、`/keep-warm on` 只對一個打開。**攔下訊息的對話大小**或**保持快取的次數**設為 `0` 不再代表關閉：分別代表任何大小和刷新一次；攔下訊息的對話大小為 `0` 時，快取還熱著的每次切換都會先問。
 - **從 0.1.6 升級：** 額度列改成全部走網路，用 Claude Code 本來就在用的 key，所以 `band_tokens` 不再讀取，可以從 `config.yaml` 刪掉。session、專案和記住的資料夾會自動移進 `usage/sessions.json`。

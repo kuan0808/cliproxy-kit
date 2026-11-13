@@ -33,4 +33,4 @@ request with the 503: every retry is one of Claude Code's own, which sends the r
 needs the proxy first: an older quota-pilot, built for 8.0.16, loads and keeps its retries on 8.0.66
 and later, so the proxy can be updated before quota-pilot and not the other way round. A release
 that carries this raises the oldest CLIProxyAPI it needs, so it moves the version's middle number
-([AGENTS.md](../../AGENTS.md)).
+([AGENTS.md](../../AGENTS.md)): this release is 0.2.0.

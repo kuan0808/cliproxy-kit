@@ -118,11 +118,6 @@ func run(m *testing.M) (int, error) {
 		return 0, err
 	}
 	defer os.RemoveAll(dir)
-	// The plugin keeps its files under $HOME/.cache/cliproxy-kit; its runtime reads the environment
-	// when the host loads it, after this.
-	if err := os.Setenv("HOME", filepath.Join(dir, "home")); err != nil {
-		return 0, err
-	}
 	ext := "so"
 	if runtime.GOOS == "darwin" {
 		ext = "dylib"
@@ -145,6 +140,11 @@ func run(m *testing.M) (int, error) {
 		if out, err := build.CombinedOutput(); err != nil {
 			return 0, fmt.Errorf("build the plugin: %v\n%s", err, out)
 		}
+	}
+	// The plugin keeps its files under $HOME/.cache/cliproxy-kit; its runtime reads the environment
+	// when the host loads it, after this.
+	if err := os.Setenv("HOME", filepath.Join(dir, "home")); err != nil {
+		return 0, err
 	}
 
 	u := &upstream{script: map[string][]func(http.ResponseWriter){}}

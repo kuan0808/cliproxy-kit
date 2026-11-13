@@ -497,7 +497,8 @@ Switch now captures the live cancellation generation before any enqueue read. Bo
 dequeue require that generation unchanged, and dequeue requires the live token to name the press
 within its 5 s wait; dispatch state snapshots cannot revive a cancelled press. Keep waiting,
 acknowledgement, timeout, content, a step or turn ending, and clear or resume invalidate earlier
-enqueue work.
+enqueue work. A module reload clears a sending press because its live token and timeout are gone;
+its pending command still settles from the proxy's acknowledgement, without stopping a turn.
 Drawing, opening the confirmation, enqueueing and dequeueing share `pressFor`'s waiting eligibility:
 the same main step must still have a retry or hang row without content since its failure, the
 session's generation and takeover must still match, and no read error or newer elsewhere pick

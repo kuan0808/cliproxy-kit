@@ -2619,6 +2619,43 @@ const applied = (clock: MockClock) => {
 const USED_UP: Snap = { ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, switch_imminent: true, switch_reason: 'weekly quota used up', next_auth_id: 'claude-k' } } }
 const USED_UP_ROW = '! weekly quota used up on d••• · moves to k••• (7% used) once d••• stops answering '
 
+for (const status of ['applied', 'rejected', 'unanswered'] as const) {
+  test(`a sending press restored on reload never hides warnings or stops a turn when ${status}`, async ($, on) => {
+    const clock = stubSession(on, {
+      ...USED_UP,
+      acks: status === 'unanswered' ? [] : [{ command_id: 'reload-switch', session: 's1', status, reason: 'the session moved meanwhile', at: iso(0) }],
+    })
+    const aborts = recordAborts(on)
+    const stored: UiState = {
+      switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
+      pending: [{ id: 'reload-switch', text: 'Switch to k•••', boot: 'b1', at: NOW, press: 'k•••' }],
+      notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 0, dismissedSwitch: [],
+      noticeLife: null, pressed: null,
+      press: { id: 'reload-switch', turnId: 'old-turn', index: 0, startedAt: NOW - 10_000, generation: 3, to: 'claude-k', label: 'k•••', stage: 'sending', sentAt: NOW, abortAt: 0, switchAt: '', since: false },
+    }
+    let restored = false
+    on('state.get', async (_$, e, next) => {
+      const r = await next(e)
+      return e.plugin === 'quota-band' && e.key === 'ui' && !restored && 'value' in r
+        ? { value: { value: stored, version: r.value?.version ?? 0 } }
+        : r
+    })
+    on('state.set', (_$, e, next) => {
+      if (e.plugin === 'quota-band' && e.key === 'ui') restored = true
+      return next(e)
+    })
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      expect(await liveText($, 200, surface)).toContain('weekly quota used up on d•••')
+      expect(await liveText($, 200, surface, 'notice')).toBe('')
+    }
+    await clock.advance(60_001)
+    expect(await liveText($)).toBe(USED_UP_ROW)
+    expect(commands).toEqual([])
+    expect(aborts).toEqual([])
+  })
+}
+
 test('a switch that worked says so for 5 s and goes without a press; a command on its way has no ok', async ($, on) => {
   const clock = stubSession(on, SNAP)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)

@@ -435,7 +435,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   `claude plugin update quota-band@cliproxy-kit`, or by itself once auto-update is on for the
   marketplace under **Marketplaces** in `/plugin`; `/reload-plugins` loads it in a running session.
   From 0.1.19 to 0.1.20, updating the band is enough; the proxy plugin's behaviour is unchanged.
-- **CLIProxyAPI first:** quota-pilot needs CLIProxyAPI 8.0.66 or newer. Update and restart the
+- **From 0.2.0:** quota-pilot needs CLIProxyAPI 8.0.66 or newer. Update and restart the
   proxy before quota-pilot: the quota-pilot you run now keeps working on the new proxy, retries
   included, while a new quota-pilot does not load on CLIProxyAPI 8.0.48 or older.
 - **From 0.1.16:** a failure is retried on the session's own account first, an account that keeps

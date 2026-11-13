@@ -934,6 +934,7 @@ export const register: Register = (on, options) => {
     await update($, cacheA, c => ({ ...EMPTY_CACHE, ...c }))
     await update($, uiA, (u: UiState): UiState => ({
       ...EMPTY_UI, ...u, busy: false, ...(u.busy ? { notice: W.handoffReloaded } : {}),
+      press: u.press?.stage === 'sending' ? null : u.press ?? null,
       confirm: CONFIRMS.includes(u.confirm) ? u.confirm : '',
     }))
     const notice = before.busy ? W.handoffReloaded : before.notice
