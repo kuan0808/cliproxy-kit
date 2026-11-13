@@ -344,7 +344,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | --- | --- | --- |
 | CLIProxyAPI 的 `config.yaml` | 開啟 `plugins:`、加入商店，以及 quota-pilot 的設定 | 刪掉這些設定。 |
 | proxy 使用者的 `~/.cache/cliproxy-kit/` | 狀態、請求記錄，以及每個 session 的資料（權限 0600；client key 只存雜湊） | 刪掉這個資料夾。 |
-| 每台跑 Claude Code 的 `~/.claude/settings.json` | 步驟 3 的 `env` 設定，以及 `extraKnownMarketplaces` 底下的 `cliproxy-kit` | 從 `env` 拿掉 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`ENABLE_TOOL_SEARCH` 和 `ENABLE_CLAUDEAI_MCP_SERVERS`。`settings.json.bak-<時間>` 是每次執行腳本前的檔案：放回去也會撤銷之後的所有變更。 |
+| 每台跑 Claude Code 的 `~/.claude/settings.json` | 步驟 3 的 `env` 設定，以及 `extraKnownMarketplaces` 底下的 `cliproxy-kit` | 從 `env` 拿掉 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`ENABLE_TOOL_SEARCH` 和 `ENABLE_CLAUDEAI_MCP_SERVERS`，再從 `extraKnownMarketplaces` 拿掉 `cliproxy-kit`。`settings.json.bak-<時間>` 是某一次執行腳本前的檔案：放回去也會撤銷之後的所有變更。 |
 | Claude Code 的插件 | `cliproxy-kit` marketplace 和 `quota-band` | `claude plugin uninstall quota-band@cliproxy-kit`，再執行 `claude plugin marketplace remove cliproxy-kit` |
 | 額度列那台的 `~/.cache/cliproxy-kit/handoff/` | 交接寫的筆記 | 刪掉這個資料夾。 |
 | `~/.codex/config.toml`（選用） | 步驟 4 的 model provider 和步驟 5 的 hook | 刪掉這些設定。 |

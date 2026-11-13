@@ -420,7 +420,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | --- | --- | --- |
 | CLIProxyAPI's `config.yaml` | `plugins:` turned on, the store, and quota-pilot's settings | Remove them. |
 | `~/.cache/cliproxy-kit/` of the proxy's user | State, the request log and what is known of each session (mode 0600; client keys as hashes only) | Delete the folder. |
-| `~/.claude/settings.json`, on each machine with Claude Code | The `env` keys of step 3, and `cliproxy-kit` under `extraKnownMarketplaces` | Take out of `env` `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `ENABLE_TOOL_SEARCH` and `ENABLE_CLAUDEAI_MCP_SERVERS`. The `settings.json.bak-<time>` copies are the file before a run of the script: putting one back also undoes every later change. |
+| `~/.claude/settings.json`, on each machine with Claude Code | The `env` keys of step 3, and `cliproxy-kit` under `extraKnownMarketplaces` | Take `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `ENABLE_TOOL_SEARCH` and `ENABLE_CLAUDEAI_MCP_SERVERS` out of `env`, and `cliproxy-kit` out of `extraKnownMarketplaces`. A `settings.json.bak-<time>` copy is the file before one run of the script: putting it back also undoes every later change. |
 | Claude Code's plugins | The `cliproxy-kit` marketplace and `quota-band` | `claude plugin uninstall quota-band@cliproxy-kit`, then `claude plugin marketplace remove cliproxy-kit` |
 | `~/.cache/cliproxy-kit/handoff/`, beside the band | The notes handoffs wrote | Delete the folder. |
 | `~/.codex/config.toml` (optional) | The model provider of step 4 and the hooks of step 5 | Remove them. |
