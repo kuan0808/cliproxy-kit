@@ -25,6 +25,7 @@ hang may come from one stuck connection, which a hang that ends at the connectio
 the retry gets another (one that ends with a late status may reuse it). A wait shows in the band and as
 Claude Code's own `API error · Retrying` line. Nothing cuts a hang's retry short if it hangs too:
 through a proxy Claude Code has no first-byte limit, only its request timeout (`API_TIMEOUT_MS`, 10
-minutes), so the band counts the retry's seconds and offers `switch to k•••`, which moves the session
-and stops the waiting turn at once, so the next message goes there (ADR-0005); Esc during that retry,
-then sending again, also moves the session on.
+minutes), so the band counts the retry's seconds and offers `switch to k•••`
+([ADR-0005](0005-switch-now-stops-the-waiting-turn.md)). The
+[band's press contract](../architecture.md#quota-band) defines when the switch stops the waiting
+turn. Esc during that retry, then sending again, also moves the session on.

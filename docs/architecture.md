@@ -744,9 +744,10 @@ that changes any of this fails that test:
   stream dropped after its text is a 408 with no tokens and an early `ttft`; a 504 after silence has
   its `ttft` at the 504; a connection dropped after silence has none.
 - Request-retry rounds have no time limit: a connection lost 135 s into an attempt still leads to a
-  round that offers A at once (`TestAHangsRetryRunsInsideTheSameRequest`), and the Claude handler
-  writes no response headers before the first chunk, so the client sees a hang and its retry as one
-  response (`TestTheClaudeHandlerWritesNoHeadersBeforeTheFirstChunk`).
+  round that offers A at once (`TestAHangsRetryRunsInsideTheSameRequest`). With the default
+  streaming settings the Claude handler writes no response headers before the first chunk, so the
+  client sees a hang and its retry as one response
+  (`TestTheClaudeHandlerWritesNoHeadersBeforeTheFirstChunk`).
 - With keep-alives before the first token (`streaming.keepalive-seconds` above 0 and
   `send-keepalive-before-ft: true`, both off by default) the first keep-alive sends the headers:
   the client gets HTTP 200 then, a retry on A inside the request is still one response, and a

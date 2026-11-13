@@ -92,9 +92,9 @@ its page is under **Plugins**.
   zip for your system (`darwin_arm64` for Apple silicon, `linux_amd64` for most servers) in
   CLIProxyAPI's plugin folder (`plugins.dir`), set `plugins.configs.quota-pilot.enabled: true` and
   restart CLIProxyAPI.
-- **From source** (Go 1.26, Bun, a C compiler): `scripts/install-plugin.sh` builds, tests and installs
-  it, restarts the proxy when Homebrew or systemd runs it, and checks the proxy runs this build. For
-  another setup, say where and how:
+- **From source:** requires Go as specified in [`plugin/go.mod`](plugin/go.mod), Bun and a C compiler.
+  `scripts/install-plugin.sh` builds, tests and installs it, restarts the proxy when Homebrew or
+  systemd runs it, and checks the proxy runs this build. For another setup, say where and how:
   `CPA_PLUGINS_DIR=/path/to/plugins CPA_RESTART_CMD="docker restart cliproxyapi" scripts/install-plugin.sh`.
 
 </details>
