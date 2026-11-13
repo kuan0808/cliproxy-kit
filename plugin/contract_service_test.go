@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -156,6 +157,10 @@ func (r *recorder) HandleUsage(_ context.Context, record cliusage.Record) {
 	r.mu.Unlock()
 }
 
+// harnessStreaming, when set before the shared proxy starts, is its `streaming` settings: the
+// keep-alives before the first token, which only a run of TestARealClientAgainstTheHarness turns on.
+var harnessStreaming map[string]any
+
 // sharedProxy is the one proxy the tests share, started by the first test that needs it and
 // stopped by TestMain.
 var sharedProxy struct {
@@ -191,7 +196,7 @@ func startSharedProxy() error {
 	seed := func(name string) []map[string]any {
 		return []map[string]any{{"api-key": "sk-seed", "base-url": "http://127.0.0.1:9/" + name}}
 	}
-	raw, err := yaml.Marshal(map[string]any{
+	config := map[string]any{
 		"host":               "127.0.0.1",
 		"port":               port,
 		"auth-dir":           filepath.Join(dir, "auths"),
@@ -204,7 +209,11 @@ func startSharedProxy() error {
 			"devin-catalog": filepath.Join(dir, "none.json")},
 		"claude-api-key": seed("seed-claude"),
 		"codex-api-key":  seed("seed-codex"),
-	})
+	}
+	if harnessStreaming != nil {
+		config["streaming"] = harnessStreaming
+	}
+	raw, err := yaml.Marshal(config)
 	if err != nil {
 		return err
 	}
@@ -518,5 +527,130 @@ func TestAClientCancelRecords499WithItsWait(t *testing.T) {
 				t.Fatalf("record failed %v, status %d, latency %v, ttft %v", r.Failed, r.Fail.StatusCode, r.Latency, r.TTFT)
 			}
 		})
+	}
+}
+
+// Fact 1 of the proxy contract, what a real Claude Code does with what the proxy answers: run by
+// hand, never in CI. The shared proxy listens on a local port with a stub upstream behind it, and
+// Claude Code is pointed at it from a throwaway config folder with contractKey, a made-up key, so
+// no account and no other proxy is reached (docs/architecture.md, "Upstream behaviour it relies
+// on"). One case per run, since a case may set the proxy's keep-alives before it starts:
+//
+//	QUOTA_PILOT_HARNESS=<dir> QUOTA_PILOT_HARNESS_CASE=<case> go test -run TestARealClientAgainstTheHarness -timeout 60m .
+//
+// decline: every pick is declined, so each request is answered 503 with the reason at once.
+// status-529: A answers 529 at once and is never cooled, every other pick is declined.
+// keepalive-529: keep-alives every second before the first token; A answers 529 after 2.5 s.
+// keepalive-dropped: the same, but A's connection drops after 2.5 s, with no retry round.
+//
+// It writes the proxy's URL to <dir>/url, appends each pick and upstream attempt to
+// <dir>/requests.jsonl as it comes, and serves until <dir>/stop exists.
+func TestARealClientAgainstTheHarness(t *testing.T) {
+	dir, which := os.Getenv("QUOTA_PILOT_HARNESS"), os.Getenv("QUOTA_PILOT_HARNESS_CASE")
+	if dir == "" {
+		t.Skip("run by hand: QUOTA_PILOT_HARNESS=<dir> QUOTA_PILOT_HARNESS_CASE=<case>")
+	}
+	type harnessCase struct {
+		retry     int
+		keepalive bool
+		fail      upstreamReply // A's every attempt; nil answers
+		decline   func(s *contractService) func(pluginapi.SchedulerPickRequest) pluginapi.SchedulerPickResponse
+	}
+	declineAll := func(*contractService) func(pluginapi.SchedulerPickRequest) pluginapi.SchedulerPickResponse {
+		return func(pluginapi.SchedulerPickRequest) pluginapi.SchedulerPickResponse {
+			return pluginapi.SchedulerPickResponse{Handled: true, Reject: true, RejectReason: declineReason}
+		}
+	}
+	keepA := func(s *contractService) func(pluginapi.SchedulerPickRequest) pluginapi.SchedulerPickResponse {
+		return s.declineWithoutA
+	}
+	overloaded := func(after time.Duration) upstreamReply {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(after)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(529)
+			_, _ = fmt.Fprint(w, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+		}
+	}
+	c, ok := map[string]harnessCase{
+		"decline":           {retry: 3, decline: declineAll},
+		"status-529":        {retry: 3, fail: overloaded(0), decline: keepA},
+		"keepalive-529":     {retry: 3, keepalive: true, fail: overloaded(2500 * time.Millisecond), decline: keepA},
+		"keepalive-dropped": {retry: 0, keepalive: true, fail: dropped(2500 * time.Millisecond), decline: keepA},
+	}[which]
+	if !ok {
+		t.Fatalf("unknown case %q", which)
+	}
+	if c.keepalive {
+		if sharedProxy.url != "" {
+			t.Fatal("the shared proxy started before this case could set its keep-alives: run this test alone")
+		}
+		harnessStreaming = map[string]any{"keepalive-seconds": 1, "send-keepalive-before-ft": true}
+	}
+	var mu sync.Mutex
+	log, err := os.OpenFile(filepath.Join(dir, "requests.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	note := func(fields map[string]any) {
+		fields["at"] = time.Now().Format(time.RFC3339Nano)
+		line, _ := json.Marshal(fields)
+		mu.Lock()
+		defer mu.Unlock()
+		_, _ = log.Write(append(line, '\n'))
+	}
+	s := startContractService(t, c.retry, nil)
+	// A is never cooled, so each new request offers it again, as for a failure the proxy does not
+	// cool; the upstream answers as the case says, and counts tokens for whoever asks.
+	a, _ := s.manager.GetByID(s.id("A"))
+	a.Metadata = map[string]any{"disable_cooling": true}
+	if _, err := s.manager.Update(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	upstream := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		account := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")[0]
+		note(map[string]any{"what": "upstream", "account": account, "path": r.URL.Path})
+		switch {
+		case strings.Contains(r.URL.Path, "count_tokens"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"input_tokens":10}`)
+		case account == "A" && c.fail != nil:
+			c.fail(w, r)
+		default:
+			answer(w, r)
+		}
+	})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go upstream.Serve(listener)
+	defer upstream.Close()
+	for _, name := range []string{"A", "B", "C"} {
+		auth, _ := s.manager.GetByID(s.id(name))
+		auth.Attributes["base_url"] = "http://" + listener.Addr().String() + "/" + name
+		if _, err := s.manager.Update(context.Background(), auth); err != nil {
+			t.Fatal(err)
+		}
+	}
+	answerPick := c.decline(s)
+	s.scheduler.answer = func(req pluginapi.SchedulerPickRequest) pluginapi.SchedulerPickResponse {
+		resp := answerPick(req)
+		picked := s.names[resp.AuthID]
+		if resp.Reject {
+			picked = "declined"
+		}
+		note(map[string]any{"what": "pick", "model": req.Model, "offered": s.offered(req), "answer": picked})
+		return resp
+	}
+	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(s.url+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("serving %s case %s at %s; touch %s to stop", dir, which, s.url, filepath.Join(dir, "stop"))
+	for deadline := time.Now().Add(55 * time.Minute); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(dir, "stop")); err == nil {
+			return
+		}
 	}
 }

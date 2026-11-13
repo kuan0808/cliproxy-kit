@@ -291,6 +291,7 @@ type contractSetup struct {
 	aliases               map[string][]sdkconfig.OAuthModelAlias
 	firstChunkAfter       time.Duration
 	records               bool // publish each attempt's usage record to `records`
+	streaming             sdkconfig.StreamingConfig
 }
 
 // contractProxy is the proxy's account manager and API handlers with the stubs in place.
@@ -383,7 +384,7 @@ func newContractProxy(t *testing.T, s contractSetup) *contractProxy {
 			registry.UnregisterClient(a.id)
 		}
 	})
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, m)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{Streaming: s.streaming}, m)
 	base.SetPluginHost(p.hooks)
 	base.SetModelRouterHost(p.hooks)
 	p.messages = claude.NewClaudeCodeAPIHandler(base)
@@ -843,28 +844,31 @@ func TestAHangsRetryRunsInsideTheSameRequest(t *testing.T) {
 	})
 }
 
+// stream sends one streaming Claude Code request over HTTP and returns the response once its
+// headers came, and how long they took.
+func stream(t *testing.T, p *contractProxy) (*http.Response, time.Duration) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.POST("/v1/messages", p.messages.ClaudeMessages)
+	server := httptest.NewServer(engine)
+	t.Cleanup(server.Close)
+	body := fmt.Sprintf(`{"model":%q,"max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, contractModel)
+	start := time.Now()
+	resp, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp, time.Since(start)
+}
+
 // Point 9: the Claude handler writes no response headers before the first chunk, so the client
 // sees a hang and its retry as one request.
 func TestTheClaudeHandlerWritesNoHeadersBeforeTheFirstChunk(t *testing.T) {
-	stream := func(p *contractProxy) (*http.Response, time.Duration) {
-		t.Helper()
-		gin.SetMode(gin.TestMode)
-		engine := gin.New()
-		engine.POST("/v1/messages", p.messages.ClaudeMessages)
-		server := httptest.NewServer(engine)
-		t.Cleanup(server.Close)
-		body := fmt.Sprintf(`{"model":%q,"max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, contractModel)
-		start := time.Now()
-		resp, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { resp.Body.Close() })
-		return resp, time.Since(start)
-	}
 	t.Run("the headers wait for the first chunk", func(t *testing.T) {
 		p := newContractProxy(t, contractSetup{retry: 3, firstChunkAfter: 300 * time.Millisecond})
-		resp, wait := stream(p)
+		resp, wait := stream(t, p)
 		if resp.StatusCode != http.StatusOK || wait < 300*time.Millisecond {
 			t.Fatalf("headers %d after %v, before the first chunk at 300ms", resp.StatusCode, wait)
 		}
@@ -872,10 +876,46 @@ func TestTheClaudeHandlerWritesNoHeadersBeforeTheFirstChunk(t *testing.T) {
 	t.Run("a stream lost before its first chunk and retried on A is one response", func(t *testing.T) {
 		p := newContractProxy(t, contractSetup{retry: 3, answer: declineWithoutA,
 			script: map[string][]attempt{"A": {{after: 200 * time.Millisecond, err: errEOF}}}})
-		resp, _ := stream(p)
+		resp, _ := stream(t, p)
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"by":"A"`) || !slices.Equal(p.claude.accounts(), []string{"A", "A"}) {
 			t.Fatalf("got %d %s, attempts %v", resp.StatusCode, body, p.claude.accounts())
+		}
+	})
+}
+
+// With keep-alives before the first token (`streaming.keepalive-seconds` above 0 and
+// `send-keepalive-before-ft`, both off by default), the first keep-alive sends the response's
+// headers: the client gets HTTP 200 at once, and a failure that comes later reaches it as an
+// `event: error` in the stream, not as a status. A retry on A inside the request is still one
+// response.
+func TestAfterKeepAlivesAFailureReachesTheClientAsAnEventUnder200(t *testing.T) {
+	keepalive := sdkconfig.StreamingConfig{KeepAliveSeconds: 1, SendKeepAliveBeforeFT: true}
+	t.Run("a 529 after the first keep-alive is an overloaded_error event", func(t *testing.T) {
+		p := newContractProxy(t, contractSetup{retry: 3, answer: declineWithoutA, streaming: keepalive,
+			script: map[string][]attempt{"A": {{after: 1500 * time.Millisecond, err: status(529)}}}})
+		resp, wait := stream(t, p)
+		body, _ := io.ReadAll(resp.Body)
+		events := strings.Split(strings.TrimSpace(string(body)), "\n\n")
+		if resp.StatusCode != http.StatusOK || wait > 1200*time.Millisecond {
+			t.Fatalf("headers %d after %v, want 200 at the first keep-alive", resp.StatusCode, wait)
+		}
+		if events[0] != ": keep-alive" || !strings.HasPrefix(events[len(events)-1], "event: error\ndata: ") ||
+			!strings.Contains(events[len(events)-1], `"type":"overloaded_error"`) {
+			t.Fatalf("stream %q", body)
+		}
+		if !slices.Equal(p.scheduler.offers(), []string{"ABC", "BC"}) || !slices.Equal(p.claude.accounts(), []string{"A"}) {
+			t.Fatalf("picks %v, attempts %v", p.scheduler.offers(), p.claude.accounts())
+		}
+	})
+	t.Run("a connection lost after the first keep-alive and retried on A is one response", func(t *testing.T) {
+		p := newContractProxy(t, contractSetup{retry: 3, answer: declineWithoutA, streaming: keepalive,
+			script: map[string][]attempt{"A": {{after: 1500 * time.Millisecond, err: errEOF}}}})
+		resp, _ := stream(t, p)
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK || !strings.HasPrefix(string(body), ": keep-alive") ||
+			!strings.Contains(string(body), `"by":"A"`) || !slices.Equal(p.claude.accounts(), []string{"A", "A"}) {
+			t.Fatalf("got %d %q, attempts %v", resp.StatusCode, body, p.claude.accounts())
 		}
 	})
 }
