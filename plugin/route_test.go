@@ -90,6 +90,101 @@ func TestThreadContinuationsCreateFallbackRoutes(t *testing.T) {
 	}
 }
 
+func TestInterceptRefreshesBoundContinuations(t *testing.T) {
+	savedState, savedHost := state, callHost
+	defer func() { state, callHost = savedState, savedHost }()
+	const model = "claude-opus-5-5"
+	for _, binding := range []string{"main", "child", "inherited"} {
+		for _, change := range []string{"disabled", "removed", "empty", "failed", "incomplete", "unchanged"} {
+			t.Run(binding+"/"+change, func(t *testing.T) {
+				now := time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
+				state = core.New("intercept-test", func() time.Time { return now })
+				state.UpdateInventory([]core.CredInfo{{ID: "a", Provider: "claude"}, {ID: "b", Provider: "claude"}})
+				state.Observe(core.Usage{Provider: "claude", Model: model, SessionID: "claude:s1", AuthID: "a", RequestedAt: now})
+				canonical, parent, owner := "claude:s1", "", "a"
+				if binding != "main" {
+					canonical, parent = "claude:s1:agent:child", "claude:s1"
+					if binding == "child" {
+						owner = "b"
+						state.Intercept(core.InterceptInput{Session: "s1", Format: "claude", Thread: "create", TraceID: "child"})
+						state.Observe(core.Usage{Provider: "claude", Model: model, SessionID: canonical, ParentID: parent,
+							AuthID: owner, TraceID: "child", RequestedAt: now})
+					}
+				}
+				files := []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "1", Provider: "claude"}, {ID: "b", AuthIndex: "2", Provider: "claude"}}
+				var calls int
+				callHost = func(method string, _ any) (json.RawMessage, error) {
+					if method != pluginabi.MethodHostAuthList {
+						t.Fatalf("unexpected host call %s", method)
+					}
+					calls++
+					if change == "failed" {
+						return nil, fmt.Errorf("inventory unavailable")
+					}
+					return json.Marshal(map[string]any{"files": files})
+				}
+				raw, err := json.Marshal(pluginapi.RequestInterceptRequest{SourceFormat: "claude", Model: model, RequestedModel: model,
+					Body: []byte(`{"thread":{"type":"continue"}}`), Metadata: map[string]any{"canonical_session_id": canonical, "parent_session_id": parent}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				run := func() pluginapi.RequestInterceptResponse {
+					t.Helper()
+					out, err := intercept(raw)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var env struct {
+						Result pluginapi.RequestInterceptResponse
+					}
+					if err := json.Unmarshal(out, &env); err != nil {
+						t.Fatal(err)
+					}
+					return env.Result
+				}
+				if d := run(); d.Terminate || calls != 0 {
+					t.Fatalf("fresh inventory: %+v, reads %d", d, calls)
+				}
+				switch change {
+				case "disabled":
+					for i := range files {
+						files[i].Disabled = files[i].ID == owner
+					}
+				case "removed":
+					for i, file := range files {
+						if file.ID == owner {
+							files = append(files[:i], files[i+1:]...)
+							break
+						}
+					}
+				case "empty":
+					files = nil
+				case "incomplete":
+					files[0].AuthIndex = ""
+				}
+				now = now.Add(6 * time.Second)
+				d := run()
+				replay := change == "disabled" || change == "removed" || change == "empty"
+				if d.Terminate != replay || calls != 1 {
+					t.Fatalf("%s inventory: %+v, reads %d, want replay %v", change, d, calls, replay)
+				}
+				if replay {
+					var body struct {
+						Error struct {
+							Details struct {
+								ErrorCode string `json:"error_code"`
+							} `json:"details"`
+						} `json:"error"`
+					}
+					if err := json.Unmarshal(d.ResponseBody, &body); err != nil || d.StatusCode != http.StatusBadRequest || body.Error.Details.ErrorCode != "thread_unsupported_request" {
+						t.Fatalf("stateless replay response: %+v, %s", d, d.ResponseBody)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestIdleRouteRefreshHasABoundedDeadline(t *testing.T) {
 	saved := state
 	savedPoll := pollTurn

@@ -8,6 +8,7 @@ package hostcontract
 // Claude Code sends the turn again without the thread, which goes where quota-pilot chooses.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // turn sends one streaming main turn of the session, with `thread` as the request's message thread
@@ -89,7 +92,7 @@ func switchTo(t *testing.T, session, name string) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(idOf(name)))
-	cmd, _ := json.Marshal(map[string]any{"command_id": "switch-" + session, "session": session, "boot_id": snap["boot_id"],
+	cmd, _ := json.Marshal(map[string]any{"command_id": "switch-" + session, "session": session, "boot_id": snap.BootID,
 		"created_at": time.Now().UTC().Format(time.RFC3339Nano), "action": "switch", "auth_id": hex.EncodeToString(sum[:8])})
 	req, _ := http.NewRequest(http.MethodGet, proxy.url+"/v0/resource/plugins/quota-pilot/band", nil)
 	req.Header.Set("Authorization", "Bearer "+clientKey)
@@ -137,6 +140,7 @@ func startThread(t *testing.T) (session, bound, message string) {
 	if status != http.StatusOK || id == "" || len(attempts) != 1 {
 		t.Fatalf("the thread's first turn: %d %s, attempts %v", status, body, attempts)
 	}
+	waitForUsage(t, session)
 	return session, attempts[0], id
 }
 
@@ -178,8 +182,7 @@ func TestAfterTheBoundAccountFailsAContinuationIsSentAgainWithoutItsThread(t *te
 	if attempts := proxy.upstream.take(); status != 529 || !slices.Equal(attempts, []string{bound}) {
 		t.Fatalf("the continuation that failed: %d %s, attempts %v", status, body, attempts)
 	}
-	// Its failure record reaches quota-pilot a moment after the attempt.
-	time.Sleep(300 * time.Millisecond)
+	waitForUsage(t, session)
 	status, body, _ = turn(t, session, continuing(id))
 	if attempts := proxy.upstream.take(); !threadUnsupported(status, body) || len(attempts) != 0 {
 		t.Fatalf("Claude Code's next try of the continuation: %d %s, attempts %v; want 400 thread_unsupported_request", status, body, attempts)
@@ -198,7 +201,7 @@ func TestAChildContinuationChecksItsOwnBindingBeforeAuth(t *testing.T) {
 	if attempts := proxy.upstream.take(); status != http.StatusOK || child == "" || !slices.Equal(attempts, []string{bound}) {
 		t.Fatalf("child thread: %d %s, attempts %v, want %s", status, body, attempts, bound)
 	}
-	time.Sleep(300 * time.Millisecond)
+	waitForUsage(t, session)
 	other := "B"
 	if bound == other {
 		other = "C"
@@ -208,7 +211,7 @@ func TestAChildContinuationChecksItsOwnBindingBeforeAuth(t *testing.T) {
 	if attempts := proxy.upstream.take(); status != http.StatusOK || parent == "" || !slices.Equal(attempts, []string{other}) {
 		t.Fatalf("parent's new thread: %d %s, attempts %v, want %s", status, body, attempts, other)
 	}
-	time.Sleep(300 * time.Millisecond)
+	waitForUsage(t, session)
 	proxy.upstream.fail(bound, func(w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(529)
@@ -218,7 +221,7 @@ func TestAChildContinuationChecksItsOwnBindingBeforeAuth(t *testing.T) {
 	if attempts := proxy.upstream.take(); status != 529 || !slices.Equal(attempts, []string{bound}) {
 		t.Fatalf("child's failure: %d %s, attempts %v", status, body, attempts)
 	}
-	time.Sleep(300 * time.Millisecond)
+	waitForUsage(t, session)
 	user, _ := json.Marshal(map[string]string{"session_id": session, "agent_id": "child", "parent_agent_id": "parent"})
 	for _, tc := range []struct {
 		name     string
@@ -245,4 +248,35 @@ func TestAChildContinuationChecksItsOwnBindingBeforeAuth(t *testing.T) {
 	if attempts := proxy.upstream.take(); status != http.StatusOK || len(attempts) != 1 || attempts[0] == bound {
 		t.Fatalf("child replay: %d %s, attempts %v, want another account than %s", status, body, attempts, bound)
 	}
+}
+
+func TestAContinuationOfADisabledThreadIsSentAgainWithoutItsThread(t *testing.T) {
+	for authID := range proxy.names {
+		proxy.manager.MarkResult(context.Background(), coreauth.Result{AuthID: authID, Provider: "claude", Model: model, Success: true})
+	}
+	session, bound, id := startThread(t)
+	time.Sleep(6 * time.Second)
+	auth, ok := proxy.manager.GetByID(idOf(bound))
+	if !ok {
+		t.Fatalf("thread account %s is missing", bound)
+	}
+	auth.Disabled = true
+	if _, err := proxy.manager.Update(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		auth.Disabled = false
+		if _, err := proxy.manager.Update(context.Background(), auth); err != nil {
+			t.Error(err)
+		}
+	})
+	status, body, _ := turn(t, session, continuing(id))
+	if attempts := proxy.upstream.take(); !threadUnsupported(status, body) || len(attempts) != 0 {
+		t.Fatalf("disabled thread continuation: %d %s, attempts %v; want 400 thread_unsupported_request before any attempt", status, body, attempts)
+	}
+	status, body, _ = turn(t, session, "")
+	if attempts := proxy.upstream.take(); status != http.StatusOK || len(attempts) != 1 || attempts[0] == bound {
+		t.Fatalf("the turn sent again: %d %s, attempts %v, want another account than %s", status, body, attempts, bound)
+	}
+	waitForUsage(t, session)
 }

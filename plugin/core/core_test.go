@@ -1671,6 +1671,74 @@ func TestAContinuationAfterASwitchIsSentAgainWithoutItsThread(t *testing.T) {
 	}
 }
 
+func TestBoundContinuationsRefreshInventory(t *testing.T) {
+	const model = "claude-opus-5-5"
+	for _, binding := range []string{"main", "child", "inherited"} {
+		for _, change := range []string{"disabled", "removed", "empty"} {
+			t.Run(binding+"/"+change, func(t *testing.T) {
+				s, c := newTestState()
+				list := []CredInfo{{ID: "claude-a", Provider: "claude"}, {ID: "claude-b", Provider: "claude"}}
+				s.UpdateInventory(list)
+				served(s, c, "claude:s1", "claude-a", true)
+				in := InterceptInput{Session: "s1", Format: "claude", Model: model, RequestedModel: model, Thread: "continue"}
+				bound := 0
+				if binding != "main" {
+					in.Canonical = "claude:s1:agent:child"
+					if binding == "child" {
+						served(s, c, in.Canonical, "claude-b", true)
+						bound = 1
+					}
+				}
+				c.add(5 * time.Second)
+				if s.NeedsThreadAccountList(in) || s.Intercept(in).Terminate {
+					t.Fatal("a healthy continuation reread a fresh list or was stopped")
+				}
+				c.add(time.Nanosecond)
+				if !s.NeedsThreadAccountList(in) {
+					t.Fatal("a bound continuation kept an old account list")
+				}
+				switch change {
+				case "disabled":
+					list[bound].Disabled = true
+				case "removed":
+					list = []CredInfo{list[1-bound]}
+				case "empty":
+					list = nil
+				}
+				s.UpdateInventory(list)
+				if s.NeedsThreadAccountList(in) {
+					t.Fatal("a continuation repeated a fresh inventory read")
+				}
+				if d := s.Intercept(in); !d.Terminate || d.ErrorCode != "thread_unsupported_request" {
+					t.Fatalf("continuation after %s: %+v", change, d)
+				}
+				in.Thread = ""
+				if s.NeedsThreadAccountList(in) || s.Intercept(in).Terminate {
+					t.Fatal("the stateless replay reread inventory or was stopped")
+				}
+			})
+		}
+	}
+}
+
+func TestOnlyBoundClaudeContinuationsRefreshInventory(t *testing.T) {
+	for _, request := range []InterceptInput{
+		{Session: "s1", Format: "claude", Thread: "create"},
+		{Session: "s1", Format: "claude"},
+		{Session: "s1", Format: "openai-response", Thread: "continue"},
+		{Format: "claude", Thread: "continue"},
+		{Session: "unbound", Format: "claude", Thread: "continue"},
+	} {
+		s, c := newTestState()
+		s.UpdateInventory(inventory)
+		served(s, c, "claude:s1", "claude-a", true)
+		c.add(6 * time.Second)
+		if s.NeedsThreadAccountList(request) {
+			t.Fatalf("unrelated request asked for inventory: %+v", request)
+		}
+	}
+}
+
 func TestALegacyMoveKeepsItsThreadOwnerUnknown(t *testing.T) {
 	const model = "claude-opus-5-5"
 	for _, kind := range []string{MoveUser, MoveLeftOut} {

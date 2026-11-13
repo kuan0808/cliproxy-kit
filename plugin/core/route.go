@@ -318,6 +318,16 @@ type InterceptDecision struct {
 // thread and keep the session stateless on that model.
 const threadUnsupported = "thread_unsupported_request"
 
+func (s *State) NeedsThreadAccountList(in InterceptInput) bool {
+	if in.Format != "claude" || in.Thread != "continue" || in.Session == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, b := s.boundLocked([]string{"claude"}, in.Canonical, rootFromRaw(in.Session))
+	return b != nil && s.now().Sub(s.inventoryAt) > inventoryAge
+}
+
 // Intercept runs after the route decision and before credential selection. A request routed to
 // another model must send its whole history, because a message thread keeps the model and the
 // provider it began on; and a routed request that could not be sent there is stopped rather than

@@ -588,7 +588,7 @@ func intercept(raw []byte) ([]byte, error) {
 			sessionID = core.RawSession(core.RootSession(canonical, parent))
 		}
 	}
-	d := state.Intercept(core.InterceptInput{
+	in := core.InterceptInput{
 		Session:        sessionID,
 		Canonical:      canonical,
 		TraceID:        req.TraceID,
@@ -600,7 +600,13 @@ func intercept(raw []byte) ([]byte, error) {
 		Tier:           askedTier(req.SourceFormat, req.Body),
 		Remote:         otherDevice(req.Headers) != "",
 		Path:           pathOf(req.Metadata),
-	})
+	}
+	if state.NeedsThreadAccountList(in) {
+		if infos, ok := readInventory(); ok {
+			state.UpdateInventory(infos)
+		}
+	}
+	d := state.Intercept(in)
 	if !d.Terminate {
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}

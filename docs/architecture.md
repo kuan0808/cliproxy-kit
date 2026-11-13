@@ -144,9 +144,11 @@ because an older binding recorded a switch or move without the thread's account,
 account should not take it (a failure there since its last success, a retry waiting, a `hung` mark,
 an account resting, used up, disabled or removed). An idle session on a low account also sends again
 without its thread when the existing idle-move rule has a known eligible, ready alternative. The
-check uses the child's own binding for a subagent with its own thread, else its parent's. The turn
-sent again goes where quota-pilot chooses, and that session then runs without a server-side thread
-on that model, as on a route.
+check uses the child's own binding for a subagent with its own thread, else its parent's. Before
+that check, a bound Claude continuation rereads the host inventory when it is over five seconds
+old, using the retry episode's account-list age. A failed read leaves the held inventory in use.
+The turn sent again goes where quota-pilot chooses, and that session then runs without a server-side
+thread on that model, as on a route.
 
 **Switch now.** While a turn waits (the band's hang watch, waiting and running rows), the band
 offers `switch to k•••`, k••• being the account a failover would take now (the snapshot's

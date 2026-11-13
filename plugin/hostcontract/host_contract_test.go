@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kuan0808/cliproxy-kit/plugin/core"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -41,15 +42,17 @@ const (
 // upstream serves each account at its own path prefix: the next reply scripted for it, else a
 // whole, quick answer. It keeps the account of every attempt, in order.
 type upstream struct {
-	mu       sync.Mutex
-	script   map[string][]func(http.ResponseWriter)
-	attempts []string
+	mu        sync.Mutex
+	script    map[string][]func(http.ResponseWriter)
+	attempts  []string
+	attemptAt time.Time
 }
 
 func (u *upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	account := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")[0]
 	u.mu.Lock()
 	u.attempts = append(u.attempts, account)
+	u.attemptAt = time.Now()
 	// Each answer's message id names the account and the attempt, as a thread continuation names
 	// the message it continues.
 	id := fmt.Sprintf("msg_%s_%d", account, len(u.attempts))
@@ -75,6 +78,25 @@ func (u *upstream) take() []string {
 	out := u.attempts
 	u.attempts = nil
 	return out
+}
+
+func waitForUsage(t *testing.T, session string) {
+	t.Helper()
+	proxy.upstream.mu.Lock()
+	at := proxy.upstream.attemptAt
+	proxy.upstream.mu.Unlock()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		snap, err := band(session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := snap.Sessions[session]; v != nil && v.AuthID != "" && v.LastSeen.After(at) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("usage after upstream attempt at %s not delivered: %+v", at, snap.Sessions[session])
+		}
+	}
 }
 
 func answer(w http.ResponseWriter, id string) {
@@ -255,32 +277,42 @@ func waitForPlugin() error {
 		req, _ := http.NewRequest(http.MethodPost, proxy.url+"/v1/messages", strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+clientKey)
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Claude-Code-Session-Id", "00000000-0000-4000-8000-000000000000")
 		if resp, err := http.DefaultClient.Do(req); err == nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 		}
-		if _, err := band("probe"); err == nil {
-			return nil
+		if snap, err := band("probe"); err == nil && snap.Providers["claude"] != nil {
+			listed := 0
+			for _, cred := range snap.Providers["claude"].Credentials {
+				if cred.Index != "" {
+					listed++
+				}
+			}
+			if listed == len(proxy.names) {
+				return nil
+			}
 		}
 	}
-	return errors.New("quota-pilot did not answer: the host did not load it")
+	return errors.New("quota-pilot did not publish the host inventory")
 }
 
 // band reads quota-pilot's snapshot for the session, as the band does.
-func band(session string) (map[string]any, error) {
+func band(session string) (core.Snapshot, error) {
 	req, _ := http.NewRequest(http.MethodGet, proxy.url+"/v0/resource/plugins/quota-pilot/band", nil)
 	req.Header.Set("Authorization", "Bearer "+clientKey)
 	req.Header.Set("X-Band-Session", session)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return core.Snapshot{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("band: HTTP %d", resp.StatusCode)
+		return core.Snapshot{}, fmt.Errorf("band: HTTP %d", resp.StatusCode)
 	}
-	var snap map[string]any
-	return snap, json.NewDecoder(resp.Body).Decode(&snap)
+	var snap core.Snapshot
+	err = json.NewDecoder(resp.Body).Decode(&snap)
+	return snap, err
 }
 
 // post sends one streaming main turn of the Claude Code session (a main turn carries tools) and
@@ -299,6 +331,7 @@ func post(t *testing.T, session string) (int, string) {
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
+	waitForUsage(t, session)
 	return resp.StatusCode, string(out)
 }
 
@@ -306,28 +339,17 @@ func post(t *testing.T, session string) (int, string) {
 // the band names accounts by an opaque id, and lists each with the proxy's index.
 func boundIndex(t *testing.T, session string) string {
 	t.Helper()
-	var snap struct {
-		Providers map[string]struct {
-			Credentials []struct {
-				ID        string `json:"id"`
-				AuthIndex string `json:"auth_index"`
-			} `json:"credentials"`
-		} `json:"providers"`
-		Sessions map[string]struct {
-			AuthID string `json:"auth_id"`
-		} `json:"sessions"`
-	}
-	doc, err := band(session)
+	snap, err := band(session)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(doc)
-	if err := json.Unmarshal(raw, &snap); err != nil {
-		t.Fatal(err)
+	v := snap.Sessions[session]
+	if v == nil {
+		return ""
 	}
 	for _, c := range snap.Providers["claude"].Credentials {
-		if id := snap.Sessions[session].AuthID; id != "" && c.ID == id {
-			return c.AuthIndex
+		if id := v.AuthID; id != "" && c.ID == id {
+			return c.Index
 		}
 	}
 	return ""
