@@ -270,9 +270,13 @@ export function nextUp(view: SnapProvider, current: string, now: number, session
   // When the window that stops each account resets: the plugin knows which one it is.
   const back = others
     .map(c => {
-      const week = session?.blocked?.includes(c.id) ? weeklyFor(c, session.model) : undefined
-      const reset = week && week.remaining <= 0 ? Date.parse(week.reset_at ?? '') : 0
-      return { c, t: Math.max(Date.parse(c.back_at ?? '') || 0, reset || 0) }
+      const own = session && modelBucket(session.model)
+      const resets = session?.blocked?.includes(c.id)
+        ? c.windows
+          .filter(w => w.remaining <= 0 && (w.kind === '5h' || w.kind === '7d' || (own && w.kind === own)))
+          .map(w => Date.parse(w.reset_at ?? '') || 0)
+        : []
+      return { c, t: Math.max(Date.parse(c.back_at ?? '') || 0, ...resets) }
     })
     .filter(x => x.t > now)
     .sort((a, b) => a.t - b.t)[0]

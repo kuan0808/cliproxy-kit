@@ -492,16 +492,20 @@ actually answers or fails, even after the deadline; reads without commands conti
 At most three HTTP calls per URL remain open, including command-bearing calls. When all three are unanswered, refreshes
 report the same deadline error without another fetch; a completed or failed call frees its slot
 for the next refresh. One or two unanswered calls do not hold up a newer read.
-Before a queued Switch now command is sent, its live module token must still name that press
-within its 5 s wait; dispatch state snapshots cannot revive a cancelled press.
-A timeout, content, a step or turn ending, or a clear or resume makes that queued press void.
+Switch now captures the live cancellation generation before any enqueue read. Both enqueue and
+dequeue require that generation unchanged, and dequeue requires the live token to name the press
+within its 5 s wait; dispatch state snapshots cannot revive a cancelled press. Keep waiting,
+acknowledgement, timeout, content, a step or turn ending, and clear or resume invalidate earlier
+enqueue work.
 The switch list leaves out accounts that cannot serve the session's model (the snapshot's `blocked`)
 and second credentials of an account; the Accounts tile's `next up` follows the same rule, and
 both give an account's use of the weekly window that limits the session's model. Before the proxy
 has seen the session, `next up` is the first ready account by the plain week. When no account is
 ready, an enabled alternative with a known reset still counts down even if it is `blocked`.
-A blocked account recovers at the later of `back_at` and the exhausted weekly window returned by
-`weeklyFor` for the session's model; an account not blocked keeps its `back_at` countdown.
+A blocked account recovers at the latest of `back_at` and all exhausted windows that apply to the
+session's model: `5h`, `7d`, and its own `7d_opus`, `7d_sonnet` or `7d_fable`. Simultaneous limits
+must all reset; another model's window does not hold it back. An account not blocked keeps its
+`back_at` countdown.
 
 After a main reply, the band confirms its route with a fresh `/band` read before recording the
 cache, waiting for it no longer than the read deadline. A failed read, one that gave up, or a

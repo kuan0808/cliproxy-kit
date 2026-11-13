@@ -270,6 +270,34 @@ describe('accounts', () => {
     expect(nextUp({ ...view, credentials: [d, kOut, x] }, 'claude-d', NOW)).toBe('next up: k••• 7% used')
   })
 
+  test('a blocked account waits for every exhausted applicable window and any later account recovery', () => {
+    const view = SNAP.providers.claude!
+    const [d, k] = view.credentials as [SnapCred, SnapCred]
+    for (const [model, own, other] of [
+      ['claude-fable-5-2', '7d_fable', '7d_opus'],
+      ['claude-opus-5-5', '7d_opus', '7d_sonnet'],
+      ['claude-sonnet-5-5', '7d_sonnet', '7d_fable'],
+    ] as const) {
+      for (const latest of ['5h', '7d', own]) {
+        const windows = ['5h', '7d', own].map(kind => ({
+          kind, label: kind, remaining: 0, reset_at: iso((kind === latest ? 50 : 1) * H), observed_at: iso(0), stale: false,
+        }))
+        windows.push({ kind: other, label: other, remaining: 0, reset_at: iso(200 * H), observed_at: iso(0), stale: false })
+        const c = { ...k, tier: 3, back_at: iso(H), windows }
+        const session = { model, blocked: ['claude-k'] }
+        expect(nextUp({ ...view, credentials: [d, c] }, 'claude-d', NOW, session)).toBe('k••• back in 2d 2h')
+        expect(nextUp({ ...view, credentials: [d, { ...c, back_at: iso(60 * H) }] }, 'claude-d', NOW, session)).toBe('k••• back in 2d 12h')
+        expect(nextUp({ ...view, credentials: [d, c] }, 'claude-d', NOW, { ...session, blocked: [] })).toBe('k••• back in 1h')
+      }
+    }
+    const c = { ...k, tier: 3, windows: [
+      { kind: '5h', label: '5-hour', remaining: 0, reset_at: iso(2 * H), observed_at: iso(0), stale: false },
+      { kind: '7d', label: 'Weekly', remaining: 0.5, reset_at: iso(98 * H), observed_at: iso(0), stale: false },
+      { kind: '7d_fable', label: 'Weekly Fable', remaining: 0, reset_at: iso(50 * H), observed_at: iso(0), stale: false },
+    ] }
+    expect(nextUp({ ...view, credentials: [d, c] }, 'claude-d', NOW, { model: 'gpt-6-sol', blocked: ['claude-k'] })).toBe('k••• back in 2h')
+  })
+
   test('a second credential of one account adds no quota to the pool, and is not another account', async () => {
     const [d] = SNAP.providers.claude!.credentials
     const view = { health: 'healthy', credentials: [d!, { ...d!, id: 'claude-d2', same_as: 'claude-d' }] }

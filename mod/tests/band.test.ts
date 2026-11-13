@@ -3018,6 +3018,86 @@ for (const cancellation of ['timeout', 'content', 'step end', 'turn completion',
   })
 }
 
+for (const [pauseAt, cancellation] of [
+  ['state read', 'content'],
+  ['clock read', 'content'],
+  ['state write', 'content'],
+  ['clock read', 'step end'],
+  ['clock read', 'turn completion'],
+  ['clock read', 'clear'],
+  ['clock read', 'resume'],
+  ['clock read', 'keep waiting'],
+  ['clock read', 'still valid'],
+] as const) {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`a Switch now enqueue paused at ${pauseAt} respects ${cancellation} on ${surface}`, async ($, on) => {
+      let pause = false
+      let paused = false
+      let release: () => void = () => undefined
+      const held = new Promise<void>(resolve => { release = resolve })
+      const wait = async () => {
+        pause = false
+        paused = true
+        await held
+      }
+      const steps = heldSteps(on)
+      const aborts = recordAborts(on)
+      const clock = stubSession(new Proxy(on, {
+        apply(target, receiver, args) {
+          if (args[0] === 'clock.now') {
+            const handler = args[1]
+            args[1] = async (...params: unknown[]) => {
+              const result = await handler(...params)
+              if (pause && pauseAt === 'clock read') await wait()
+              return result
+            }
+          }
+          return Reflect.apply(target, receiver, args)
+        },
+      }), SNAP)
+      on('state.get', async (_$, e, next) => {
+        const result = await next(e)
+        if (pause && pauseAt === 'state read' && e.plugin === 'quota-band' && e.key === 'cache') await wait()
+        return result
+      })
+      on('state.set', async (_$, e, next) => {
+        const result = await next(e)
+        if (pause && pauseAt === 'state write' && e.plugin === 'quota-band' && e.key === 'ui') await wait()
+        return result
+      })
+      on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+      await $.session.start({ cwd: SESSION.cwd, surface, isInteractive: true } as never)
+      if (cancellation === 'keep waiting') {
+        steps.usage = promptOf(160)
+        await reply($)
+      }
+      const { step } = await waitingOn($, clock, steps, 'enqueue-press')
+      const ui = await $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, true) })
+      if (cancellation === 'keep waiting') await ui.press({ key: 'switch-now' })
+      pause = true
+      const pressing = ui.press({ key: 'switch-now' })
+      await clock.settle()
+      expect(paused).toBe(true)
+      if (cancellation === 'content') {
+        steps.then = [TEXT]
+        expect((await step.next()).value).toEqual(TEXT)
+      } else if (cancellation === 'step end') await step.return(undefined as never)
+      else if (cancellation === 'turn completion') await $.turn.complete({ turnId: 'enqueue-press', answer: '', durationMs: 1, isAborted: false, reason: 'error' } as never)
+      else if (cancellation === 'clear' || cancellation === 'resume') await $.session.end({ reason: cancellation, sessionId: SESSION.id } as never)
+      else if (cancellation === 'keep waiting') await ui.press({ key: 'keep-waiting' })
+      release()
+      await pressing
+      await clock.settle()
+      await clock.advance(2_000)
+      expect(commands).toHaveLength(cancellation === 'still valid' ? 1 : 0)
+      expect(aborts).toEqual([])
+      if (cancellation !== 'still valid') expect(await liveText($, 200, surface, 'notice')).not.toMatch(/Switch to k•••…/)
+      await ui.unmount()
+      await step.return(undefined as never)
+    })
+  }
+}
+
 for (const [first, second] of [['switch', 'route'], ['route', 'unroute'], ['unroute', 'switch']] as const) {
   for (const outcome of ['answered', 'failed'] as const) {
     test(`a timed-out ${first} cannot be overtaken by ${second} until its request ${outcome}, while reads and steps go on`, async ($, on) => {

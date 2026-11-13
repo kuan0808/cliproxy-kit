@@ -83,7 +83,13 @@ let holdGen = 0
 const isOn = (feature: keyof Auto) => autoState(feature, settings, mine, unattended).on
 
 /** Patch the band's UI state; typed so literal fields keep their union types. */
-const setUi = ($: $T, patch: Partial<UiState>) => update($, uiA, (u: UiState): UiState => ({ ...u, ...patch }))
+const setUi = ($: $T, patch: Partial<UiState>) => {
+  if (patch.press === null) {
+    pressGeneration++
+    sendingPress = null
+  }
+  return update($, uiA, (u: UiState): UiState => ({ ...u, ...patch }))
+}
 
 const kitPath = (home: string, rest: string) => `${home}/.cache/cliproxy-kit/${rest}`
 
@@ -153,7 +159,8 @@ let waitingFull = false
 // sendCommand): plugin resources are read-only routes.
 const outbox: { command_id: string; session: string; waited_ms?: number }[] = []
 let commandInFlight = false
-let sendingPress: Press | null = null
+let pressGeneration = 0
+let sendingPress: { press: Press; generation: number } | null = null
 // The base URL whose /band has answered with a snapshot: quota-pilot is there. Only it is told
 // what the session is about (refreshOnce).
 let answeredBy = ''
@@ -240,7 +247,7 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
       while (outbox.length) {
         const next = outbox.shift()!
         if (next.session !== id) continue
-        if (next.waited_ms !== undefined && (sendingPress?.id !== next.command_id || at - sendingPress.sentAt >= PRESS_WAIT_MS)) continue
+        if (next.waited_ms !== undefined && (sendingPress?.press.id !== next.command_id || sendingPress.generation !== pressGeneration || at - sendingPress.press.sentAt >= PRESS_WAIT_MS)) continue
         command = next
         break
       }
@@ -444,7 +451,8 @@ async function settlePress($: $T, snap: Snap | null, now: number): Promise<void>
   let stopping = false
   await update($, uiA, (u: UiState): UiState => {
     if (u.press?.id !== press.id || u.press.stage !== 'sending') return u
-    if (sendingPress?.id === press.id) sendingPress = null
+    pressGeneration++
+    if (sendingPress?.press.id === press.id) sendingPress = null
     stopping = ack.status === 'applied'
     return { ...u, press: stopping ? { ...u.press, stage: 'stopping', abortAt: now, switchAt: ack.at } : null }
   })
@@ -460,6 +468,7 @@ async function settlePress($: $T, snap: Snap | null, now: number): Promise<void>
  * press is under way). It goes void too when no acknowledgement comes within 5 s.
  */
 async function sendPress($: $T, op: Press): Promise<void> {
+  const gen = pressGeneration
   const [sess, snap, bandError, cache, live] = await Promise.all([read($, sessA), read($, snapA), read($, bandErrorA), read($, cacheA), read($, liveA)])
   if (!snap || bandError || live.step?.turnId !== op.turnId || live.step.index !== op.index) return
   const id = crypto.randomUUID()
@@ -472,19 +481,23 @@ async function sendPress($: $T, op: Press): Promise<void> {
   const chosen = movedKey(cache, op.to)
   let sent = false
   await update($, uiA, (u: UiState): UiState => {
-    sent = !u.press || (u.press.stage === 'asking' && u.press.turnId === op.turnId && u.press.index === op.index)
+    sent = gen === pressGeneration && (!u.press || (u.press.stage === 'asking' && u.press.turnId === op.turnId && u.press.index === op.index))
     if (!sent) return u
-    sendingPress = { ...op, id, stage: 'sending', sentAt: at }
+    const press: Press = { ...op, id, stage: 'sending', sentAt: at }
+    sendingPress = { press, generation: gen }
     return {
       ...u, confirm: '', switchStep: '', move: null, coldOk: chosen, coldDismissed: chosen,
-      press: sendingPress,
+      press,
       pending: [...u.pending, { id, text: W.switchTo(op.label), boot: snap.boot_id, at, press: op.label }],
     }
   })
-  if (!sent) return
+  if (!sent || gen !== pressGeneration) return
   outbox.push(doc)
   $.clock.after(PRESS_WAIT_MS, async () => {
-    if (sendingPress?.id === id) sendingPress = null
+    if (sendingPress?.press.id === id) {
+      pressGeneration++
+      sendingPress = null
+    }
     const now = await $.clock.now()
     const text = W.pressUnanswered
     await update($, uiA, (u: UiState): UiState => (u.press?.id === id && u.press.stage === 'sending'
@@ -497,8 +510,10 @@ async function sendPress($: $T, op: Press): Promise<void> {
 
 /** A press asking or sending goes void, with nothing more done, at an event of its step or turn. */
 async function voidPress($: $T, mine: (p: Press) => boolean): Promise<void> {
-  if (sendingPress && mine(sendingPress)) sendingPress = null
-  if (!(await read($, uiA)).press) return
+  if (!sendingPress || mine(sendingPress.press)) {
+    pressGeneration++
+    sendingPress = null
+  }
   await update($, uiA, (u: UiState): UiState => (u.press && u.press.stage !== 'stopping' && mine(u.press) ? { ...u, press: null } : u))
 }
 
@@ -507,8 +522,10 @@ async function voidPress($: $T, mine: (p: Press) => boolean): Promise<void> {
  * what came of it, `aborted` meaning the turn stopped, any other reason that it ended by itself.
  */
 async function endPress($: $T, turnId: string, reason: string): Promise<void> {
-  if (sendingPress?.turnId === turnId) sendingPress = null
-  if ((await read($, uiA)).press?.turnId !== turnId) return
+  if (!sendingPress || sendingPress.press.turnId === turnId) {
+    pressGeneration++
+    sendingPress = null
+  }
   await update($, uiA, (u: UiState): UiState => {
     const p = u.press
     if (p?.turnId !== turnId) return u
@@ -1104,6 +1121,7 @@ export const register: Register = (on, options) => {
     // After a clear or a resume the process goes on with another conversation: a handoff's
     // notice and the move it leaves for the new one stay.
     if (e.reason === 'clear' || e.reason === 'resume') {
+      pressGeneration++
       sendingPress = null
       // Another conversation taken up in this window starts from the defaults; a /clear, the
       // handoff's too, goes on with the work and keeps the choice.
