@@ -1139,6 +1139,9 @@ func (s *State) movedLocked(provider, canonical, root, from, to, model, reason, 
 	sess.GenerationAt = now
 }
 
+// threadAuth is the account the binding's message thread lives on: the one it last answered on.
+// A binding kept by an older quota-pilot recorded none: one that came by a switch or a move has an
+// unknown owner (""), any other its own account.
 func (b *Binding) threadAuth() string {
 	if b == nil {
 		return ""
@@ -1177,6 +1180,8 @@ func (s *State) threadStaysLocked(canonical, root, model string, now time.Time) 
 	return true
 }
 
+// canTakeLocked tells whether an account can take a session's model now, by evidence only: held,
+// enabled, not used up for it, and listed by a pick for that model since it last failed.
 func (s *State) canTakeLocked(id, model string, now time.Time) bool {
 	c := s.creds[id]
 	if c == nil || c.Disabled || c.health.resting(now) || s.classifyLocked(c, model, now).Blocked {
