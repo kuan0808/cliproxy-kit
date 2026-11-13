@@ -34,7 +34,7 @@ import {
 } from './logic'
 import { accountsPart, quotaPane } from './pane'
 import { cellBar, terminalBand } from './terminal'
-import { PRESS_WAIT_MS, bandFacts, nextTurn, settingsRows, type BandInput, type Do, type Handoff, type SettingRow } from './view'
+import { PRESS_WAIT_MS, bandFacts, nextTurn, pressFor, settingsRows, type BandInput, type Do, type Handoff, type PressInput, type SettingRow } from './view'
 import { W } from './wording'
 
 const PANE = 'quota'
@@ -62,7 +62,14 @@ const modelsA = atom({ plugin: 'quota-band', key: 'models' } as const, [] as Mod
 const autoA = atom({ plugin: 'quota-band', key: 'auto' } as const, { holdCold: null, keepWarm: null } as Auto)
 const liveA = atom({ plugin: 'quota-band', key: 'live' } as const, { step: null, skew: 0 } as Live)
 
+const pressInput: Omit<PressInput, 'now'> = { snap: null, bandError: null, sess: EMPTY_SESSION, live: { step: null, skew: 0 } }
+
 type $T = EngineInterface
+
+const updateLive = ($: $T, change: (live: Live) => Live) => {
+  pressInput.live = change(pressInput.live)
+  return update($, liveA, () => pressInput.live)
+}
 
 /** The plugin's settings (its `userConfig`), as the module last loaded with them. */
 let settings: Settings = settingsOf({})
@@ -201,6 +208,7 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
     contextWindow: usage.context.window,
     rateLimits: usage.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: r.resetsAt })),
   }
+  pressInput.sess = next
   if (JSON.stringify(next) !== JSON.stringify(prev)) await update($, sessA, () => next)
   const ttlMs = cacheTtlMs(ttl, Boolean(authToken || apiKey))
   if ((await read($, cacheA)).ttlMs !== ttlMs) await update($, cacheA, c => ({ ...c, ttlMs }))
@@ -243,11 +251,17 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
     const bandUrl = `${url}/v0/resource/plugins/quota-pilot/band`
     let command: (typeof outbox)[number] | undefined
     if (!commandInFlight && (fetchesInFlight.get(bandUrl) ?? 0) < MAX_FETCHES && outbox.length) {
-      const at = await $.clock.now()
       while (outbox.length) {
         const next = outbox.shift()!
         if (next.session !== id) continue
-        if (next.waited_ms !== undefined && (sendingPress?.press.id !== next.command_id || sendingPress.generation !== pressGeneration || at - sendingPress.press.sentAt >= PRESS_WAIT_MS)) continue
+        const at = await $.clock.now()
+        if (next.waited_ms !== undefined) {
+          if (sendingPress?.press.id !== next.command_id || sendingPress.generation !== pressGeneration || at - sendingPress.press.sentAt >= PRESS_WAIT_MS) continue
+          if (!pressFor({ ...pressInput, now: at }, sendingPress.press)) {
+            await voidPress($, p => p.id === next.command_id)
+            continue
+          }
+        }
         command = next
         break
       }
@@ -261,6 +275,8 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
       error = { kind: 'network', message: networkReason(err instanceof Error ? err.message : String(err)) }
     }
     if (snap) answeredBy = url
+    if (snap) pressInput.snap = snap
+    pressInput.bandError = error
     // A read that fails keeps the last snapshot beside the reason.
     const old = await read($, snapA)
     if (snap && (snap.sequence !== old?.sequence || snap.boot_id !== old?.boot_id || snap.generated_at !== old?.generated_at)) {
@@ -268,7 +284,7 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
       // How far the band's clock is ahead of the proxy's, which stamps the snapshot as it builds it:
       // the plugin's times are compared on the band's clock shifted by it, to within the read's latency.
       const skew = now - Date.parse(snap.generated_at)
-      if (Number.isFinite(skew)) await update($, liveA, l => (l.skew === skew ? l : { ...l, skew }))
+      if (Number.isFinite(skew)) await updateLive($, l => (l.skew === skew ? l : { ...l, skew }))
     }
     if (JSON.stringify(error) !== JSON.stringify(await read($, bandErrorA))) await update($, bandErrorA, () => error)
     // Every read, changed or not: a command can also expire, or its proxy be gone.
@@ -276,6 +292,7 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
     // After this read: a command goes with the next one, which waits for this one to end.
     if (snap) void moveAfterHandoff($, id, snap, now)
   } else if (await read($, bandErrorA)) {
+    pressInput.bandError = null
     await update($, bandErrorA, () => null)
   }
   const refreshed = await $.clock.now()
@@ -469,10 +486,13 @@ async function settlePress($: $T, snap: Snap | null, now: number): Promise<void>
  */
 async function sendPress($: $T, op: Press): Promise<void> {
   const gen = pressGeneration
-  const [sess, snap, bandError, cache, live] = await Promise.all([read($, sessA), read($, snapA), read($, bandErrorA), read($, cacheA), read($, liveA)])
-  if (!snap || bandError || live.step?.turnId !== op.turnId || live.step.index !== op.index) return
+  const cache = await read($, cacheA)
   const id = crypto.randomUUID()
   const at = await $.clock.now()
+  const { sess, snap, live } = pressInput
+  const offered = pressFor({ ...pressInput, now: at }, op)
+  if (!snap || !offered || gen !== pressGeneration) return
+  op = offered
   const doc = {
     command_id: id, session: sess.id, boot_id: snap.boot_id, created_at: new Date(at).toISOString(), action: 'switch', auth_id: op.to,
     waited_ms: Math.max(0, Math.round(at - op.startedAt)), generation: op.generation, step_started_at: new Date(op.startedAt - live.skew).toISOString(),
@@ -874,7 +894,10 @@ async function autoCommand($: $T, feature: keyof Auto, args: string): Promise<{ 
 /** What the band's controls do. */
 function actsOf($: $T): Do {
   return {
-    ui: patch => setUi($, patch),
+    ui: async patch => {
+      if (patch.press && !pressFor({ ...pressInput, now: await $.clock.now() }, patch.press)) return
+      await setUi($, patch)
+    },
     send: move => sendCommand($, move),
     handoff: then => handoffNow($, then),
     sendHeld: () => sendHeld($),
@@ -891,6 +914,7 @@ export const register: Register = (on, options) => {
   settings = settingsOf(options)
 
   on('session.start', async ($, e, next) => {
+    pressInput.live = await read($, liveA)
     unattended = unattendedOf(await $.env.get('QUOTA_BAND_UNATTENDED'))
     // A reload keeps the band's state: the choice made before it comes back from its mirror.
     mine = { ...NO_CHOICE, ...(await read($, autoA)) }
@@ -1029,7 +1053,7 @@ export const register: Register = (on, options) => {
     if (watched) {
       const [startedAt, snap, sess] = await Promise.all([asked, read($, snapA), read($, sessA)])
       const generation = snap?.sessions[sess.id]?.generation
-      await update($, liveA, l => ({ ...l, step: { turnId: e.turnId, index: e.index, startedAt, contentAt: 0, generation } }))
+      await updateLive($, l => ({ ...l, step: { turnId: e.turnId, index: e.index, startedAt, contentAt: 0, generation } }))
     }
     const inner = next(e)
     let r: Awaited<ReturnType<typeof inner.next>>['value'] | undefined
@@ -1052,7 +1076,7 @@ export const register: Register = (on, options) => {
             quiet = null
           })
           let answered = false
-          await update($, liveA, l => {
+          await updateLive($, l => {
             const step = mine(l) ? stepAfter(l.step, chunk, at) : l.step
             answered = step !== l.step
             return answered ? { ...l, step } : l
@@ -1065,7 +1089,7 @@ export const register: Register = (on, options) => {
       quiet?.cancel()
       if (!done) await inner.return?.(undefined as never)
       if (watched) {
-        await update($, liveA, l => (mine(l) ? { ...l, step: null } : l))
+        await updateLive($, l => (mine(l) ? { ...l, step: null } : l))
         await voidPress($, ofStep)
       }
     }
@@ -1099,6 +1123,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     if (!ownStep(e)) {
+      await updateLive($, l => (l.step?.turnId === e.turnId ? { ...l, step: null } : l))
       await update($, cacheA, c => ({ ...c, lastAnswer: e.answer }))
       await update($, uiA, (u: UiState): UiState => ({ ...u, turns: u.turns + 1 }))
       await endPress($, e.turnId, e.reason)
@@ -1123,6 +1148,7 @@ export const register: Register = (on, options) => {
     if (e.reason === 'clear' || e.reason === 'resume') {
       pressGeneration++
       sendingPress = null
+      await updateLive($, l => ({ ...l, step: null }))
       // Another conversation taken up in this window starts from the defaults; a /clear, the
       // handoff's too, goes on with the work and keeps the choice.
       if (e.reason === 'resume') mine = NO_CHOICE

@@ -497,6 +497,12 @@ dequeue require that generation unchanged, and dequeue requires the live token t
 within its 5 s wait; dispatch state snapshots cannot revive a cancelled press. Keep waiting,
 acknowledgement, timeout, content, a step or turn ending, and clear or resume invalidate earlier
 enqueue work.
+Drawing, opening the confirmation, enqueueing and dequeueing share `pressFor`'s waiting eligibility:
+the same main step must still have a retry or hang row without content since its failure, the
+session's generation and takeover must still match, and no read error or newer elsewhere pick
+may make the move unsafe. Action decisions read the module's current session, snapshot, error
+and live-step facts; the atoms mirror them for drawing. An expired control or queued press is
+dropped silently.
 The switch list leaves out accounts that cannot serve the session's model (the snapshot's `blocked`)
 and second credentials of an account; the Accounts tile's `next up` follows the same rule, and
 both give an account's use of the weekly window that limits the session's model. Before the proxy
@@ -505,7 +511,8 @@ ready, an enabled alternative with a known reset still counts down even if it is
 A blocked account recovers at the latest of `back_at` and all exhausted windows that apply to the
 session's model: `5h`, `7d`, and its own `7d_opus`, `7d_sonnet` or `7d_fable`. Simultaneous limits
 must all reset; another model's window does not hold it back. An account not blocked keeps its
-`back_at` countdown.
+`back_at` countdown. If any exhausted applicable window has no valid reset, that account has no
+finite recovery countdown, even when `back_at` or another window has a known reset.
 
 After a main reply, the band confirms its route with a fresh `/band` read before recording the
 cache, waiting for it no longer than the read deadline. A failed read, one that gave up, or a

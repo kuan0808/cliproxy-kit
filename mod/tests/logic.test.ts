@@ -298,6 +298,34 @@ describe('accounts', () => {
     expect(nextUp({ ...view, credentials: [d, c] }, 'claude-d', NOW, { model: 'gpt-6-sol', blocked: ['claude-k'] })).toBe('k••• back in 2h')
   })
 
+  test('an unknown exhausted reset prevents a finite recovery countdown for that account', () => {
+    const view = SNAP.providers.claude!
+    const [d, k] = view.credentials as [SnapCred, SnapCred]
+    for (const [model, own, other] of [
+      ['claude-fable-5-2', '7d_fable', '7d_opus'],
+      ['claude-opus-5-5', '7d_opus', '7d_sonnet'],
+      ['claude-sonnet-5-5', '7d_sonnet', '7d_fable'],
+    ] as const) {
+      for (const unknown of ['5h', '7d', own]) {
+        for (const reset of [undefined, '', 'invalid']) {
+          const windows = ['5h', '7d', own].map(kind => ({
+            kind, label: kind, remaining: 0, reset_at: kind === unknown ? reset : iso(120_000), observed_at: iso(0), stale: false,
+          }))
+          windows.push({ kind: other, label: other, remaining: 0, reset_at: undefined, observed_at: iso(0), stale: false })
+          const c = { ...k, tier: 3, back_at: iso(120_000), windows }
+          const session = { model, blocked: ['claude-k'] }
+          expect(nextUp({ ...view, credentials: [d, c] }, 'claude-d', NOW, session)).toBe('no other account ready')
+          expect(nextUp({ ...view, credentials: [d, { ...c, back_at: iso(H) }] }, 'claude-d', NOW, session)).toBe('no other account ready')
+          const x = { ...k, id: 'claude-x', label: 'x•••', tier: 3, back_at: iso(180_000), windows: [] }
+          expect(nextUp({ ...view, credentials: [d, c, x] }, 'claude-d', NOW, session)).toBe('x••• back in 3m')
+          expect(nextUp({ ...view, credentials: [d, c] }, 'claude-d', NOW, { ...session, blocked: [] })).toBe('k••• back in 2m')
+          const recovering = { ...c, windows: windows.map(w => w.kind === unknown ? { ...w, remaining: 0.5 } : w) }
+          expect(nextUp({ ...view, credentials: [d, recovering] }, 'claude-d', NOW, session)).toBe('k••• back in 2m')
+        }
+      }
+    }
+  })
+
   test('a second credential of one account adds no quota to the pool, and is not another account', async () => {
     const [d] = SNAP.providers.claude!.credentials
     const view = { health: 'healthy', credentials: [d!, { ...d!, id: 'claude-d2', same_as: 'claude-d' }] }

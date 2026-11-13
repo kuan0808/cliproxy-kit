@@ -274,7 +274,7 @@ export function nextUp(view: SnapProvider, current: string, now: number, session
       const resets = session?.blocked?.includes(c.id)
         ? c.windows
           .filter(w => w.remaining <= 0 && (w.kind === '5h' || w.kind === '7d' || (own && w.kind === own)))
-          .map(w => Date.parse(w.reset_at ?? '') || 0)
+          .map(w => Date.parse(w.reset_at ?? ''))
         : []
       return { c, t: Math.max(Date.parse(c.back_at ?? '') || 0, ...resets) }
     })

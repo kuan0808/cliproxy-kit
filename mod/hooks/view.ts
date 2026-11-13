@@ -117,6 +117,8 @@ export type BandInput = {
   live: Live
 }
 
+export type PressInput = Pick<BandInput, 'snap' | 'bandError' | 'sess' | 'live' | 'now'>
+
 export type Facts = {
   /** Through the proxy; else signed in to Claude directly (the desktop app), with no accounts to show or switch. */
   proxied: boolean
@@ -393,7 +395,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
   // first; then the plugin's warnings; then the band's own hang watch. That the session moved, or
   // stayed, comes after the cold turn.
   // Each live row offers `switch to k•••` while a press could stop the waiting turn (pressAct).
-  const liveAct = live && pressAct(i, acct, menu, act)
+  const liveAct = live && pressAct(i, menu, act)
   if (live?.kind === 'retry') return notice && life?.press && !acct?.session.retry?.try_started_at ? notice : liveRow(live, liveAct)
   if (alert && alert.action !== 'dismiss') {
     const fallback = alert.fallback
@@ -443,7 +445,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
  * step with no content in its first 30 seconds (the hang watch). Times the plugin gives are on its
  * clock, compared on the band's shifted by the skew of the last read.
  */
-function liveRows(i: BandInput, acct: SessionAccount | null): (Words & { kind: 'retry' | 'watch' }) | null {
+function liveRows(i: Pick<BandInput, 'live' | 'now'>, acct: SessionAccount | null): (Words & { kind: 'retry' | 'watch' }) | null {
   const step = i.live.step
   if (!step || !acct) return null
   const s = acct.session
@@ -470,6 +472,24 @@ const liveRow = (w: Words, act: Act | null): Row => ({ key: 'alert', tone: 'warn
 /** How long a press waits for the proxy's acknowledgement, and then for the turn it stopped to end. */
 export const PRESS_WAIT_MS = 5_000
 
+export function pressFor(i: PressInput, offered?: Press): Press | null {
+  const acct = i.sess.proxied ? sessionAccount(i.snap, i.sess.id) : null
+  const step = i.live.step
+  const s = acct?.session
+  const to = s?.takeover && acct?.view.credentials.find(c => c.id === s.takeover)
+  if (!step || !s || !to || i.bandError || step.generation === undefined || s.generation !== step.generation) return null
+  const live = liveRows(i, acct)
+  if (!live) return null
+  const alert = live.kind === 'watch' ? pickAlert(i.snap, acct, i.now, [], null, i.sess.model) : null
+  if (alert && alert.action !== 'dismiss') return null
+  if (s.elsewhere_at && Date.parse(s.elsewhere_at) + i.live.skew >= step.startedAt - 1000) return null
+  if (offered && (offered.turnId !== step.turnId || offered.index !== step.index || offered.startedAt !== step.startedAt || offered.generation !== step.generation || offered.to !== to.id)) return null
+  return {
+    id: '', turnId: step.turnId, index: step.index, startedAt: step.startedAt, generation: step.generation, to: to.id, label: to.label,
+    stage: 'asking', sentAt: 0, abortAt: 0, switchAt: '', since: false,
+  }
+}
+
 /**
  * The live rows' control, `switch to k•••` (Switch now), k••• being the account quota-pilot says
  * would take over: offered only while the step's request is surely still on the bound account (no
@@ -477,17 +497,10 @@ export const PRESS_WAIT_MS = 5_000
  * session not moved since: its generation is the one the step began under), the band can send
  * commands, and no press is under way. A press asks first by today's rule for a switch.
  */
-function pressAct(i: BandInput, acct: SessionAccount | null, menu: Menu, act: Do): Act | null {
-  const step = i.live.step
-  const s = acct?.session
-  const to = s?.takeover && acct?.view.credentials.find(c => c.id === s.takeover)
-  if (!step || !s || !to || !menu.canSend || i.ui.press || step.generation === undefined || s.generation !== step.generation) return null
-  if (s.elsewhere_at && Date.parse(s.elsewhere_at) + i.live.skew >= step.startedAt - 1000) return null
-  const op: Press = {
-    id: '', turnId: step.turnId, index: step.index, startedAt: step.startedAt, generation: step.generation, to: to.id, label: to.label,
-    stage: 'asking', sentAt: 0, abortAt: 0, switchAt: '', since: false,
-  }
-  return { key: 'switch-now', label: W.switchNow(to.label), run: () => (menu.asks ? act.ui({ press: op }) : act.press(op)) }
+function pressAct(i: BandInput, menu: Menu, act: Do): Act | null {
+  const op = !i.ui.press && pressFor(i)
+  if (!op) return null
+  return { key: 'switch-now', label: W.switchNow(op.label), run: () => (menu.asks ? act.ui({ press: op }) : act.press(op)) }
 }
 
 /** How long the band's main step goes with no content before it says so. */

@@ -3018,6 +3018,88 @@ for (const cancellation of ['timeout', 'content', 'step end', 'turn completion',
   })
 }
 
+for (const surface of ['terminal', 'desktop'] as const) {
+  for (const control of ['immediate', 'question', 'confirmation'] as const) {
+    test(`a stale ${control} Switch now control on ${surface} cannot switch an answering step`, async ($, on) => {
+      const steps = heldSteps(on)
+      const aborts = recordAborts(on)
+      const clock = stubSession(on, SNAP)
+      let pause = false
+      let announce: () => void = () => undefined
+      const paused = new Promise<void>(resolve => { announce = resolve })
+      let release: () => void = () => undefined
+      const held = new Promise<void>(resolve => { release = resolve })
+      on('state.get', async (_$, e, next) => {
+        const result = await next(e)
+        if (pause && e.plugin === 'quota-band' && e.key === 'live') {
+          pause = false
+          announce()
+          await held
+        }
+        return result
+      })
+      await $.session.start({ cwd: SESSION.cwd, surface, isInteractive: true } as never)
+      if (control !== 'immediate') {
+        steps.usage = promptOf(160)
+        await reply($)
+      }
+      const { step } = await waitingOn($, clock, steps, 'stale-press')
+      if (control === 'confirmation') await pressSwitchNow($, surface)
+      pause = true
+      const mounting = $.ui.mount({ plugin: 'quota-band', surface, ...BAND(160, true) })
+      await paused
+      steps.then = [TEXT]
+      expect((await step.next()).value).toEqual(TEXT)
+      release()
+      const ui = await mounting
+      await ui.press({ key: 'switch-now' })
+      await clock.advance(2_000)
+      expect(commands).toEqual([])
+      expect(aborts).toEqual([])
+      expect(await ui.find({ key: 'ask' })).toBeUndefined()
+      expect(await liveText($, 200, surface, 'notice')).not.toMatch(/Switch to k•••…/)
+      await ui.unmount()
+      await step.return(undefined as never)
+    })
+  }
+}
+
+for (const change of ['takeover', 'retry ended', 'binding moved', 'elsewhere', 'read error', 'watch warning'] as const) {
+  test(`a queued Switch now silently drops after the band learns ${change}`, async ($, on) => {
+    const steps = heldSteps(on)
+    const aborts = recordAborts(on)
+    const clock = stubSession(on, SNAP)
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    let release: (reply: OpEventResult<'http.fetch'>) => void = () => undefined
+    failure = new Promise<OpEventResult<'http.fetch'>>(resolve => { release = resolve })
+    await switchToK($)
+    await clock.advance(3_000)
+    failure = undefined
+    applied(clock)
+    await clock.advance(7_000)
+    const { step } = await waitingOn($, clock, steps, 'changed-press', change === 'watch warning' ? { retry: undefined } : {})
+    if (change === 'watch warning') await clock.advance(30_000)
+    await pressSwitchNow($)
+    expect(commands).toHaveLength(1)
+    const patch = change === 'takeover' ? { takeover: undefined }
+      : change === 'retry ended' ? { retry: undefined }
+        : change === 'binding moved' ? { generation: 4 }
+          : change === 'elsewhere' ? { elsewhere_at: new Date(clock.now()).toISOString() }
+            : change === 'watch warning' ? { switch_imminent: true, switch_reason: 'weekly quota used up', next_auth_id: 'claude-k' } : {}
+    snapshot = { ...snapshot, sequence: snapshot.sequence + 1, sessions: { s1: { ...snapshot.sessions.s1!, ...patch } } }
+    if (change === 'read error') failure = { deny: 'connection closed' }
+    await clock.advance(2_000)
+    failure = undefined
+    release({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(snapshot) } })
+    await clock.settle()
+    await clock.advance(60_000)
+    expect(commands).toHaveLength(1)
+    expect(aborts).toEqual([])
+    expect(await liveText($, 200, 'terminal', 'notice')).not.toMatch(/Switch to k•••…|No answer from the proxy/)
+    await step.return(undefined as never)
+  })
+}
+
 for (const [pauseAt, cancellation] of [
   ['state read', 'content'],
   ['clock read', 'content'],
