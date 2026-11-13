@@ -2340,6 +2340,29 @@ test('a refused press says why for 10 s, then the waiting row and its control co
   await step.return(undefined as never)
 })
 
+test('a refused press keeps its full 10 s after a /band answer delayed by 2 s', async ($, on) => {
+  const steps = heldSteps(on)
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const { step } = await waitingOn($, clock, steps, 'slow-refusal')
+  await pressSwitchNow($)
+  acknowledge(clock, 'rejected', 'the session moved meanwhile')
+  let release: (reply: OpEventResult<'http.fetch'>) => void = () => undefined
+  failure = new Promise<OpEventResult<'http.fetch'>>(resolve => { release = resolve })
+  await clock.advance(2_000)
+  await clock.advance(2_000)
+  failure = undefined
+  release({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(snapshot) } })
+  await clock.settle()
+  expect(await liveText($, 200, 'terminal', 'notice')).toBe('· Could not switch to k•••: the session moved meanwhileok')
+  await clock.advance(9_999)
+  expect(await liveText($, 200, 'terminal', 'notice')).toBe('· Could not switch to k•••: the session moved meanwhileok')
+  await clock.advance(1)
+  expect(await liveText($, 200, 'terminal', 'notice')).toBe('')
+  expect(await liveText($)).toMatch(/^! d••• returned HTTP 529 · retrying it/)
+  await step.return(undefined as never)
+})
+
 test('no answer within 5 s: the turn keeps waiting; a second press is a new one, and the first switch arriving late is only told', async ($, on) => {
   const steps = heldSteps(on)
   const aborts = recordAborts(on)
@@ -2579,6 +2602,25 @@ test('a switch that worked says so for 5 s and goes without a press; a command o
   expect(await rowText($, 'notice')).toBe('')
 })
 
+test('a done notice keeps its full 5 s after a /band answer delayed by 2 s', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await switchToK($)
+  applied(clock)
+  let release: (reply: OpEventResult<'http.fetch'>) => void = () => undefined
+  failure = new Promise<OpEventResult<'http.fetch'>>(resolve => { release = resolve })
+  await clock.advance(10_000)
+  await clock.advance(2_000)
+  failure = undefined
+  release({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(snapshot) } })
+  await clock.settle()
+  expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
+  await clock.advance(4_999)
+  expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
+  await clock.advance(1)
+  expect(await rowText($, 'notice')).toBe('')
+})
+
 test('a done notice never covers an account read as used up, even with its 5 s left', async ($, on) => {
   const clock = stubSession(on, USED_UP)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -2677,6 +2719,51 @@ test('ok on the fallback note and on the move note, in turn: neither comes back'
     expect(await rowText($)).toBe('')
   }
 })
+
+for (const representation of ['local selection', 'proxied turn'] as const) {
+  for (const note of ['move', 'stayed'] as const) {
+    test(`a fallback dismissal survives ${note} dismissal during a suspended route after ${representation}`, async ($, on) => {
+      const route = { provider: 'claude', model: 'claude-opus-5-5', auto: true, from: 'claude-fable-5-2', at: iso(-60_000) }
+      const session: Snap['sessions'][string] = {
+        ...SNAP.sessions.s1!, model: route.model, requested_model: route.from, route, auth_id: 'claude-k', auth_label: 'k•••',
+        ...(note === 'move'
+          ? { last_switch: { from: 'claude-d', to: 'claude-k', at: iso(-60_000), reason: '', kind: 'quota', cause: { reason: 'Weekly Fable quota used up' } } }
+          : { retry_outcome: { account: 'claude-k', cause: { kind: 'overloaded', status: 529 }, tries: 1, after_ms: 61_000, cache_read: 400_000, at: iso(-60_000) } }),
+      }
+      const clock = stubSession(on, { ...SNAP, sessions: { s1: session } })
+      selectedModel = route.from
+      await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+      const ok = async () => {
+        const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+        await ui.press({ key: 'alert-ok' })
+        await ui.unmount()
+      }
+      expect(await rowText($)).toMatch(/^↪ fable-5-2 is used up on every account/)
+      await ok()
+      selectedModel = 'claude-sonnet-5-5'
+      if (representation === 'proxied turn') snapshot = { ...snapshot, sequence: snapshot.sequence + 1, sessions: { s1: { ...session, model: selectedModel, requested_model: selectedModel, route: undefined } } }
+      await clock.advance(10_000)
+      expect(await rowText($)).toMatch(note === 'move' ? /^↪ Switched d•••/ : /^↪ Stayed on k•••/)
+      await ok()
+      selectedModel = route.from
+      snapshot = { ...snapshot, sequence: snapshot.sequence + 1, sessions: { s1: session } }
+      await clock.advance(10_000)
+      expect(await rowText($)).toBe('')
+      const at = new Date(clock.now()).toISOString()
+      snapshot = { ...snapshot, sequence: snapshot.sequence + 1, sessions: { s1: {
+        ...session, model: route.from, route: undefined,
+        ...(note === 'move'
+          ? { last_switch: { ...session.last_switch!, at } }
+          : { retry_outcome: { ...session.retry_outcome!, at } }),
+      } } }
+      await clock.advance(10_000)
+      await ok()
+      snapshot = { ...snapshot, sequence: snapshot.sequence + 1, sessions: { s1: session } }
+      await clock.advance(10_000)
+      expect(await rowText($)).toMatch(/^↪ fable-5-2 is used up on every account/)
+    })
+  }
+}
 
 describe('a notice and the warnings', () => {
   const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined, press: () => undefined }
@@ -2795,6 +2882,43 @@ test('a model list the proxy never answers gives up after 3 s: the read of /band
   await clock.advance(10_000)
   expect(bandReads).toBe(reads + 3)
 })
+
+for (const cancellation of ['timeout', 'content', 'step end', 'turn completion', 'clear', 'resume', 'still valid'] as const) {
+  test(`a queued Switch now press is checked before sending after ${cancellation}`, async ($, on) => {
+    const steps = heldSteps(on)
+    const aborts = recordAborts(on)
+    const clock = stubSession(on, SNAP)
+    on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    let release: (reply: OpEventResult<'http.fetch'>) => void = () => undefined
+    failure = new Promise<OpEventResult<'http.fetch'>>(resolve => { release = resolve })
+    await switchToK($)
+    await clock.advance(3_000)
+    failure = undefined
+    applied(clock)
+    await clock.advance(7_000)
+    const { step } = await waitingOn($, clock, steps, 'queued-press')
+    await pressSwitchNow($)
+    expect(commands).toHaveLength(1)
+    if (cancellation === 'timeout') await clock.advance(5_000)
+    else if (cancellation === 'content') {
+      steps.then = [TEXT]
+      expect((await step.next()).value).toEqual(TEXT)
+    } else if (cancellation === 'step end') await step.return(undefined as never)
+    else if (cancellation === 'turn completion') await $.turn.complete({ turnId: 'queued-press', answer: '', durationMs: 1, isAborted: false, reason: 'error' } as never)
+    else if (cancellation === 'clear' || cancellation === 'resume') {
+      await $.session.end({ reason: cancellation, sessionId: SESSION.id } as never)
+      currentId = 's2'
+    }
+    release({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(snapshot) } })
+    await clock.settle()
+    await clock.advance(2_000)
+    expect(commands).toHaveLength(cancellation === 'still valid' ? 2 : 1)
+    if (cancellation === 'still valid') expect(commands[1]).toMatchObject({ action: 'switch', auth_id: 'claude-k', waited_ms: 10_000 })
+    expect(aborts).toEqual([])
+    await step.return(undefined as never)
+  })
+}
 
 for (const [first, second] of [['switch', 'route'], ['route', 'unroute'], ['unroute', 'switch']] as const) {
   for (const outcome of ['answered', 'failed'] as const) {

@@ -433,10 +433,12 @@ theme. Both show cards while Claude waits and one line while it works (also when
 above the prompt), and the row says one thing at a time. Questions and actions still running or
 on their way come first. Completed notices yield immediately to read errors, waiting or running
 retries, the plugin's warnings, the hang watch and a cold next turn. A switch, route or back that
-worked says so for 5 s and goes by itself; other completed notices wait for `ok` below warnings.
+worked says so for 5 s after its acknowledgement is processed and goes by itself; other completed
+notices wait for `ok` below warnings. Switch now's refused notice also starts at processing time.
 Only Switch now's refusal and no-answer notices stay above a waiting retry for their 10 s.
 `ok` on a note dismisses that note alone; the current fallback's dismissal survives later move
-and stayed-note dismissals, while the eight most recent other keys are kept. The waiting
+and stayed-note dismissals, including while `/model` suspends the route, while the eight most
+recent other keys are kept. The waiting
 rows carry `switch to k•••` (Switch now, in [When an account fails](#when-an-account-fails)).
 
 The quota cards are the account's windows, each with its reset (`view.ts`, `quota`):
@@ -486,6 +488,8 @@ Each read, `/band` and the model list a full refresh reads first, gives up after
 `no answer within 3s`, a model list that gave up leaves the switch menu with accounts only, and the
 next read goes on as usual. A command-bearing request holds the outbox until its HTTP call
 actually answers or fails, even after the deadline; reads without commands continue meanwhile.
+Before a queued Switch now command is sent, its press must still be sending within its 5 s wait.
+A timeout, content, a step or turn ending, or a clear or resume makes that queued press void.
 The switch list leaves out accounts that cannot serve the session's model (the snapshot's `blocked`)
 and second credentials of an account; the Accounts tile's `next up` follows the same rule, and
 both give an account's use of the weekly window that limits the session's model. Before the proxy

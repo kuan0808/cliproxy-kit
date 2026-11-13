@@ -266,7 +266,7 @@ Cards while Claude waits, one line while it works:
 | **Context** | How full the conversation is. |
 | **Cache** | Time left before the prompt cache goes cold, with `kept warm 0/3` counting refreshes while keeping it warm is on; once cold, what the next turn rewrites and costs. |
 | **Accounts** | Every account's weekly use, and the one a switch or a new session gets next: never one that cannot serve this session's model, with the weekly limit that holds that model back, as the switch menu shows it. When none is ready, a known reset counts down. |
-| **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy `retrying` your account or an account `resting`, no answer yet, a cold next turn, a session moved, a context filling up). A command's `done` goes after 5 s and never covers a warning. Switch now's refusal or no answer stays above the waiting row for 10 s. |
+| **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy `retrying` your account or an account `resting`, no answer yet, a cold next turn, a session moved, a context filling up). A command's `done` goes 5 s after acknowledgement and never covers a warning. Switch now's refusal or no answer stays above the waiting row for 10 s. A queued Switch now is dropped if its press becomes void before sending. Dismissed fallback notes stay dismissed while `/model` suspends their route. |
 
 <details>
 <summary>No 5-hour limit: before and after</summary>

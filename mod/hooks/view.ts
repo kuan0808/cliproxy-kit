@@ -26,6 +26,7 @@ import {
   rewriteBrief,
   rewriteText,
   routeFor,
+  sameModel,
   sessionAccount,
   shortModel,
   switchTargets,
@@ -416,11 +417,14 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
     const acts: Act[] = back
       ? [{ key: 'switch-back', label: 'switch back', run: () => menu.pick({ action: 'switch', fields: { auth_id: back.id }, text: W.switchTo(back.label) }) }]
       : []
-    const route = routeFor(acct?.session, i.sess.model)
+    const route = acct?.session.route
     const fallback = route?.auto && route.from ? `fallback:${route.from}:${route.model}` : ''
     const dismissed = [...[ui.dismissedSwitch ?? []].flat(), alert.key ?? '']
     const kept = dismissed.filter(key => !key.startsWith('fallback:')).slice(-DISMISSED_KEPT)
-    if (dismissed.includes(fallback)) kept.unshift(fallback)
+    const saved = dismissed.find(key => key.startsWith('fallback:') && (route
+      ? key === fallback
+      : !sameModel(acct?.session.requested_model || acct?.session.model || '', key.split(':')[1]!)))
+    if (saved) kept.unshift(saved)
     return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts, close: { key: 'alert-ok', label: 'ok', run: () => act.ui({ dismissedSwitch: kept }) } }
   }
   const used = f.ctx ? Math.round(100 - f.ctx.left) : 0

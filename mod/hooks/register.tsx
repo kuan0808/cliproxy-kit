@@ -141,7 +141,7 @@ let waiting: Promise<Snap | null> | null = null
 let waitingFull = false
 // Commands for a proxy read over the network, each sent with the next read of /band (see
 // sendCommand): plugin resources are read-only routes.
-const outbox: object[] = []
+const outbox: { command_id: string; session: string; waited_ms?: number }[] = []
 let commandInFlight = false
 // The base URL whose /band has answered with a snapshot: quota-pilot is there. Only it is told
 // what the session is about (refreshOnce).
@@ -222,7 +222,17 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
       )
     }
     for (const [name, value] of said) if (value) headers[name] = encodeURIComponent(value)
-    const command = commandInFlight ? undefined : outbox.shift()
+    let command: (typeof outbox)[number] | undefined
+    if (!commandInFlight && outbox.length) {
+      const [ui, at] = await Promise.all([read($, uiA), $.clock.now()])
+      while (outbox.length) {
+        const next = outbox.shift()!
+        if (next.session !== id) continue
+        if (next.waited_ms !== undefined && (ui.press?.id !== next.command_id || ui.press.stage !== 'sending' || at - ui.press.sentAt >= PRESS_WAIT_MS)) continue
+        command = next
+        break
+      }
+    }
     if (command) headers['X-Band-Command'] = encodeURIComponent(JSON.stringify(command))
     let error: BandError | null = null
     try {
@@ -243,13 +253,14 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
     }
     if (JSON.stringify(error) !== JSON.stringify(await read($, bandErrorA))) await update($, bandErrorA, () => error)
     // Every read, changed or not: a command can also expire, or its proxy be gone.
-    await settle($, snap ?? old, now)
+    await settle($, snap ?? old)
     // After this read: a command goes with the next one, which waits for this one to end.
     if (snap) void moveAfterHandoff($, id, snap, now)
   } else if (await read($, bandErrorA)) {
     await update($, bandErrorA, () => null)
   }
-  await update($, nowA, () => now)
+  const refreshed = await $.clock.now()
+  await update($, nowA, () => refreshed)
   // The mirror of the session's choice, should a /clear have wiped it unannounced.
   const shown = await read($, autoA)
   if (shown.holdCold !== mine.holdCold || shown.keepWarm !== mine.keepWarm) await update($, autoA, () => mine)
@@ -385,7 +396,8 @@ function titleLine(text: string): string {
  * route or a way back the reader chose names the account it landed on, so a later move to another
  * is told and held again.
  */
-async function settle($: $T, snap: Snap | null, now: number): Promise<void> {
+async function settle($: $T, snap: Snap | null): Promise<void> {
+  const now = await $.clock.now()
   await settlePress($, snap, now)
   const ui = await read($, uiA)
   if (ui.pending.length) {
