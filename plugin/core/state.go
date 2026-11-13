@@ -76,8 +76,9 @@ type Cred struct {
 	Provider string
 	Email    string
 	Disabled bool
-	// Unavailable is the host's aggregate over all models: some model of this credential is
-	// cooling down. It says nothing about any one model, so it never blocks on its own.
+	// Unavailable is the host's aggregate over the credential's models: set only while every model
+	// that has a state there is unavailable (cooling down or disabled). It says nothing about any
+	// one model, so it never blocks on its own.
 	Unavailable    bool
 	NextRetryAfter time.Time
 	Windows        map[string]Window

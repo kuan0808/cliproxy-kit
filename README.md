@@ -420,14 +420,16 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | --- | --- | --- |
 | CLIProxyAPI's `config.yaml` | `plugins:` turned on, the store, and quota-pilot's settings | Remove them. |
 | `~/.cache/cliproxy-kit/` of the proxy's user | State, the request log and what is known of each session (mode 0600; client keys as hashes only) | Delete the folder. |
-| `~/.claude/settings.json`, on each machine with Claude Code | The `env` keys of step 3; the file as it was is kept as `settings.json.bak-<time>` | Put the backup back. |
-| Claude Code's plugins | The `cliproxy-kit` marketplace and `quota-band` | `claude plugin uninstall quota-band@cliproxy-kit` |
+| `~/.claude/settings.json`, on each machine with Claude Code | The `env` keys of step 3, and `cliproxy-kit` under `extraKnownMarketplaces` | Take out of `env` `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `ENABLE_TOOL_SEARCH` and `ENABLE_CLAUDEAI_MCP_SERVERS`. The `settings.json.bak-<time>` copies are the file before a run of the script: putting one back also undoes every later change. |
+| Claude Code's plugins | The `cliproxy-kit` marketplace and `quota-band` | `claude plugin uninstall quota-band@cliproxy-kit`, then `claude plugin marketplace remove cliproxy-kit` |
 | `~/.cache/cliproxy-kit/handoff/`, beside the band | The notes handoffs wrote | Delete the folder. |
 | `~/.codex/config.toml` (optional) | The model provider of step 4 and the hooks of step 5 | Remove them. |
 
 ## Update and uninstall
 
-- **Update:** the panel's Plugin Store offers new versions of quota-pilot. The band updates with
+- **Update:** the panel's Plugin Store offers new versions of quota-pilot, and the proxy runs the
+  new one as soon as the store has installed it, with no restart. A library copied over the old one
+  by hand, under the same name, runs only once the proxy restarts. The band updates with
   `claude plugin update quota-band@cliproxy-kit`, or by itself once auto-update is on for the
   marketplace under **Marketplaces** in `/plugin`; `/reload-plugins` loads it in a running session.
   Update both: they change together.
@@ -435,8 +437,8 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   failing rests, every move says why, and `switch to k•••` stops a waiting turn. Update the band and
   quota-pilot together, as the band's words need both: an older band words every move of the new
   plugin `was unavailable`, and the new band words a move an older plugin made `reason not
-  recorded`. The new quota-pilot loads when the proxy restarts, which interrupts every request in
-  flight through it.
+  recorded`. A store update loads the new quota-pilot at once; one installed by hand loads when the
+  proxy restarts, which interrupts every request in flight through it.
 - **From 0.1.14:** holding a message before a cold turn and keeping the cache warm are off until you
   turn them on, in `/config` for every session or with `/hold-cold on` and `/keep-warm on` for one.
   `0` in **Hold above** or **Keep warm up to** no longer turns a feature off: it means any size, and

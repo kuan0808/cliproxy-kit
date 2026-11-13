@@ -309,8 +309,9 @@ numbers, so no total or share changes by them. A session with failure or event l
 and no request line (every attempt failed, as in a provider outage) gets a row of its own all the
 same, under its project and after the sessions that ran, with nothing used and `no successful
 request` in place of its share, so its detail opens. The detail lists the session's failed
-attempts, retries and moves in the range (`events`), each with its own line's model, as `Failures
-and moves`.
+attempts, retries and moves (`events`), each with its own line's model, as `Failures and moves`:
+from the range's start in the 7 and 30 day ranges, and in the week and 5-hour ranges from seven
+days back (or an account's older counting start), whenever the window began.
 
 The kind is read from the status, the error body, `ttft` and the wait, in that order: a client
 cancel (499) and what the proxy itself reads as the request's fault (`core/faults.go`, pinned
@@ -337,7 +338,8 @@ a number, when two would read alike.
 
 The report reads the log from memory: the last 38 days are read from the files once, shortly
 after start, and each line is added as it is written, every account's in time order. A report
-then walks only the lines of its range. A transcript is read once from its start for its folder,
+then hands each account's lines of those 38 days to the split, which copies and sorts them and
+passes over the lines outside its range. A transcript is read once from its start for its folder,
 how it was run and its first request, then only for what was written since; where a folder
 belongs is looked up again after ten minutes. A busy machine gives the proxy, a background service,
 little CPU, so a report that did all of this anew took seconds and grew with the log. The page
@@ -620,7 +622,11 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296; the quota headers, t
   authentication, for GET only and without a body; its management routes need the management key.
 - A usage record names the client key the proxy accepted (`config-api-key`'s principal), and none
   when the proxy has no `api-keys`.
-- A plugin library replaced in place is loaded again only when the proxy restarts.
+- A plugin library replaced in place, under the same file name (a library copied in by hand), is
+  loaded again only when the proxy restarts. A store install or update writes the library under a
+  name with its version and moves the store's record (`plugins.configs.<id>.store.version`) to it,
+  and the proxy loads that library at once, retiring the one it ran (checked on 8.0.15); at start it
+  deletes the libraries of versions the record does not name.
 - The desktop app points its Claude Code sessions at Anthropic's own API with its own sign-in, so
   they bypass the proxy; a prompt a `prompt.submit` hook drops goes back into the prompt box.
 - The desktop app lays a plugin's tree out as CSS: widths in `ch`, heights and vertical spacing in
