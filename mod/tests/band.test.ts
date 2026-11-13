@@ -95,6 +95,9 @@ let models: { id: string; owned_by: string; created: number }[]
 /** The URL and headers of the band's last read of /band, and every command its reads carried. */
 let sentTo = ''
 let sent: Record<string, string> = {}
+/** The headers of every read of /band, in order, and the commands the band ran on this device. */
+let reads: Record<string, string>[] = []
+let runs: string[][] = []
 let commands: Record<string, string>[] = []
 /** The session's root and repository, as Claude Code reports them. */
 let root: string
@@ -138,7 +141,8 @@ function stubSession(
   contextTokens = 420_000,
   beneath: Beneath = ENGINE_ONLY,
 ): MockClock {
-  mock.env(on, env)
+  // Read as each call comes, so a test can point Claude Code elsewhere mid-session.
+  on('env.get', (_$, e) => ({ value: env[e.name] }))
   const clock = mock.clock(on, { now: NOW })
   transcript = TITLED
   snapshot = snap
@@ -148,6 +152,8 @@ function stubSession(
   models = []
   sentTo = ''
   sent = {}
+  reads = []
+  runs = []
   commands = []
   root = SESSION.cwd
   repo = null
@@ -201,7 +207,7 @@ function stubSession(
   on('prompt.read', () => ({ value: { text: filled[filled.length - 1] ?? '', cursor: 0 } }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
-  on('process.run', (_$, e) => ({
+  on('process.run', (_$, e) => (runs.push([...e.argv]), {
     value: {
       exitCode: 0,
       stdout: e.argv[0] === 'date' ? '+0800\n'
@@ -217,6 +223,7 @@ function stubSession(
     bandReads++
     sentTo = e.url
     sent = { ...(e.init?.headers as Record<string, string> | undefined) }
+    reads.push(sent)
     if (sent['X-Band-Command']) commands.push(JSON.parse(decodeURIComponent(sent['X-Band-Command'])))
     return silent ?? failure ?? ok(stampReads ? { ...snapshot, generated_at: new Date(clock.now()).toISOString() } : snapshot)
   })
@@ -2811,4 +2818,76 @@ test('chunks within a second of each other cost one write of the step, and no ho
   expect(first.set).toBeGreaterThan(0)
   expect(within).toEqual(first)
   expect(later).toEqual({ get: within.get + 1, set: within.set + 1 })
+})
+
+// ---- a session's details go only to a proxy that answered as quota-pilot ----
+
+const DEVICE_ENV = { HOME: SESSION.home, ANTHROPIC_BASE_URL: 'https://mac.tailnet.ts.net:8317', ANTHROPIC_AUTH_TOKEN: 'sk-device', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }
+const ABOUT = ['X-Band-Title', 'X-Band-Cwd', 'X-Band-Root', 'X-Band-Repo']
+/** Whether a read carried any of the session's title, folder, repository root or remote. */
+const toldAbout = (headers: Record<string, string>) => ABOUT.some(h => h in headers)
+/** The shell the band runs over a transcript for its title. */
+const shells = () => runs.filter(argv => argv[0] === 'sh')
+
+test('the first read of a base URL carries the key, the session and the model; after a snapshot, the next carries the rest', async ($, on) => {
+  const clock = stubSession(on, SNAP, DEVICE_ENV)
+  on('classic.SessionStart', () => ({}))
+  repo = { root: '/Users/me/Documents/developer', remote: 'git@github.com:me/jesse.git', internal: false }
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await $.classic.SessionStart({ session_id: SESSION.id, transcript_path: '/Users/me/.claude/projects/p/s1.jsonl', source: 'resume' })
+  expect(reads).toEqual([{ Authorization: 'Bearer sk-device', 'X-Band-Session': 's1', 'X-Band-Model': 'opus%5B1m%5D' }])
+  expect(shells()).toEqual([])
+  await clock.advance(10_000)
+  expect(reads[1]).toEqual({
+    Authorization: 'Bearer sk-device',
+    'X-Band-Session': 's1',
+    'X-Band-Model': 'opus%5B1m%5D',
+    'X-Band-Title': 'Fix%20the%20%22login%22%20page',
+    'X-Band-Cwd': '%2FUsers%2Fme%2FDocuments%2Fdeveloper%2Fjesse',
+    'X-Band-Root': '%2FUsers%2Fme%2FDocuments%2Fdeveloper',
+    'X-Band-Repo': 'github.com%2Fme%2Fjesse',
+  })
+})
+
+for (const [name, answer] of [
+  ['401', { value: { status: 401, ok: false, headers: {}, text: '{"error":"invalid api key"}' } }],
+  ['404', { value: { status: 404, ok: false, headers: {}, text: 'not found' } }],
+  ['a page that is not a snapshot', { value: { status: 200, ok: true, headers: {}, text: '<html>a gateway</html>' } }],
+  ['JSON that is not a snapshot', { value: { status: 200, ok: true, headers: {}, text: '{"object":"list","data":[]}' } }],
+] as const) {
+  test(`a base URL that answers ${name} never receives the session's title, folder or repository, and no shell reads the transcript`, async ($, on) => {
+    const clock = stubSession(on, SNAP, DEVICE_ENV)
+    on('classic.SessionStart', () => ({}))
+    on('classic.UserPromptSubmit', () => ({}))
+    repo = { root: '/Users/me/Documents/developer', remote: 'git@github.com:me/jesse.git', internal: false }
+    failure = answer as OpEventResult<'http.fetch'>
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    await $.classic.SessionStart({ session_id: SESSION.id, transcript_path: '/Users/me/.claude/projects/p/s1.jsonl', source: 'resume' })
+    await $.classic.UserPromptSubmit({ session_id: SESSION.id, prompt: 'hi', session_title: 'Login revamp' })
+    await clock.advance(3 * 60_000)
+    expect(reads.length).toBeGreaterThan(10)
+    expect(reads.filter(toldAbout)).toEqual([])
+    expect(reads.every(h => h['X-Band-Session'] === 's1' && h['X-Band-Model'] === 'opus%5B1m%5D')).toBe(true)
+    expect(shells()).toEqual([])
+  })
+}
+
+test('a change of base URL in a running session starts over', async ($, on) => {
+  const env = { ...DEVICE_ENV }
+  const clock = stubSession(on, SNAP, env)
+  on('classic.UserPromptSubmit', () => ({}))
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await $.classic.UserPromptSubmit({ session_id: SESSION.id, prompt: 'hi', session_title: 'Login revamp' })
+  await clock.advance(10_000)
+  expect(reads.map(toldAbout)).toEqual([false, true])
+  // Claude Code pointed at another gateway, which answers no snapshot: it is told nothing.
+  env.ANTHROPIC_BASE_URL = 'https://gateway.example.com'
+  failure = { value: { status: 404, ok: false, headers: {}, text: '' } }
+  await clock.advance(30_000)
+  expect(sentTo).toBe('https://gateway.example.com/v0/resource/plugins/quota-pilot/band')
+  expect(reads.slice(2).map(toldAbout)).toEqual([false, false, false])
+  // Once it answers with a snapshot, the next read carries them.
+  failure = undefined
+  await clock.advance(20_000)
+  expect(reads.slice(5).map(toldAbout)).toEqual([false, true])
 })

@@ -470,7 +470,10 @@ the same wherever the proxy runs. Each read sends what only the band's device kn
 in `X-Band-*` headers, kept out of the proxy's request log: its title, the folder it started in, its
 repository's root and remote, and the model it uses, for which the snapshot names the account a
 new session gets, ranked as a pick ranks them (an estimate: the host may also leave out an account
-that does not serve the model).
+that does not serve the model). The session and its model go with every read; its title, folder,
+root and remote only once that base URL has answered with a snapshot (a new base URL starts over),
+and the band reads the transcript for a title only then, so a gateway that is not quota-pilot never
+receives them.
 Resources are read-only routes, so a switch, route or back goes with the next read in
 `X-Band-Command`, and the snapshot that read returns acknowledges it; one not acknowledged within a
 minute, or across a proxy restart, says so. When `/band` gives nothing the band says why (a key the

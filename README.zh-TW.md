@@ -388,6 +388,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 - **單一擁有者。** proxy 的每一把 client key 都視為可信。proxy 接受過某把 key 的請求後，這把 key 就能讀到所有帳號的額度（遮蔽過的名稱，不含 email 或路徑），也能替它開的 session 命名、切換帳號。只把 key 給你願意讓他看到用量的人；從 proxy 移除的 key 最多還能讀一週。
 - **留在本機。** 所有資料都放在 proxy 使用者的 `~/.cache/cliproxy-kit/`（權限 0600），client key 只存雜湊。除了轉送的請求，插件只會用帳號既有的 token 呼叫供應商自己的用量和帳號資料端點，以及查詢裝置名稱的 DNS。
 - **對話記錄。** 它只讀自己那台機器上、同一個使用者的 Claude Code 對話記錄。
+- **額度列送出的內容。** 額度列每 10 秒向 `ANTHROPIC_BASE_URL` 讀取快照，帶著 Claude Code 用的 client key、session 的 id 和模型。要等這個位址回過 quota-pilot 的快照，它才會再附上 session 的標題、開始時的資料夾，以及 repository 的根目錄和 remote（放在 header 裡，不會進 proxy 的請求記錄），也才會讀你這台裝置上的對話記錄來找標題。不是 quota-pilot 的 gateway 永遠收不到這些資料。
 - **都在金鑰後面。** 頁面本身不含任何資料，一切都經過 management 路由讀取，需要 management key。額度列和 Codex hook 的路由需要 proxy 接受過的 client key。
 
 ## 開發

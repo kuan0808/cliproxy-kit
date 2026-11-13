@@ -484,6 +484,12 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   keys only as hashes. Besides the requests it routes, the plugin calls only the providers' own
   usage and profile endpoints, with the accounts' existing tokens, and DNS for device names.
 - **Transcripts.** It reads Claude Code's transcripts only on its own machine, as its own user.
+- **What the band sends.** Every 10 seconds the band asks `ANTHROPIC_BASE_URL` for its snapshot,
+  with the client key Claude Code uses, the session's id and its model. Only after that address has
+  answered with a quota-pilot snapshot does it add the session's title, the folder it started in and
+  its repository's root and remote, in headers the proxy keeps out of its request log, and only then
+  does it read the session's transcript on your device for a title. A gateway that is not
+  quota-pilot never receives them.
 - **Behind keys.** The page carries no data: it reads everything through management routes, behind
   the management key. The band's and the Codex hooks' routes need a client key the proxy accepted.
 

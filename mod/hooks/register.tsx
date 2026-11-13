@@ -132,6 +132,9 @@ let waitingFull = false
 // Commands for a proxy read over the network, each sent with the next read of /band (see
 // sendCommand): plugin resources are read-only routes.
 const outbox: object[] = []
+// The base URL whose /band has answered with a snapshot: quota-pilot is there. Only it is told
+// what the session is about (refreshOnce).
+let answeredBy = ''
 
 function refresh($: $T, full: boolean): Promise<Snap | null> {
   if (!running) {
@@ -191,17 +194,22 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
       }
     }
     // What only this device knows of the session goes in headers, kept out of the proxy's request
-    // log, with a command waiting to be sent (see sendCommand).
-    const about = await learnAbout($, id, now)
+    // log, with a command waiting to be sent (see sendCommand). The session and its model always
+    // go, as the snapshot is built from them; its title, folder and repository only to a base URL
+    // that has answered with a snapshot, so a gateway that is not quota-pilot never gets them, and
+    // the transcript is not read for a title before then.
+    const told = answeredBy === url
+    const about = await learnAbout($, id, now, told)
     const headers: Record<string, string> = { ...auth }
-    const said: [string, string][] = [
-      ['X-Band-Session', id],
-      ['X-Band-Model', model],
-      ['X-Band-Title', about.eventTitle || about.fileTitle || about.request],
-      ['X-Band-Cwd', about.start],
-      ['X-Band-Root', about.root],
-      ['X-Band-Repo', about.repo],
-    ]
+    const said: [string, string][] = [['X-Band-Session', id], ['X-Band-Model', model]]
+    if (told) {
+      said.push(
+        ['X-Band-Title', about.eventTitle || about.fileTitle || about.request],
+        ['X-Band-Cwd', about.start],
+        ['X-Band-Root', about.root],
+        ['X-Band-Repo', about.repo],
+      )
+    }
     for (const [name, value] of said) if (value) headers[name] = encodeURIComponent(value)
     const command = outbox.shift()
     if (command) headers['X-Band-Command'] = encodeURIComponent(JSON.stringify(command))
@@ -213,7 +221,8 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
     } catch (err) {
       error = { kind: 'network', message: err instanceof Error ? err.message : String(err) }
     }
-    // A read that fails keeps the last snapshot, which the band marks as old, beside the reason.
+    if (snap) answeredBy = url
+    // A read that fails keeps the last snapshot beside the reason.
     const old = await read($, snapA)
     if (snap && (snap.sequence !== old?.sequence || snap.boot_id !== old?.boot_id || snap.generated_at !== old?.generated_at)) {
       await update($, snapA, () => snap)
@@ -241,10 +250,11 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
  * What the band on another device tells the proxy of this session: the folder it started in and
  * its repository, learned once (a `/cd` later does not move the session's past), and, while no
  * hook event has said a title, the title its transcript names and its first request, read at
- * most once a minute. Only these fields are written, onto what is there now, so a hook event that
- * came meanwhile stays; an answer about a session that is no longer this one is dropped.
+ * most once a minute and only when `titled`. Only these fields are written, onto what is there
+ * now, so a hook event that came meanwhile stays; an answer about a session that is no longer this
+ * one is dropped.
  */
-async function learnAbout($: $T, id: string, now: number): Promise<SessionAbout> {
+async function learnAbout($: $T, id: string, now: number, titled: boolean): Promise<SessionAbout> {
   const seen = await read($, aboutA)
   const known = seen.id === id ? { ...EMPTY_ABOUT, ...seen } : { ...EMPTY_ABOUT, id }
   const learned: Partial<SessionAbout> = {}
@@ -254,7 +264,7 @@ async function learnAbout($: $T, id: string, now: number): Promise<SessionAbout>
     learned.root = repo?.root ?? ''
     learned.repo = repoOf(repo?.remote)
   }
-  if (known.transcript && !known.eventTitle && now - known.fileTitleAt >= TITLE_EVERY_MS) {
+  if (titled && known.transcript && !known.eventTitle && now - known.fileTitleAt >= TITLE_EVERY_MS) {
     const read = await readTranscript($, known.transcript, !known.request)
     learned.fileTitle = read.title
     learned.fileTitleAt = now
