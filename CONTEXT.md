@@ -103,8 +103,8 @@ A change of binding the user makes from the band.
 _Avoid_: move
 
 **Switch now**:
-A switch made with `switch to k•••` while a turn waits: once the switch is applied, the band stops the
-waiting turn, and the user's next message goes to the new account.
+A switch made with `switch to k•••` while a turn waits; the
+[band's press contract](docs/architecture.md#quota-band) defines when it stops the turn.
 _Avoid_: skip, force failover, resend
 
 **Cold turn**:
@@ -123,17 +123,17 @@ A window's used share as the provider last reported it, with the time it was rea
 _Avoid_: poll, sample
 
 **Used up**:
-A window read with nothing left whose reset is still ahead; it stays used up until that reset, however
-old the reading.
+A window with nothing left in its latest reading; freshness and reset rules live in
+[Choosing an account](docs/architecture.md#choosing-an-account).
 _Avoid_: exhausted (in prose), depleted
 
 **Low**:
-An account with too little left to be given a new session: under the 5-hour threshold, or under 3% of
-a weekly window that limits the session's model.
+An account with too little quota left to rank as ready;
+[Choosing an account](docs/architecture.md#choosing-an-account) defines the thresholds.
 _Avoid_: nearly used up
 
 **Label**:
-An account's short public name (`k•••`), the same on the band, the ledger and the usage view.
+An account's short public name (`k•••`).
 _Avoid_: alias, masked email
 
 ### Running another model
@@ -183,7 +183,8 @@ The band's list of every account, window, fallback rule and setting, opened with
 _Avoid_: panel (the panel is CLIProxyAPI's), sidebar
 
 **Notice**:
-What came of the user's own press; it goes by itself.
+What came of the user's own press; [quota-band](docs/architecture.md#quota-band) defines its lifetime
+and priority.
 _Avoid_: toast, alert
 
 **Alert**:

@@ -231,7 +231,7 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
         const list = r.ok ? parseModels(r.text) : null
         if (list) await update($, modelsA, () => list)
       } catch {
-        // The switch menu then offers accounts only, and the read of /band goes on.
+        // Keep any previous model list, and let the read of /band go on.
       }
     }
     // What only this device knows of the session goes in headers, kept out of the proxy's request
@@ -461,9 +461,9 @@ async function settle($: $T, snap: Snap | null): Promise<void> {
 }
 
 /**
- * Switch now: the acknowledgement of a press being sent. Applied, the waiting turn is stopped, with
- * one call, and the band waits for that turn's own end, however late (`endPress`); 5 s on, its row
- * says the stop is not confirmed yet. Refused, the press is over, and `settlePending` words it.
+ * The refresh dispatch can predate enqueue, so its UI snapshot cannot identify the live press.
+ * Only an applied acknowledgement of a still-waiting press stops its turn, once; `endPress` waits
+ * for the turn's own end, however late. Refusals are worded by `settlePending`.
  */
 async function settlePress($: $T, snap: Snap | null, now: number): Promise<void> {
   const press = sendingPress?.press

@@ -486,9 +486,10 @@ minute, or across a proxy restart, says so. When `/band` gives nothing the band 
 proxy has not accepted yet, no plugin there, no answer) and keeps the last snapshot beside the reason.
 Each read, `/band` and the model list a full refresh reads first, gives up after the read deadline
 (the host's fetch takes no time limit, so a timer is raced against it): a `/band` that gave up is
-`no answer within 3s`, a model list that gave up leaves the switch menu with accounts only, and the
-next read goes on as usual. A command-bearing request holds the outbox until its HTTP call
-actually answers or fails, even after the deadline; reads without commands continue meanwhile.
+`no answer within 3s`. If a model-list read gives up, the band keeps its last list; without one the
+switch menu offers accounts only. The next read goes on as usual. A command-bearing request holds
+the outbox until its HTTP call actually answers or fails, even after the deadline; reads without
+commands continue meanwhile.
 At most three HTTP calls per URL remain open, including command-bearing calls. When all three are unanswered, refreshes
 report the same deadline error without another fetch; a completed or failed call frees its slot
 for the next refresh. One or two unanswered calls do not hold up a newer read.
@@ -549,16 +550,18 @@ answer for 45s`, adding `if it fails, a retry or another account takes over` whi
 one: it names no account, as the band cannot see where the request is. These rows show only while
 the band's own main step has had no content (text, thinking, a tool call or its input) since the
 first failure, or since it started for the hang watch; Claude Code's retry marker and the stream's
-envelope do not count. Every content arrival is recorded on the band's clock, using the last
-counted chunk's host time plus the elapsed local monotonic time, even before a failure is known.
+envelope do not count. Every content arrival is recorded on the band's clock, even before a failure
+is known. `stepClock` adds local monotonic time elapsed since the latest host clock sample was
+requested, including time spent awaiting its delivery, to that sample's host time.
 Chunks call the host at most once a second. Content at or after the failure, shifted by the skew,
 or after the band learned of it counts; the retry row and `switch to k•••` read that one answer
 (`answeredSince`). They go at the first content, the step's end or a cancel. An applied Switch now
-stops the turn only if its cancellation generation and waiting eligibility still hold at settlement,
-using the snapshot before the acknowledgement changes the binding. Otherwise the press ends and
-the switch is told as a move, with no abort. While `retry` names
-the session the band reads `/band` at the live rate, then as before, and counts every live number on
-its own clock shifted by the snapshot's `generated_at`, so a band on another device agrees with the
+stops the turn only if its cancellation generation and waiting eligibility still hold at settlement.
+`settlePress` matches the acknowledgement's command id to the live sending token before installing
+the snapshot that changes the binding. Otherwise the press ends and the switch is told as a move,
+with no abort. Once stopping, only a session change voids the press; the turn's own end settles it.
+While `retry` names the session the band reads `/band` at the live rate, then as before, and counts
+every live number on its own clock shifted by the snapshot's `generated_at`, so another device agrees with the
 proxy. A retry that kept the session leaves a note for 15 minutes, `↪ Stayed on d••• after HTTP 529
 · the retry 61s later worked; cache kept` (`cache kept` only when the retry read the cache); one
 that ended in a move shows the move. An imminent move off a resting account or a binding whose retry

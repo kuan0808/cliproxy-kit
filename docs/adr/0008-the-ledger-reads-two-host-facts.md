@@ -1,5 +1,7 @@
 # The ledger reads two facts from the proxy itself
 
+Status: accepted design for 0.2.0; implementation pending.
+
 A fallback rule ([Running another model](../architecture.md#running-another-model-when-one-is-used-up))
 can be made useless by two things only CLIProxyAPI knows: the models its accounts serve, and its
 setting `upstream.claude.model-level-cooling`. A plugin is handed its own settings and nothing

@@ -220,8 +220,8 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | **Weekly Fable** | 經過 proxy 的 Claude 帳號沒有 5 小時限制時，空出的位置會顯示 Fable 自己的每週額度，不受 session 的模型或哪個額度剩得較少影響。帳號沒有另設 Fable 額度時寫 `no separate limit`，表示 Fable 只扣整週額度。 |
 | **Context** | 對話用了多少 context。 |
 | **Cache** | prompt 快取還剩多久變冷；保持快取打開時，用 `kept warm 0/3` 計算刷新次數；變冷後顯示下一輪要重寫多少、花多少。 |
-| **Accounts** | 所有帳號的每週用量，以及下次切換或新 session 會分到的帳號：不會是無法服務這個 session 所用模型的帳號，旁邊的用量是限制這個模型的每週額度，和切換選單顯示的一樣。沒有帳號可用時，受阻帳號會倒數到該模型所有已耗盡額度的最晚重置時間，若帳號恢復可用的時間更晚，就等到那時。只要有一個受阻額度的重置時間未知，就不會替該帳號顯示倒數。 |
-| **上方那一列** | 一次一件事：要你決定的問題、剛做完的結果，或提醒（proxy 正在 `retrying` 你的帳號、某個帳號 `resting`、還沒有回應、下一輪會冷啟動、session 換了帳號、context 快滿了）。指令的 `done` 在收到確認後保留 5 秒再自動消失，重新載入 band 也維持原到期時間，遇到警告立即讓位。Switch now 遭拒或沒有回應的訊息會在等待列上方保留 10 秒。Switch now 在按下與送出前都會確認這一輪仍在等待、目標帳號仍符合條件；過期按鈕與已取消的操作都不會生效。每次回覆內容都會記錄，即使當時還不知道有失敗；切換成功後，也不會中止期間已開始回應的回覆。用 `/model` 暫停路由後，已關閉的 fallback 提示仍會保持關閉。 |
+| **Accounts** | 所有帳號的每週用量，以及下次切換或新 session 會分到的帳號：不會是無法服務這個 session 所用模型的帳號，旁邊的用量是限制這個模型的每週額度，和切換選單顯示的一樣。[恢復倒數規則](docs/architecture.md#quota-band)。 |
+| **上方那一列** | 一次一件事：要你決定的問題、剛做完的結果，或提醒（proxy 正在 `retrying` 你的帳號、某個帳號 `resting`、還沒有回應、下一輪會冷啟動、session 換了帳號、context 快滿了）。指令的 `done` 會自動消失，遇到警告立即讓位。[通知保留時間、Switch now 檢查與已關閉提示的規則](docs/architecture.md#quota-band)。 |
 
 <details>
 <summary>沒有 5 小時限制：更新前後</summary>
@@ -351,8 +351,8 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 
 ## 更新與移除
 
-- **更新：** 面板的插件商店會提供 quota-pilot 的新版本，商店一裝好，proxy 就改跑新版，不必重新啟動。手動用同一個檔名蓋掉舊的程式庫，要等 proxy 重新啟動才會跑新版。額度列用 `claude plugin update quota-band@cliproxy-kit` 更新，或在 `/plugin` 的 **Marketplaces** 開啟自動更新；執行中的 session 用 `/reload-plugins` 載入新版。兩者一起改版，請一起更新。
-- **從 0.1.16 升級：** 失敗的請求會先在 session 原本的帳號上重試，一直失敗的帳號會暫停使用，每次切換都會說明原因，按 `switch to k•••` 就不必再等。額度列和 quota-pilot 請一起更新，額度列的文字兩邊都要新版：舊版額度列會把新版插件的每次切換都寫成 `was unavailable`，新版額度列則把舊版插件做的切換寫成 `reason not recorded`。從商店更新的 quota-pilot 會立刻載入；手動安裝的要等 proxy 重新啟動才會載入，重新啟動會中斷所有正在經過它的請求。
+- **更新：** 面板的插件商店會提供 quota-pilot 的新版本，商店一裝好，proxy 就改跑新版，不必重新啟動。手動用同一個檔名蓋掉舊的程式庫，要等 proxy 重新啟動才會跑新版，重新啟動會中斷所有正在經過它的請求。額度列用 `claude plugin update quota-band@cliproxy-kit` 更新，或在 `/plugin` 的 **Marketplaces** 開啟自動更新；執行中的 session 用 `/reload-plugins` 載入新版。從 0.1.19 升到 0.1.20 只要更新額度列，proxy 外掛的行為沒有變更。
+- **從 0.1.16 升級：** 失敗的請求會先在 session 原本的帳號上重試，一直失敗的帳號會暫停使用，每次切換都會說明原因，按 `switch to k•••` 就不必再等。額度列和 quota-pilot 請一起更新，額度列的文字兩邊都要新版：舊版額度列會把新版插件的每次切換都寫成 `was unavailable`，新版額度列則把舊版插件做的切換寫成 `reason not recorded`。
 - **從 0.1.14 升級：** 冷啟動前攔下訊息和保持快取都改成預設關閉，要用時在 `/config` 對所有 session 打開，或用 `/hold-cold on`、`/keep-warm on` 只對一個打開。**攔下訊息的對話大小**或**保持快取的次數**設為 `0` 不再代表關閉：分別代表任何大小和刷新一次；攔下訊息的對話大小為 `0` 時，快取還熱著的每次切換都會先問。
 - **從 0.1.6 升級：** 額度列改成全部走網路，用 Claude Code 本來就在用的 key，所以 `band_tokens` 不再讀取，可以從 `config.yaml` 刪掉。session、專案和記住的資料夾會自動移進 `usage/sessions.json`。
 - **移除：** 在面板的**插件**頁面刪除 Quota Pilot，用 `claude plugin uninstall quota-band@cliproxy-kit` 移除額度列，其餘照上表還原。
@@ -388,7 +388,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 - **單一擁有者。** proxy 的每一把 client key 都視為可信。proxy 接受過某把 key 的請求後，這把 key 就能讀到所有帳號的額度（遮蔽過的名稱，不含 email 或路徑），也能替它開的 session 命名、切換帳號。只把 key 給你願意讓他看到用量的人；從 proxy 移除的 key 最多還能讀一週。
 - **留在本機。** 所有資料都放在 proxy 使用者的 `~/.cache/cliproxy-kit/`（權限 0600），client key 只存雜湊。除了轉送的請求，插件只會用帳號既有的 token 呼叫供應商自己的用量和帳號資料端點，以及查詢裝置名稱的 DNS。
 - **對話記錄。** 它只讀自己那台機器上、同一個使用者的 Claude Code 對話記錄。
-- **額度列送出的內容。** 額度列每 10 秒向 `ANTHROPIC_BASE_URL` 讀取快照，帶著 Claude Code 用的 client key、session 的 id 和模型。要等這個位址回過 quota-pilot 的快照，它才會再附上 session 的標題、開始時的資料夾，以及 repository 的根目錄和 remote（放在 header 裡，不會進 proxy 的請求記錄），也才會讀你這台裝置上的對話記錄來找標題。不是 quota-pilot 的 gateway 永遠收不到這些資料。每次讀取最多等 3 秒，每個 URL 最多保留三個尚未結束的 HTTP 請求；三個都未回應時，額度列會略過新請求，直到有請求結束，並保留上次快照。額度讀取沒有回應時會顯示 `no answer within 3s`。
+- **額度列送出的內容。** 額度列每 10 秒向 `ANTHROPIC_BASE_URL` 讀取快照，帶著 Claude Code 用的 client key、session 的 id 和模型。要等這個位址回過 quota-pilot 的快照，它才會再附上 session 的標題、開始時的資料夾，以及 repository 的根目錄和 remote（放在 header 裡，不會進 proxy 的請求記錄），也才會讀你這台裝置上的對話記錄來找標題。不是 quota-pilot 的 gateway 永遠收不到這些資料。[讀取期限與連線上限](docs/architecture.md#quota-band)會限制沒有回應時的等待時間。
 - **都在金鑰後面。** 頁面本身不含任何資料，一切都經過 management 路由讀取，需要 management key。額度列和 Codex hook 的路由需要 proxy 接受過的 client key。
 
 ## 開發

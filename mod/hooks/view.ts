@@ -162,7 +162,7 @@ export type Facts = {
   top: Row | null
 }
 
-/** How many dismissed notes the band remembers: one older than 15 minutes is not drawn again. */
+/** Bound ordinary note history; the current fallback's dismissal is kept separately. */
 const DISMISSED_KEPT = 8
 
 /** A cold turn over less than this is not worth a word. */

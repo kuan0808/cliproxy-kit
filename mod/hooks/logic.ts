@@ -4,6 +4,7 @@ import { fmtDuration, moveWhy, W } from './wording'
 
 export { bandErrorText, fmtDuration, fmtWait, moveWhy } from './wording'
 
+/** Anchor before awaiting: delivery latency must not move later content behind a failure. */
 export function stepClock(now = () => performance.now()) {
   let host = 0
   let local = now()
@@ -370,8 +371,7 @@ const movesNextTurn = (s: SnapSession | undefined): boolean =>
   Boolean(s?.switch_imminent && (s.switch_reason?.startsWith('resting') || s.switch_reason === 'got no answer'))
 
 /**
- * The single alert the band shows, most important first. Confirmations and notices are drawn
- * by the caller before this.
+ * The single alert the band shows, most important first.
  */
 export function pickAlert(snap: Snap | null, acct: SessionAccount | null, now: number, dismissed: string | readonly string[] = [], pressed: Pressed | null = null, asked = acct?.session.requested_model || acct?.session.model || ''): Alert | null {
   // Each note is dismissed for itself, by its key (0.1.19 kept the last key alone, as a string).

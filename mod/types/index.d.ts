@@ -239,9 +239,9 @@ export type StepInfo = { turnId: string; index: number; startedAt: number; conte
 /**
  * A press of `switch to k•••` while a turn waits (Switch now): one operation, by its command id, for
  * the main turn and step it stops. It asks first (asking), sends the switch (sending, 5 s at most for
- * the acknowledgement), and once the switch is applied stops the turn (stopping) and waits for the
- * turn's own end. Until it stops the turn it goes void at the step's first content, the step's or
- * the turn's end, a refusal or 5 s.
+ * the acknowledgement), and if still waiting when the switch is applied stops the turn (stopping)
+ * and waits for the turn's own end. Until it stops the turn it goes void at reply content, the
+ * step's or the turn's end, a refusal or 5 s.
  */
 export type Press = {
   id: string

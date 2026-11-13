@@ -265,8 +265,8 @@ Cards while Claude waits, one line while it works:
 | **Weekly Fable** | On a proxied Claude account with no 5-hour limit: Fable's own weekly limit fills the freed place, whatever the session's model and whichever limit has less left. `no separate limit` when the account has none, so Fable draws on the week alone. |
 | **Context** | How full the conversation is. |
 | **Cache** | Time left before the prompt cache goes cold, with `kept warm 0/3` counting refreshes while keeping it warm is on; once cold, what the next turn rewrites and costs. |
-| **Accounts** | Every account's weekly use, and the one a switch or a new session gets next: never one that cannot serve this session's model, with the weekly limit that holds that model back, as the switch menu shows it. When none is ready, a blocked account counts down to the latest reset of every exhausted limit for that model or its account-wide recovery, whichever is later. An unknown blocking reset leaves that account without a countdown. |
-| **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy `retrying` your account or an account `resting`, no answer yet, a cold next turn, a session moved, a context filling up). A command's `done` goes 5 s after acknowledgement, including across a band reload, and never covers a warning. Switch now's refusal or no answer stays above the waiting row for 10 s. Switch now checks that the turn still waits and its target is still eligible when pressed and before sending; stale controls and cancelled presses do nothing. Every reply chunk counts, even before a failure is known; an applied switch never stops a reply that has answered meanwhile. Dismissed fallback notes stay dismissed while `/model` suspends their route. |
+| **Accounts** | Every account's weekly use, and the one a switch or a new session gets next: never one that cannot serve this session's model, with the weekly limit that holds that model back, as the switch menu shows it. [Recovery countdown rules](docs/architecture.md#quota-band). |
+| **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy `retrying` your account or an account `resting`, no answer yet, a cold next turn, a session moved, a context filling up). A command's `done` goes away by itself and never covers a warning. [Notice timing, Switch now checks and dismissed notes](docs/architecture.md#quota-band). |
 
 <details>
 <summary>No 5-hour limit: before and after</summary>
@@ -429,16 +429,16 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 
 - **Update:** the panel's Plugin Store offers new versions of quota-pilot, and the proxy runs the
   new one as soon as the store has installed it, with no restart. A library copied over the old one
-  by hand, under the same name, runs only once the proxy restarts. The band updates with
+  by hand, under the same name, runs only once the proxy restarts, interrupting every request in
+  flight through it. The band updates with
   `claude plugin update quota-band@cliproxy-kit`, or by itself once auto-update is on for the
   marketplace under **Marketplaces** in `/plugin`; `/reload-plugins` loads it in a running session.
-  Update both: they change together.
+  From 0.1.19 to 0.1.20, updating the band is enough; the proxy plugin's behaviour is unchanged.
 - **From 0.1.16:** a failure is retried on the session's own account first, an account that keeps
   failing rests, every move says why, and `switch to k•••` stops a waiting turn. Update the band and
   quota-pilot together, as the band's words need both: an older band words every move of the new
   plugin `was unavailable`, and the new band words a move an older plugin made `reason not
-  recorded`. A store update loads the new quota-pilot at once; one installed by hand loads when the
-  proxy restarts, which interrupts every request in flight through it.
+  recorded`.
 - **From 0.1.14:** holding a message before a cold turn and keeping the cache warm are off until you
   turn them on, in `/config` for every session or with `/hold-cold on` and `/keep-warm on` for one.
   `0` in **Hold above** or **Keep warm up to** no longer turns a feature off: it means any size, and
@@ -491,10 +491,8 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   answered with a quota-pilot snapshot does it add the session's title, the folder it started in and
   its repository's root and remote, in headers the proxy keeps out of its request log, and only then
   does it read the session's transcript on your device for a title. A gateway that is not
-  quota-pilot never receives them.
-  Reads give up after 3 s; at most three HTTP requests per URL remain open. When all three
-  are unanswered, refreshes skip new requests until a slot clears; the band keeps its last snapshot and
-  reports `no answer within 3s` for an unanswered quota read.
+  quota-pilot never receives them. [Read deadlines and connection limits](docs/architecture.md#quota-band)
+  keep the wait bounded when that address does not answer.
 - **Behind keys.** The page carries no data: it reads everything through management routes, behind
   the management key. The band's and the Codex hooks' routes need a client key the proxy accepted.
 

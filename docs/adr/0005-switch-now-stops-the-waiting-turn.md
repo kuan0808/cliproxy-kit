@@ -34,9 +34,6 @@ next message reaches k••• before that request has begun answering, both ma
 cache entry is readable only once its response has begun. That rare second write is a known limit. The
 band takes the stopped turn's own `turn.complete`, however late, as proof that it stopped, since a hook
 may hold the abort or the end back; until it comes the band says the stop is not yet confirmed and never
-calls the abort again. The press is one operation: in asking and sending it goes void at the step's first
-content, the step's or the turn's end, a session change, a refusal or 5 s without an acknowledgement, so
-a late acknowledgement never stops a later turn; in stopping only a session change voids it. quota-pilot
-checks the target again when it applies the switch, so a press made on a stale screen is refused. A
-script beside the band's tests rechecks the abort on the Claude Code version in use before a release
-that touches the press.
+calls the abort again. The [band's press contract](../architecture.md#quota-band) defines cancellation
+and acknowledgement settlement. A script beside the band's tests rechecks the abort on the Claude
+Code version in use before a release that touches the press.

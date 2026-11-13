@@ -1,9 +1,11 @@
 # quota-pilot reads no file of Claude Code's
 
-Until 0.1.19 the plugin read the transcripts under Claude Code's folder on the proxy's machine to
+Status: accepted design for 0.2.0; implementation pending.
+
+In 0.1.x the plugin reads the transcripts under Claude Code's folder on the proxy's machine to
 give a session its title and to tell that a session ran on that machine
-([Where quota went](../architecture.md#where-quota-went)), while the band read the same transcript
-and sent the title with each quota read ([quota-band](../architecture.md#quota-band)). From 0.2.0
+([Where quota went](../architecture.md#where-quota-went)), while the band reads the same transcript
+and sends the title with each quota read ([quota-band](../architecture.md#quota-band)). From 0.2.0
 only the band does: what the plugin knows of a session is what its requests and its band say. The
 plugin then reads nothing that belongs to another program, works the same on the proxy's machine,
 in a container and from another device, and about 210 lines with their own index and patterns go.

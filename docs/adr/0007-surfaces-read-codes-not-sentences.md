@@ -1,10 +1,12 @@
 # The surfaces read the plugin's codes, never its sentences
 
+Status: accepted design for 0.2.0; implementation pending.
+
 quota-pilot is the only place that decides (which account, which model, why), and the band and the
-page only show it ([quota-pilot](../architecture.md#quota-pilot)). Until 0.1.19 they found out what
+page only show it ([quota-pilot](../architecture.md#quota-pilot)). In 0.1.x they find out what
 was decided by matching the plugin's English (`switch_reason` starting with `resting`, a reason
 ending in `used up`, a map of seven sentences in the ledger), so rewording either side silently
-changed which row showed and whether a turn counted as cold. From 0.2.0 every fact a surface acts
+changes which row shows and whether a turn counts as cold. From 0.2.0 every fact a surface acts
 on travels as a code beside the sentence (`reason_code`, `switch_kind`, `route_stop`, the parsed
 `fallback_rules`), each surface words it itself, and the sentences stay only for older bands and
 the log.
