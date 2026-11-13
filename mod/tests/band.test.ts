@@ -3417,7 +3417,7 @@ for (const later of [true, false]) {
     const steps = heldSteps(on)
     const aborts = recordAborts(on)
     const clock = stubSession(on, SNAP)
-    on('ui.open', () => ({ value: undefined }))
+    on('ui.open', () => ({ value: undefined }) as never)
     stampReads = true
     await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
     const step = await holdStep($, 'before-ack', TEXT, steps)
