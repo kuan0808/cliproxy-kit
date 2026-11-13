@@ -2513,23 +2513,30 @@ describe('switch now at the view', () => {
     }
   })
 
-  for (const later of [true, false]) {
-    test(`content before failure discovery ${later ? 'refuses' : 'permits'} Switch now when ${later ? 'a chunk followed' : 'no chunk followed'} the failure`, async ($, on) => {
-      const t0 = NOW - 800
-      const clock = mock.clock(on, { now: t0 })
-      const contentClock = stepClock(() => clock.now())
-      contentClock.count(t0)
-      let step = stepAfter({ ...STEP, startedAt: t0 }, TEXT, contentClock.now())!
-      await clock.advance(400)
-      const snap = retrying(NOW, 400)
-      await clock.advance(200)
-      if (later) step = stepAfter(step, { kind: 'text' }, contentClock.now())!
-      await clock.advance(200)
-      if (later) expect(top(snap, { step })).toBeNull()
-      else expect(top(snap, { step })?.title).toMatch(/^d••• returned HTTP 529/)
-      await clock.advance(100)
-      expect(control(snap, { step })).toEqual(later ? [] : ['switch to k•••'])
-    })
+  for (const delay of [0, 500]) {
+    for (const later of [true, false]) {
+      test(`content before failure discovery ${later ? 'refuses' : 'permits'} Switch now when ${later ? 'a chunk followed' : 'no chunk followed'} the failure, with a ${delay}ms clock response`, async ($, on) => {
+        const t0 = NOW - 900
+        const clock = mock.clock(on, { now: t0 })
+        const contentClock = stepClock(() => clock.now())
+        const sampled = await contentClock.count(async () => {
+          await clock.advance(delay)
+          return t0
+        })
+        let step = stepAfter({ ...STEP, startedAt: t0 }, TEXT, sampled)!
+        await clock.advance(600 - delay)
+        if (later) {
+          step = stepAfter(step, { kind: 'text' }, contentClock.now())!
+          expect(step.contentAt).toBe(t0 + 600)
+        }
+        await clock.advance(200)
+        const snap = retrying(clock.now(), 400)
+        if (later) expect(top(snap, { step })).toBeNull()
+        else expect(top(snap, { step })?.title).toMatch(/^d••• returned HTTP 529/)
+        await clock.advance(100)
+        expect(control(snap, { step })).toEqual(later ? [] : ['switch to k•••'])
+      })
+    }
   }
 
   test("only while the step's request is surely on the bound account", () => {

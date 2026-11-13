@@ -8,9 +8,12 @@ export function stepClock(now = () => performance.now()) {
   let host = 0
   let local = now()
   return {
-    count(at: number) {
+    async count(sample: () => Promise<number>) {
+      const sampledAt = now()
+      const at = await sample()
       host = at
-      local = now()
+      local = sampledAt
+      return at
     },
     now: () => host + now() - local,
   }

@@ -1054,7 +1054,7 @@ export const register: Register = (on, options) => {
     // A cache entry lives from its request's start, the time spent answering included. The clock
     // is asked before the step and answers after it: a streaming hook passes the step on first.
     const contentClock = stepClock()
-    const asked = $.clock.now()
+    const asked = contentClock.count(() => $.clock.now())
     // The reader's own step (not a subagent's, nor the band's model call): its content chunks say
     // whether it is answering (text, thinking, a tool call or its input; never the engine's own
     // items, such as its retry marker).
@@ -1063,7 +1063,6 @@ export const register: Register = (on, options) => {
     const ofStep = (p: Press) => p.turnId === e.turnId && p.index === e.index
     if (watched) {
       const [startedAt, snap, sess] = await Promise.all([asked, read($, snapA), read($, sessA)])
-      contentClock.count(startedAt)
       const generation = snap?.sessions[sess.id]?.generation
       await updateLive($, l => ({ ...l, step: { turnId: e.turnId, index: e.index, startedAt, contentAt: 0, generation } }))
     }
@@ -1090,8 +1089,7 @@ export const register: Register = (on, options) => {
           pressGeneration++
         }
         if (content && !quiet) {
-          const at = await $.clock.now()
-          contentClock.count(at)
+          const at = await contentClock.count(() => $.clock.now())
           quiet = $.clock.after(1000, () => {
             quiet = null
             if (!unsaid) return
