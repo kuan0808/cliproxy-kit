@@ -466,18 +466,18 @@ async function settle($: $T, snap: Snap | null): Promise<void> {
  * says the stop is not confirmed yet. Refused, the press is over, and `settlePending` words it.
  */
 async function settlePress($: $T, snap: Snap | null, now: number): Promise<void> {
-  const press = (await read($, uiA)).press
-  const ack = press?.stage === 'sending' ? snap?.acks.find(a => a.command_id === press.id) : undefined
+  const press = sendingPress?.press
+  const ack = press ? snap?.acks.find(a => a.command_id === press.id) : undefined
   if (!press || !ack) return
   let stopping = false
   let stoppingGeneration = 0
   await update($, uiA, (u: UiState): UiState => {
-    if (u.press?.id !== press.id || u.press.stage !== 'sending') return u
-    stopping = ack.status === 'applied' && sendingPress?.press.id === press.id &&
+    if (sendingPress?.press.id !== press.id) return u
+    stopping = ack.status === 'applied' &&
       sendingPress.generation === pressGeneration && Boolean(pressFor({ ...pressInput, now }, press))
     stoppingGeneration = ++pressGeneration
-    if (sendingPress?.press.id === press.id) sendingPress = null
-    return { ...u, press: stopping ? { ...u.press, stage: 'stopping', abortAt: now, switchAt: ack.at } : null }
+    sendingPress = null
+    return { ...u, press: stopping ? { ...press, stage: 'stopping', abortAt: now, switchAt: ack.at } : null }
   })
   if (!stopping) return
   if (stoppingGeneration !== pressGeneration || !pressFor({ ...pressInput, now }, press)) {

@@ -2995,6 +2995,53 @@ for (const [endpoint, withCommand] of [['/band', false], ['/band', true], ['/v1/
   })
 }
 
+for (const outcome of ['applied', 'rejected', 'content'] as const) {
+  test(`a Switch now queued during a full refresh settles its same-response acknowledgement after ${outcome}`, async ($, on) => {
+    const steps = heldSteps(on)
+    const aborts = recordAborts(on)
+    const clock = stubSession(on, SNAP)
+    on('ui.open', () => ({ value: undefined }) as never)
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    const { step } = await waitingOn($, clock, steps, 'same-response')
+    let releaseModels: () => void = () => undefined
+    const heldModels = new Promise<void>(resolve => { releaseModels = resolve })
+    duringFetch = async url => {
+      if (url.endsWith('/v1/models')) await heldModels
+      else if (url.endsWith('/band') && sent['X-Band-Command']) {
+        if (outcome === 'content') {
+          steps.then = [TEXT]
+          expect((await step.next()).value).toEqual(TEXT)
+        }
+        acknowledge(clock, outcome === 'rejected' ? 'rejected' : 'applied', 'the session moved meanwhile')
+      }
+    }
+    const quota = $.command.run({ command: 'quota', args: '', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+    await clock.settle()
+    const pressing = pressSwitchNow($)
+    await clock.settle()
+    expect(commands).toEqual([])
+    await clock.advance(1_000)
+    releaseModels()
+    await Promise.all([quota, pressing])
+    await clock.settle()
+    expect(commands).toHaveLength(1)
+    expect(commands[0]).toMatchObject({ action: 'switch', auth_id: 'claude-k' })
+    expect(aborts).toEqual(outcome === 'applied' ? ['same-response'] : [])
+    await clock.advance(2_000)
+    expect(aborts).toEqual(outcome === 'applied' ? ['same-response'] : [])
+    if (outcome === 'rejected') {
+      expect(await liveText($, 200, 'terminal', 'notice')).toBe('· Could not switch to k•••: the session moved meanwhileok')
+    }
+    await step.return(undefined as never)
+    if (outcome === 'applied') {
+      await $.turn.complete(aborted('same-response'))
+      expect(await rowText($)).toMatch(/send a message to go onok$/)
+    } else if (outcome === 'content') {
+      expect(await rowText($)).toBe('↪ Switched d••• → k••• · by you after waiting 10sok')
+    }
+  })
+}
+
 for (const cancellation of ['timeout', 'content', 'step end', 'turn completion', 'clear', 'resume', 'still valid'] as const) {
   test(`a refresh snapshot taken before ${cancellation} cannot revive a queued Switch now press`, async ($, on) => {
     const steps = heldSteps(on)
