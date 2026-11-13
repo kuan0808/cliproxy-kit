@@ -44,7 +44,7 @@ import {
   weeklyFor,
   currentModel,
 } from '../hooks/logic'
-import type { CacheInfo, Pending, Snap } from '../types'
+import type { CacheInfo, Pending, Snap, SnapCred } from '../types'
 
 const NOW = Date.parse('2026-10-04T12:00:00Z')
 const iso = (ms: number) => new Date(NOW + ms).toISOString()
@@ -232,6 +232,22 @@ describe('accounts', () => {
     expect(nextUp(disabled, 'claude-d', NOW)).toBe('single account')
     expect(resetText('now')).toBe('resetting now')
     expect(resetText('')).toBe('no reset pending')
+  })
+
+  test('next up never names an account the plugin says cannot serve the session\'s model, and gives the week that limits it', async () => {
+    const view = SNAP.providers.claude!
+    const [d, k] = view.credentials as [SnapCred, SnapCred]
+    const fableWeek = (remaining: number) => ({ kind: '7d_fable', label: 'Weekly Fable', remaining, reset_at: iso(50 * H), observed_at: iso(-60_000), stale: false })
+    // k•••'s Fable week is used up and its plain week at 7%; x•••'s Fable week is at 60%.
+    const kOut = { ...k, windows: [...k.windows, fableWeek(0)] }
+    const x = { ...k, id: 'claude-x', auth_index: '3', label: 'x•••', order: 3, windows: [...k.windows, fableWeek(0.4)] }
+    const fable = { model: 'claude-fable-5-2', blocked: ['claude-k'] }
+    expect(nextUp({ ...view, credentials: [d, kOut] }, 'claude-d', NOW, fable)).toBe('no other account ready')
+    expect(nextUp({ ...view, credentials: [d, kOut, x] }, 'claude-d', NOW, fable)).toBe('next up: x••• 60% used')
+    // On Opus nothing stops k•••, and its week is the one that limits.
+    expect(nextUp({ ...view, credentials: [d, kOut, x] }, 'claude-d', NOW, { model: 'claude-opus-5-5', blocked: [] })).toBe('next up: k••• 7% used')
+    // Before the proxy has seen the session: as before, the plain week of the first ready account.
+    expect(nextUp({ ...view, credentials: [d, kOut, x] }, 'claude-d', NOW)).toBe('next up: k••• 7% used')
   })
 
   test('a second credential of one account adds no quota to the pool, and is not another account', async () => {

@@ -9,7 +9,7 @@ import type { Engine, FoundElement, MockClock, TestBody, TestOptions } from 'cla
 const test = (name: string, a: TestOptions | TestBody, b?: TestBody) =>
   typeof a === 'function' ? kitTest(name, { timeoutMs: 120_000 }, a) : kitTest(name, { timeoutMs: 120_000, ...a }, b!)
 
-import type { BandError, Move, SessionInfo, Snap, SnapSwitch, SnapWindow, UiState } from '../types'
+import type { BandError, Move, SessionInfo, Snap, SnapCred, SnapSwitch, SnapWindow, UiState } from '../types'
 import { parseSnap, settingsOf, stepAfter } from '../hooks/logic'
 import { bandFacts, nextTurn } from '../hooks/view'
 import { W } from '../hooks/wording'
@@ -2890,4 +2890,32 @@ test('a change of base URL in a running session starts over', async ($, on) => {
   failure = undefined
   await clock.advance(20_000)
   expect(reads.slice(5).map(toldAbout)).toEqual([false, true])
+})
+
+// ---- next up names an account that can take the session's model ----
+
+test("the Accounts tile's next up and the switch menu name the same accounts, with the same week", async ($, on) => {
+  const [d, k] = SNAP.providers.claude!.credentials as [SnapCred, SnapCred]
+  const fableWeek = (remaining: number) => ({ kind: '7d_fable', label: 'Weekly Fable', remaining, reset_at: iso(50 * H), observed_at: iso(-60_000), stale: false })
+  // A Fable session: k•••'s Fable week is used up (its plain week at 7%), x•••'s at 60%.
+  const snap: Snap = {
+    ...SNAP,
+    providers: { claude: { ...SNAP.providers.claude!, credentials: [
+      d,
+      { ...k, windows: [...k.windows, fableWeek(0)] },
+      { ...k, id: 'claude-x', auth_index: '3', label: 'x•••', order: 3, windows: [...k.windows, fableWeek(0.4)] },
+    ] } },
+    sessions: { s1: { ...SNAP.sessions.s1!, model: 'claude-fable-5-2', blocked: ['claude-k'] } },
+  }
+  stubSession(on, snap)
+  selectedModel = 'claude-fable-5-2'
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+  expect(await ui.find({ text: /next up: x••• 60% used/ })).toBeDefined()
+  expect(await ui.find({ text: /next up: k•••/ })).toBeUndefined()
+  await ui.press({ key: 'switch' })
+  expect((await ui.find({ key: 'to-claude-x' }))?.text).toMatch(/x••• 60% used/)
+  expect(await ui.find({ key: 'to-claude-k' })).toBeUndefined()
+  expect(await ui.find({ text: /^k••• Weekly Fable used up, back in 2d 2h$/ })).toBeDefined()
+  await ui.unmount()
 })

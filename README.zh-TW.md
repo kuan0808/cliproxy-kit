@@ -220,7 +220,7 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | **Weekly Fable** | 經過 proxy 的 Claude 帳號沒有 5 小時限制時，空出的位置會顯示 Fable 自己的每週額度，不受 session 的模型或哪個額度剩得較少影響。帳號沒有另設 Fable 額度時寫 `no separate limit`，表示 Fable 只扣整週額度。 |
 | **Context** | 對話用了多少 context。 |
 | **Cache** | prompt 快取還剩多久變冷；保持快取打開時，用 `kept warm 0/3` 計算刷新次數；變冷後顯示下一輪要重寫多少、花多少。 |
-| **Accounts** | 所有帳號的每週用量，以及下次切換或新 session 會分到的帳號。 |
+| **Accounts** | 所有帳號的每週用量，以及下次切換或新 session 會分到的帳號：不會是無法服務這個 session 所用模型的帳號，旁邊的用量是限制這個模型的每週額度，和切換選單顯示的一樣。 |
 | **上方那一列** | 一次一件事：要你決定的問題、剛做完的結果，或提醒（proxy 正在 `retrying` 你的帳號、某個帳號 `resting`、還沒有回應、下一輪會冷啟動、session 換了帳號、context 快滿了）。 |
 
 <details>

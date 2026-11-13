@@ -482,8 +482,10 @@ Each read, `/band` and the model list a full refresh reads first, gives up after
 (the host's fetch takes no time limit, so a timer is raced against it): a `/band` that gave up is
 `no answer within 3s`, a model list that gave up leaves the switch menu with accounts only, and the
 next read goes on as usual.
-The switch list leaves out accounts that cannot serve the session's model and second credentials
-of an account.
+The switch list leaves out accounts that cannot serve the session's model (the snapshot's `blocked`)
+and second credentials of an account; the Accounts tile's `next up` follows the same rule, and
+both give an account's use of the weekly window that limits the session's model. Before the proxy
+has seen the session, `next up` is the first ready account by the plain week.
 
 After a main reply, the band confirms its route with a fresh `/band` read before recording the
 cache, waiting for it no longer than the read deadline. A failed read, one that gave up, or a

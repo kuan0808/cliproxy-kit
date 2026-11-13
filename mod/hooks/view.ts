@@ -284,7 +284,7 @@ export function bandFacts(i: BandInput, act: Do): Facts {
     ctx,
     cache: { ...cs, rate: hitRate(cache), cold, cost, tokens: cache.prompt, warmed: cache.warmed, keepWarm: settings.keepWarm, keepWarmOn: autoState('keepWarm', settings, i.auto, i.unattended).on },
     holdOn: autoState('holdCold', settings, i.auto, i.unattended).on,
-    pool: all && poolView ? { ...all, caption: nextUp(poolView, poolCurrent, now) } : null,
+    pool: all && poolView ? { ...all, caption: nextUp(poolView, poolCurrent, now, acct?.session) } : null,
     controls: {
       switch: canSwitch ? { key: 'switch', label: 'switch', run: () => act.ui({ confirm: ui.confirm === 'switch' ? '' : 'switch', switchStep: '' }) } : undefined,
       unroute: route && canSend ? { key: 'unroute', label: 'back', run: () => pick(unroute) } : undefined,
@@ -354,7 +354,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
     const ready = new Set(switchTargets(acct.view, acct.session.auth_id, acct.session.blocked).map(x => x.id))
     return ask(W.switchMenu, '', [
       ...otherAccounts(acct.view, acct.session.auth_id).map((x): Act => ready.has(x.id)
-        ? { key: `to-${x.id}`, label: `${x.label} ${usedText(windowOf(x, '7d'))}`, name: true, main: true, run: () => menu.pick({ action: 'switch', fields: { auth_id: x.id }, text: W.switchTo(x.label) }) }
+        ? { key: `to-${x.id}`, label: `${x.label} ${usedText(weeklyFor(x, acct.session.model))}`, name: true, main: true, run: () => menu.pick({ action: 'switch', fields: { auth_id: x.id }, text: W.switchTo(x.label) }) }
         : { key: `not-${x.id}`, label: cannotTake(x, acct.session.model, now), name: true }),
       ...(route ? [{ key: 'unroute', label: `back to ${route.from ? shortModel(route.from) : providerTitle(menu.original)}`, main: true, run: () => menu.pick(menu.unroute) }] : []),
       ...menu.switchProviders.map((p): Act => ({ key: `prov-${p}`, label: `${providerTitle(p)} ›`, main: true, run: () => act.ui({ switchStep: p }) })),

@@ -256,14 +256,19 @@ export function otherAccounts(view: SnapProvider, current: string): SnapCred[] {
   return view.credentials.filter(c => !c.same_as && c.id !== own && c.id !== current)
 }
 
-/** The account a new session or a switch would land on next, other than `current`. */
-export function nextUp(view: SnapProvider, current: string, now: number): string {
+/**
+ * The account a new session or a switch would land on next, other than `current`. Once the proxy
+ * has seen the session, by the switch menu's rule: never an account the plugin lists as unable to
+ * serve the session's model, with the weekly window that limits that model.
+ */
+export function nextUp(view: SnapProvider, current: string, now: number, session?: Pick<SnapSession, 'model' | 'blocked'>): string {
   const others = otherAccounts(view, current).filter(c => !c.disabled)
+  const able = others.filter(c => !session?.blocked?.includes(c.id))
   // A resting account takes a session only when nothing else can.
-  const ready = others.find(c => c.tier < 3 && !restingNow(c, now)) ?? others.find(c => c.tier < 3)
-  if (ready) return `next up: ${ready.label} ${usedText(windowOf(ready, '7d'))}`
+  const ready = able.find(c => c.tier < 3 && !restingNow(c, now)) ?? able.find(c => c.tier < 3)
+  if (ready) return `next up: ${ready.label} ${usedText(session ? weeklyFor(ready, session.model) : windowOf(ready, '7d'))}`
   // When the window that stops each account resets: the plugin knows which one it is.
-  const back = others
+  const back = able
     .map(c => ({ c, t: Date.parse(c.back_at ?? '') }))
     .filter(x => Number.isFinite(x.t) && x.t > now)
     .sort((a, b) => a.t - b.t)[0]
