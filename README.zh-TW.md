@@ -53,10 +53,10 @@
 
 ## 快速開始
 
-需要 macOS 或 Linux 上的 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 8.0.14 以上，並已登入你的帳號；以及 [Claude Code](https://code.claude.com) 2.1.287 以上。
+需要 macOS 或 Linux 上的 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 8.0.66 以上，並已登入你的帳號；以及 [Claude Code](https://code.claude.com) 2.1.287 以上。
 
 > [!IMPORTANT]
-> 選擇或更新 CLIProxyAPI 版本前，先確認 [retry 相容性](docs/architecture.md#limitations)。
+> 先更新 CLIProxyAPI，再更新 quota-pilot。CLIProxyAPI 8.0.48 以前的版本不會載入 quota-pilot；8.0.49 到 8.0.65 會載入，但重試沒辦法留在同一個請求裡（[原因](docs/adr/0010-cliproxyapi-8-0-66-is-the-oldest-proxy-supported.md)）。
 
 **1. 安裝 quota-pilot。** 在 CLIProxyAPI 的 `config.yaml` 開啟插件，並加入這個商店：
 
@@ -266,7 +266,7 @@ Claude 等待時顯示方塊，工作時縮成一行：
 | 帳號一直失敗 | 它暫停使用：只有其他帳號都無法服務時，新 session 才會分到它；它上面的 session 在下一輪換走 | `! d••• resting after 2 failures · moves to k••• (3% used) on the next turn`；Account 卡片顯示 `resting, back in 4m` |
 
 > [!NOTE]
-> 不會重試的情況：登入、額度、模型或請求本身的錯誤、其他狀態碼、暫停中的帳號，以及 Codex 的 session。對話不大的 session 不會等 proxy 在狀態碼之後的暫停結束，而是立刻換帳號。重試由 proxy 或 Claude Code 接手，取決於 proxy 的版本與設定，詳見 [retry 相容性](docs/architecture.md#limitations)。
+> 不會重試的情況：登入、額度、模型或請求本身的錯誤、其他狀態碼、暫停中的帳號，以及 Codex 的 session。對話不大的 session 不會等 proxy 在狀態碼之後的暫停結束，而是立刻換帳號。重試由 proxy 或 Claude Code 接手，取決於失敗的種類與 proxy 的設定，詳見 [重試依賴的行為](docs/architecture.md#upstream-behaviour-it-relies-on)。
 
 在桌面版裡，額度列畫成卡片，跟著 app 的淺色或深色主題，顯示那個帳號自己的額度（見[不經過 proxy 時](#有沒有裝額度列)）：
 
@@ -352,6 +352,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 ## 更新與移除
 
 - **更新：** 面板的插件商店會提供 quota-pilot 的新版本，商店一裝好，proxy 就改跑新版，不必重新啟動。手動用同一個檔名蓋掉舊的程式庫，要等 proxy 重新啟動才會跑新版，重新啟動會中斷所有正在經過它的請求。額度列用 `claude plugin update quota-band@cliproxy-kit` 更新，或在 `/plugin` 的 **Marketplaces** 開啟自動更新；執行中的 session 用 `/reload-plugins` 載入新版。從 0.1.19 升到 0.1.20 只要更新額度列，proxy 外掛的行為沒有變更。
+- **先更新 CLIProxyAPI：** quota-pilot 需要 CLIProxyAPI 8.0.66 以上。先更新並重新啟動 proxy，再更新 quota-pilot：現在跑的 quota-pilot 在新版 proxy 上照常運作，重試也一樣；新版 quota-pilot 則不會在 CLIProxyAPI 8.0.48 以前的版本載入。
 - **從 0.1.16 升級：** 失敗的請求會先在 session 原本的帳號上重試，一直失敗的帳號會暫停使用，每次切換都會說明原因，按 `switch to k•••` 就不必再等。額度列和 quota-pilot 請一起更新，額度列的文字兩邊都要新版：舊版額度列會把新版插件的每次切換都寫成 `was unavailable`，新版額度列則把舊版插件做的切換寫成 `reason not recorded`。
 - **從 0.1.14 升級：** 冷啟動前攔下訊息和保持快取都改成預設關閉，要用時在 `/config` 對所有 session 打開，或用 `/hold-cold on`、`/keep-warm on` 只對一個打開。**攔下訊息的對話大小**或**保持快取的次數**設為 `0` 不再代表關閉：分別代表任何大小和刷新一次；攔下訊息的對話大小為 `0` 時，快取還熱著的每次切換都會先問。
 - **從 0.1.6 升級：** 額度列改成全部走網路，用 Claude Code 本來就在用的 key，所以 `band_tokens` 不再讀取，可以從 `config.yaml` 刪掉。session、專案和記住的資料夾會自動移進 `usage/sessions.json`。
@@ -364,6 +365,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | 從商店安裝失敗 | 面板只等 30 秒，從 GitHub 下載 2 MB 太慢就會失敗：改用手動安裝（步驟 1）。 |
 | 桌面版的額度列還沒有額度 | 桌面版的 session 在第一則回覆時才回報額度。 |
 | 插件底下沒有 quota-pilot | 重新整理面板，並確認 `plugins.enabled: true`。 |
+| proxy 的 log 寫著 `plugin schema version 10 is not supported` | CLIProxyAPI 8.0.48 以前的版本不會載入這個 quota-pilot：把 CLIProxyAPI 更新到 8.0.66 以上，再重新啟動。 |
 | 額度列說這把 key 送出請求後才有額度資料 | 送出一個 prompt：proxy 最近一週還沒接受過這把 key 的請求。 |
 | Claude Code 把訊息退回輸入框，寫著「held by quota-band」 | 攔下訊息已打開，而且下一輪會冷啟動：按 **Enter** 送出，或用 `/hold-cold off` 不再攔。會自動輸入內容到 Claude Code 的程式，啟動時設定 `QUOTA_BAND_UNATTENDED=1`。 |
 | Mac 很忙時，頁面或額度列變慢 | Homebrew 把 proxy 當成低優先的服務執行。在 `~/Library/LaunchAgents/sh.brew.cliproxyapi.plist` 加上 `ProcessType` `Interactive`（`plutil -replace ProcessType -string Interactive <檔案>`），再用 `launchctl bootout gui/$(id -u)/sh.brew.cliproxyapi` 和 `launchctl bootstrap gui/$(id -u) <檔案>` 重新載入。`brew services restart` 會重寫這個檔案。 |
@@ -379,7 +381,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | 按了 `switch to k•••` 之後額度列顯示 `send a message to go on` | 這一輪是刻意停下的：送出任何訊息，就會在 k••• 上接著做，這一輪做過的事都還在。 |
 | 額度列說 `got no answer · moves to k••• on the next turn` | 沒有回應之後的重試也沒有回應；你的下一則訊息會送到 k•••。不用做什麼。 |
 | 請求卡住好幾分鐘 | 經過 proxy 時，Claude Code 沒有等待第一個位元組的上限，只有請求逾時 `API_TIMEOUT_MS`（預設 600 秒）。設短一點能更早結束卡住的請求，但也會切掉大型冷啟動 prompt 比較慢的第一個回覆。按 Esc 再送一次會換帳號；額度列上的 `switch to k•••` 隨時都能換。 |
-| 重試出現在 Claude Code 的訊息上，沒有藏在同一個請求裡 | 對照 [retry 相容性](docs/architecture.md#limitations)，檢查 proxy 的版本與 `request-retry` 設定。 |
+| 連線中斷後，Claude Code 顯示 `API error · Retrying` 與 `503 auth_unavailable: quota-pilot: …`，而不是一個比較久的請求 | CLIProxyAPI 8.0.49 到 8.0.65 會直接結束 quota-pilot 留著要重試的請求，所以每次重試都由 Claude Code 自己送：把 CLIProxyAPI 更新到 8.0.66 以上。設成 `request-retry: 0` 時，proxy 完全不會跑重試輪次。 |
 | Account 卡片顯示 `resting, back in 4m` | 那個帳號一直失敗，正在暫停使用：session 會在下一輪換到能服務的帳號，暫停到顯示的時間結束，或在它第一次成功時結束。不用做什麼。 |
 | 切換提示附上 `switch back` | session 離開的帳號現在又能接手。按 `switch back` 換回去，快取還熱著時會先問；quota-pilot 不會自己把 session 換回去，因為新帳號的快取才是熱的。 |
 

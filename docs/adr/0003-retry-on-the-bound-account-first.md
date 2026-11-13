@@ -17,8 +17,9 @@ retries carry the retry.
 
 ## Consequences
 
-The retry relies on the [proxy contract](../architecture.md#upstream-behaviour-it-relies-on) and
-Claude Code's retries, subject to the [version limits](../architecture.md#limitations). Codex sessions
+The retry relies on the [proxy contract](../architecture.md#upstream-behaviour-it-relies-on) of
+CLIProxyAPI 8.0.66 and later ([ADR-0010](0010-cliproxyapi-8-0-66-is-the-oldest-proxy-supported.md))
+and Claude Code's retries. Codex sessions
 are never declined, as quota-pilot cannot see the proxy's `request-retry` setting. A hang gets one retry, as a
 hang may come from one stuck connection, which a hang that ends at the connection leaves unusable, so
 the retry gets another (one that ends with a late status may reuse it). A wait shows in the band and as

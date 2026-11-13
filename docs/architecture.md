@@ -648,8 +648,10 @@ quota through the proxy: CLIProxyAPI does not pass on the rate-limit events its 
 
 ## Upstream behaviour it relies on
 
-Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296; the quota headers, the usage endpoint's
-`limits` and the profile's plan name against Claude Code 2.1.321:
+Checked against CLIProxyAPI 8.0.69, the oldest supported being 8.0.66
+([ADR-0010](adr/0010-cliproxyapi-8-0-66-is-the-oldest-proxy-supported.md)), and Claude Code 2.1.296;
+the quota headers, the usage endpoint's `limits` and the profile's plan name against Claude Code
+2.1.321:
 
 - A scheduler plugin that handles a pick bypasses the native selector, session affinity included.
 - Pick requests carry `canonical_session_id` (`claude:<session>`, with `:agent:<id>` for a
@@ -662,8 +664,12 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296; the quota headers, t
 - A plugin library replaced in place, under the same file name (a library copied in by hand), is
   loaded again only when the proxy restarts. A store install or update writes the library under a
   name with its version and moves the store's record (`plugins.configs.<id>.store.version`) to it,
-  and the proxy loads that library at once, retiring the one it ran (checked on 8.0.15); at start it
-  deletes the libraries of versions the record does not name.
+  and the proxy loads that library at once, retiring the one it ran (checked on 8.0.15 and 8.0.69);
+  at start it deletes the libraries of versions the record does not name.
+- A plugin declares the plugin schema of the CLIProxyAPI it is built against, and a proxy refuses
+  a newer one than its own (`plugin schema version 10 is not supported` in its log): quota-pilot
+  built against 8.0.69 declares 10, which CLIProxyAPI 8.0.49 and later accept and 8.0.48 and older
+  refuse; a quota-pilot built against 8.0.16 declares 6 and loads on 8.0.69.
 - The desktop app points its Claude Code sessions at Anthropic's own API with its own sign-in, so
   they bypass the proxy; a prompt a `prompt.submit` hook drops goes back into the prompt box.
 - The desktop app lays a plugin's tree out as CSS: widths in `ch`, heights and vertical spacing in
@@ -684,9 +690,9 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296; the quota headers, t
 
 What CLIProxyAPI does around a failed attempt is pinned by the proxy contract test, which runs the
 proxy's own account manager, API handlers and, in `plugin/contract_service_test.go`, its real
-executors against a stub upstream, all in-process (`go test ./...` in `plugin/`; checked against
-8.0.15 and 8.0.16). A proxy update that changes any of this fails that test; known version
-differences are listed under [Limitations](#limitations):
+executors against a stub upstream, all in-process (`go test ./...` in `plugin/`; it passes on 8.0.66
+and 8.0.69, and fails on 8.0.49 to 8.0.65, which end a request at a declined pick). A proxy update
+that changes any of this fails that test:
 
 - When quota-pilot declines the next pick of the same round after an attempt on A failed
   (`TestADeclineAfterAFailureWithThreeRetryRounds`): after a dropped or reset connection the proxy
@@ -700,6 +706,11 @@ differences are listed under [Limitations](#limitations):
   `...WhenAccountAOverridesRetryToZero`, `...WhenTheRoundsAreSpent` and
   `...WhenTheCredentialCapIsSpent`).
   Without a decline the request moves to another account in the same round.
+- The same through quota-pilot itself: `plugin/hostcontract` builds it as the library the proxy
+  loads and runs it in the proxy's own plugin host, before the real Claude handler and executor. A
+  connection dropped on the account it bound the session to is retried there, inside the request,
+  with the proxy's default settings and with `max-retry-credentials: 1`
+  (`TestTheBuiltPluginKeepsADroppedConnectionsRetryOnTheBoundAccount`).
 - A decline on a request's first pick fails it with a 503 carrying the scheduler's reason
   (`TestADeclineOnARequestsFirstPickFailsItWith503AndTheReason`).
 - The pick after a failed attempt names that account in `selected_auth_id`; the next round's first
@@ -735,13 +746,38 @@ differences are listed under [Limitations](#limitations):
   round that offers A at once (`TestAHangsRetryRunsInsideTheSameRequest`), and the Claude handler
   writes no response headers before the first chunk, so the client sees a hang and its retry as one
   response (`TestTheClaudeHandlerWritesNoHeadersBeforeTheFirstChunk`).
+- With keep-alives before the first token (`streaming.keepalive-seconds` above 0 and
+  `send-keepalive-before-ft: true`, both off by default) the first keep-alive sends the headers:
+  the client gets HTTP 200 then, a retry on A inside the request is still one response, and a
+  failure handed back reaches the client as an `event: error` in the stream, a 529 as an
+  `overloaded_error` (`TestAfterKeepAlivesAFailureReachesTheClientAsAnEventUnder200`).
 - A client's cancel during an attempt records a 499 with its wait, with no `ttft` when nothing came
   and one once the stream had started (`TestAClientCancelRecords499WithItsWait`).
+
+What quota-pilot relied on and CLIProxyAPI did differently after 8.0.16, each with what it means
+for a user:
+
+- CLIProxyAPI 8.0.44 to 8.0.65 end a request at a pick quota-pilot declines, with a 503 and its
+  reason, so no retry stays inside its request there: every retry on the bound account is one of
+  Claude Code's own, shown as `API error · Retrying` with quota-pilot's reason. 8.0.66 runs the
+  rounds again, as described above, so on a supported proxy nothing changes for a user.
+- Keep-alives before the first token, absent at 8.0.16 and off by default, send the headers early:
+  a failure the proxy hands back then reaches Claude Code as a stream event under HTTP 200 in place
+  of a status. Claude Code still sends the request again (below), and a retry inside the request
+  is still one long request.
+- Plugin schema 10, from 8.0.49: a quota-pilot built against the newest proxy does not load on an
+  older one, so updating takes the proxy first.
 
 Claude Code, checked against 2.1.296 and again against 2.1.302: through a proxy it sets no limit on
 the wait for a first byte (its first-byte watchdog runs only against Anthropic's own API); its
 request timeout, `API_TIMEOUT_MS`, is 600 s by default, counted from sending the request until the
-response headers arrive; and it retries a 408, 409, 429, 5xx or 529 up to 10 times.
+response headers arrive; and it retries a 408, 409, 429 or 5xx up to 10 times. Run against the
+contract harness on a local port (`TestARealClientAgainstTheHarness`, by hand, with a throwaway
+config folder and a made-up key), 2.1.323 sends a request again after the decline's 503 10 times,
+waiting 0.6, 1.2, 2.1, 4.1, 9.5 and 18 s and then about 33 s each, about 170 s in all; after a 529
+only twice, at 0.6 and 1.1 s; and after a failure that reached it as an `event: error` under HTTP
+200 as after the status it names: an `api_error` 10 times over about 170 s, the first at once, an
+`overloaded_error` 3 more times within 9 s. Then it gives up with the error's text.
 
 What Switch now relies on, checked against Claude Code 2.1.302 by `mod/tests/claude-check/run.sh`,
 run by hand (a stub upstream on localhost and a throwaway config folder; no account is reached):
@@ -753,10 +789,6 @@ back, so the band takes only that end as proof the turn stopped.
 
 ## Limitations
 
-- CLIProxyAPI 8.0.62 answers a declined pick with a 503 at once (checked 2026-11-10; 8.0.15 and
-  8.0.16 do as described above): on it no retry stays inside its request, every retry on the bound
-  account is one of Claude Code's own, and the client sees the 503 with quota-pilot's reason in
-  place of the account's own failure. The contract test and this page follow 8.0.16.
 - Rests and trials live in memory, like refusals: a proxy restart forgets them. An account that
   alternates failure and success never rests, as each success starts the count over.
 - A failure's record that reaches quota-pilot later than the record wait after the next pick costs

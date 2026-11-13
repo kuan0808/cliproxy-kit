@@ -65,12 +65,13 @@ page in the management panel, and a band in Claude Code (**quota-band**).
 
 ## Quick start
 
-You need [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 8.0.14+ on macOS or Linux with
+You need [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 8.0.66+ on macOS or Linux with
 your accounts logged in, and [Claude Code](https://code.claude.com) 2.1.287+.
 
 > [!IMPORTANT]
-> Check [retry compatibility](docs/architecture.md#limitations) before choosing or updating the
-> CLIProxyAPI version.
+> Update CLIProxyAPI before quota-pilot. quota-pilot does not load on CLIProxyAPI 8.0.48 or older,
+> and on 8.0.49 to 8.0.65 it cannot keep a retry inside its request
+> ([why](docs/adr/0010-cliproxyapi-8-0-66-is-the-oldest-proxy-supported.md)).
 
 **1. Install quota-pilot.** Turn plugins on and add this store in CLIProxyAPI's `config.yaml`:
 
@@ -326,8 +327,8 @@ in [docs/architecture.md](docs/architecture.md#when-an-account-fails).
 > [!NOTE]
 > Never retried: a sign-in, quota, model or request failure, any other status, an account at rest,
 > and Codex sessions. A small session is not kept waiting through the proxy's pause after a status;
-> it moves at once. Whether the proxy or Claude Code carries a retry depends on the proxy version
-> and settings: see [retry compatibility](docs/architecture.md#limitations).
+> it moves at once. Whether the proxy or Claude Code carries a retry depends on the failure and the
+> proxy's settings: see [what the retry relies on](docs/architecture.md#upstream-behaviour-it-relies-on).
 
 In the desktop app the band draws cards in the app's own light or dark theme, with that account's
 own quota (see [without the proxy](#with-and-without-the-band)):
@@ -434,6 +435,9 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   `claude plugin update quota-band@cliproxy-kit`, or by itself once auto-update is on for the
   marketplace under **Marketplaces** in `/plugin`; `/reload-plugins` loads it in a running session.
   From 0.1.19 to 0.1.20, updating the band is enough; the proxy plugin's behaviour is unchanged.
+- **CLIProxyAPI first:** quota-pilot needs CLIProxyAPI 8.0.66 or newer. Update and restart the
+  proxy before quota-pilot: the quota-pilot you run now keeps working on the new proxy, retries
+  included, while a new quota-pilot does not load on CLIProxyAPI 8.0.48 or older.
 - **From 0.1.16:** a failure is retried on the session's own account first, an account that keeps
   failing rests, every move says why, and `switch to k•••` stops a waiting turn. Update the band and
   quota-pilot together, as the band's words need both: an older band words every move of the new
@@ -457,6 +461,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | The store install fails | The panel waits 30 seconds for the 2 MB download from GitHub: install by hand (step 1). |
 | The band in the desktop app shows no quota yet | The app's session reports its limits with its first reply. |
 | No quota-pilot page under Plugins | Refresh the panel, and check `plugins.enabled: true`. |
+| The proxy's log says `plugin schema version 10 is not supported` | CLIProxyAPI 8.0.48 or older does not load this quota-pilot: update CLIProxyAPI to 8.0.66 or newer and restart it. |
 | The band says quota data comes once this key has sent a request | Send one prompt: the proxy has not accepted that key for a request in the last week. |
 | Claude Code gives a message back with "held by quota-band" | Holding is on and the next turn would start cold: **Enter** sends it, `/hold-cold off` stops holding. A program that types into Claude Code starts it with `QUOTA_BAND_UNATTENDED=1`. |
 | The page or the band is slow while the Mac is busy | Homebrew runs the proxy as a low-priority service. Add `ProcessType` `Interactive` to `~/Library/LaunchAgents/sh.brew.cliproxyapi.plist` (`plutil -replace ProcessType -string Interactive <file>`), then load it again with `launchctl bootout gui/$(id -u)/sh.brew.cliproxyapi` and `launchctl bootstrap gui/$(id -u) <file>`. `brew services restart` writes the file anew. |
@@ -472,7 +477,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | The band says `send a message to go on` after `switch to k•••` | The turn was stopped on purpose: any message continues it on k•••, with what the turn had done. |
 | The band says `got no answer · moves to k••• on the next turn` | The retry after a hang got no answer; your next message goes to k•••. Nothing to do. |
 | A request hangs for minutes | Through a proxy Claude Code has no first-byte limit, only its request timeout, `API_TIMEOUT_MS` (600 s by default). A shorter one ends a hang sooner, but also cuts off a slow first reply to a large cold prompt. Esc and send again moves the session; `switch to k•••` on the band's row moves it at any time. |
-| Retries happen on Claude Code's line, not inside one request | Check the proxy version and `request-retry` against [retry compatibility](docs/architecture.md#limitations). |
+| After a lost connection Claude Code shows `API error · Retrying` with `503 auth_unavailable: quota-pilot: …`, not one long request | CLIProxyAPI 8.0.49 to 8.0.65 end a request quota-pilot keeps for a retry, so every retry is one of Claude Code's own: update CLIProxyAPI to 8.0.66 or newer. With `request-retry: 0` the proxy runs no retry round at all. |
 | The Account card says `resting, back in 4m` | That account kept failing and rests: the session moves at its next turn to an account that can serve, and the rest ends at the time shown, or at its first success. Nothing to do. |
 | A move offers `switch back` | The account the session left can take it again. `switch back` returns, asking first while the cache is warm; quota-pilot never moves a session back on its own, as the new account's cache is the warm one. |
 
