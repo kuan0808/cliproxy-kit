@@ -158,6 +158,12 @@ export type Facts = {
   top: Row | null
 }
 
+/** How long a notice stays above the warnings from when it was set. */
+export const NOTICE_TOP_MS = 10_000
+
+/** How many dismissed notes the band remembers: one older than 15 minutes is not drawn again. */
+const DISMISSED_KEPT = 8
+
 /** A cold turn over less than this is not worth a word. */
 const COLD_NOTICE_FLOOR = 20_000
 
@@ -371,12 +377,17 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
   }
   // A notice with a life of its own goes by itself, so a waiting row and its control come back.
   const life = ui.noticeLife?.text === ui.notice ? ui.noticeLife : null
-  if (ui.notice && !(life && now >= life.until)) {
-    return {
+  // A command still on its way has nothing to dismiss: its outcome follows.
+  const onItsWay = ui.pending.some(p => W.sending(p.text) === ui.notice)
+  const notice: Row | null = ui.notice && !(life && now >= life.until)
+    ? {
       key: 'notice', tone: ui.noticeIsError ? 'warn' : 'info', title: ui.notice, detail: '', short: life?.short || undefined, acts: [], busy: ui.busy,
-      close: ui.busy ? undefined : { key: 'dismiss', label: 'ok', run: () => act.ui({ notice: '' }) },
+      close: ui.busy || onItsWay ? undefined : { key: 'dismiss', label: 'ok', run: () => act.ui({ notice: '' }) },
     }
-  }
+    : null
+  // What came of a press is on top while it has time left, runs or is on its way, and for its
+  // first moments; a notice older than that, which only `ok` ends, never covers a warning.
+  if (notice && (life || ui.busy || onItsWay || now - (ui.noticeAt || 0) < NOTICE_TOP_MS)) return notice
   const handoff: Act = { key: 'alert-handoff', label: 'hand off', main: true, run: () => act.ui({ confirm: 'handoff' }) }
   // Without quota data from the proxy, the reason it gave goes first.
   if (bandError) return { key: 'alert', tone: 'warn', title: bandErrorText(bandError), detail: '', acts: [] }
@@ -396,6 +407,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
     return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts }
   }
   if (live?.kind === 'watch') return liveRow(live, liveAct)
+  if (notice) return notice
   const cold = c.cold
   if (cold && !working && cold.tokens >= COLD_NOTICE_FLOOR && !coldConfirmed(cold, ui.coldDismissed)) {
     return {
@@ -409,7 +421,7 @@ function topRow(i: BandInput, f: Facts, act: Do, menu: Menu): Row | null {
     const acts: Act[] = back
       ? [{ key: 'switch-back', label: 'switch back', run: () => menu.pick({ action: 'switch', fields: { auth_id: back.id }, text: W.switchTo(back.label) }) }]
       : []
-    return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts, close: { key: 'alert-ok', label: 'ok', run: () => act.ui({ dismissedSwitch: alert.key ?? '' }) } }
+    return { key: 'alert', tone: alert.level, title: alert.text, detail: '', short: alert.short, acts, close: { key: 'alert-ok', label: 'ok', run: () => act.ui({ dismissedSwitch: [...[ui.dismissedSwitch ?? []].flat(), alert.key ?? ''].slice(-DISMISSED_KEPT) }) } }
   }
   const used = f.ctx ? Math.round(100 - f.ctx.left) : 0
   if (settings.handoffAt > 0 && used >= settings.handoffAt && !working && (!ui.handoffDismissedAt || used >= ui.handoffDismissedAt + 10)) {

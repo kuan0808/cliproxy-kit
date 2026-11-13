@@ -1566,8 +1566,8 @@ test('a held question left in the band draws only while holding is on', () => {
   const cache = { lastAt: NOW - 2 * H, prompt: 412_000, read: 400_000, creation: 12_000, input: 10, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
   const ui: UiState = {
     switchStep: '', confirm: 'send', move: null, held: 'the login page next', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
-    pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: '',
-    noticeLife: null, press: null, pressed: null,
+    pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: [],
+    noticeLife: null, noticeAt: 0, press: null, pressed: null,
   }
   const input = (holdColdDefault: boolean) => ({
     snap: SNAP, bandError: null, now: NOW, sess: SESSION, cache, ui, models: [], working: false,
@@ -1873,8 +1873,8 @@ describe('the live rows', () => {
   const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined, press: () => undefined }
   const ui: UiState = {
     switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
-    pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: '',
-    noticeLife: null, press: null, pressed: null,
+    pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: [],
+    noticeLife: null, noticeAt: 0, press: null, pressed: null,
   }
   const cache = { lastAt: NOW - 60_000, prompt: 160_000, read: 150_000, creation: 10_000, input: 10, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
   /** The row at band time NOW, the band's clock `skew` ahead of the proxy's, its step as given. */
@@ -2437,8 +2437,8 @@ describe('switch now at the view', () => {
   const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined, press: () => undefined }
   const ui: UiState = {
     switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
-    pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: '',
-    noticeLife: null, press: null, pressed: null,
+    pending: [], notice: '', noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: [],
+    noticeLife: null, noticeAt: 0, press: null, pressed: null,
   }
   const cache = { lastAt: 0, prompt: 0, read: 0, creation: 0, input: 0, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
   const STEP = { turnId: 't1', index: 0, startedAt: NOW - 60_000, contentAt: 0, generation: 3 }
@@ -2524,4 +2524,169 @@ test('every row of a press fits one line at 80 columns, on the terminal and in t
     await step.return(undefined as never)
     await $.turn.complete({ turnId: `f-${label}`, answer: '', durationMs: 1, isAborted: false, reason: 'error' } as never)
   }
+})
+
+// ---- what came of a press goes by itself, and never hides a warning ----
+
+/** Switches the session to k••• from the menu on the drawn band. */
+const switchToK = async ($: Engine) => {
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, false) })
+  await ui.press({ key: 'switch' })
+  await ui.press({ key: 'to-claude-k' })
+  await ui.unmount()
+}
+
+/** The proxy applied the band's last command; the snapshot says nothing else new. */
+const applied = (clock: MockClock) => {
+  const at = new Date(clock.now()).toISOString()
+  snapshot = { ...snapshot, sequence: snapshot.sequence + 1, acks: [...snapshot.acks, { command_id: commands[commands.length - 1]!.command_id!, session: 's1', status: 'applied', at }] }
+}
+
+/** The session's account read as used up: it moves to k••• once d••• refuses. */
+const USED_UP: Snap = { ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, switch_imminent: true, switch_reason: 'weekly quota used up', next_auth_id: 'claude-k' } } }
+const USED_UP_ROW = '! weekly quota used up on d••• · moves to k••• (7% used) once d••• stops answering '
+
+test('a switch that worked says so for 5 s and goes without a press; a command on its way has no ok', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await switchToK($)
+  // On its way: nothing to dismiss yet.
+  expect(await rowText($, 'notice')).toBe('· Switch to k•••… ')
+  applied(clock)
+  await clock.advance(10_000)
+  expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
+  await clock.advance(4_000)
+  expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
+  await clock.advance(1_000)
+  expect(await rowText($, 'notice')).toBe('')
+})
+
+test('a done notice gives its place to an account read as used up when its 5 s end', async ($, on) => {
+  const clock = stubSession(on, USED_UP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  expect(await rowText($)).toBe(USED_UP_ROW)
+  await switchToK($)
+  applied(clock)
+  await clock.advance(10_000)
+  // What came of the press, while it has time left; then the warning, with no ok pressed.
+  expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
+  expect(await rowText($)).toBe('')
+  await clock.advance(5_000)
+  expect(await rowText($, 'notice')).toBe('')
+  expect(await rowText($)).toBe(USED_UP_ROW)
+})
+
+test('a done notice nobody dismissed does not cover an unreachable proxy', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await switchToK($)
+  applied(clock)
+  await clock.advance(10_000)
+  expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
+  failure = { deny: 'connect ECONNREFUSED 127.0.0.1:8317' }
+  await clock.advance(10_000)
+  // From Claude Code 2.1.323 the host names itself before the network's error.
+  expect(await rowText($)).toMatch(/^! cannot reach the proxy for quota data: .*connect ECONNREFUSED 127\.0\.0\.1:8317 $/)
+})
+
+test('a done notice nobody dismissed does not cover a waiting retry, which keeps its switch to k•••', async ($, on) => {
+  const steps = heldSteps(on)
+  const clock = stubSession(on, SNAP)
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await switchToK($)
+  applied(clock)
+  await clock.advance(10_000)
+  expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
+  // The next turn waits on a retry of d•••.
+  const { step } = await waitingOn($, clock, steps, 'w1')
+  expect(await liveText($)).toBe('! d••• returned HTTP 529 · retrying it in about 55s; k••• is next if neededswitch to k•••')
+  const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(160, true) })
+  expect(await ui.find({ key: 'switch-now' })).toBeDefined()
+  await ui.unmount()
+  await step.return(undefined as never)
+})
+
+test('a notice whose time ended is not drawn again after a /clear or a reload of the band', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  await switchToK($)
+  applied(clock)
+  await clock.advance(10_000)
+  expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
+  await clock.advance(5_000)
+  expect(await rowText($, 'notice')).toBe('')
+  await $.session.end({ reason: 'clear', sessionId: SESSION.id } as never)
+  expect(await rowText($, 'notice')).toBe('')
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  expect(await rowText($, 'notice')).toBe('')
+})
+
+test('ok on the fallback note and on the move note, in turn: neither comes back', async ($, on) => {
+  const route = { provider: 'claude', model: 'claude-opus-5-5', auto: true, from: 'claude-fable-5-2', at: iso(-60_000) }
+  const clock = stubSession(on, {
+    ...SNAP,
+    sessions: { s1: {
+      ...SNAP.sessions.s1!, model: 'claude-opus-5-5', requested_model: 'claude-fable-5-2', route, auth_id: 'claude-k', auth_label: 'k•••',
+      last_switch: { from: 'claude-d', to: 'claude-k', at: iso(-5 * 60_000), reason: '', kind: 'quota', cause: { reason: 'Weekly Fable quota used up' } },
+    } },
+  })
+  selectedModel = 'claude-fable-5-2'
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const ok = async () => {
+    const ui = await $.ui.mount({ plugin: 'quota-band', surface: 'terminal', ...BAND(200, false) })
+    await ui.press({ key: 'alert-ok' })
+    await ui.unmount()
+  }
+  expect(await rowText($)).toMatch(/^↪ fable-5-2 is used up on every account · running opus-5-5 /)
+  await ok()
+  expect(await rowText($)).toBe('↪ Switched d••• → k••• · d••• Weekly Fable quota used upok')
+  await ok()
+  expect(await rowText($)).toBe('')
+  await clock.advance(10_000)
+  expect(await rowText($)).toBe('')
+})
+
+describe('a notice and the warnings', () => {
+  const act = { ui: () => undefined, send: () => undefined, handoff: () => undefined, sendHeld: () => undefined, quota: () => undefined, auto: () => undefined, settings: () => undefined, press: () => undefined }
+  const HANDED = 'Handed off: the new session starts from ~/.cache/cliproxy-kit/handoff/s1.md'
+  const ui: UiState = {
+    switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
+    pending: [], notice: HANDED, noticeIsError: false, busy: false, viewOverride: '', viewPhase: '', viewTurn: 0, turns: 1, dismissedSwitch: [],
+    noticeLife: null, noticeAt: NOW - 3_000, press: null, pressed: null,
+  }
+  const cache = { lastAt: 0, prompt: 0, read: 0, creation: 0, input: 0, ttlMs: H, lastAnswer: '', model: 'claude-opus-5-5', route: '', warmed: 0, warmStop: false }
+  const top = (patch: Partial<UiState>, world: { snap?: Snap; bandError?: BandError; step?: { startedAt: number; contentAt: number } } = {}) =>
+    bandFacts({
+      snap: world.snap ?? SNAP, bandError: world.bandError ?? null, now: NOW, sess: SESSION, cache, ui: { ...ui, ...patch }, models: [], working: Boolean(world.step),
+      settings: settingsOf({}), auto: { holdCold: null, keepWarm: null }, unattended: false, live: { step: world.step ? { turnId: 't1', index: 0, generation: 3, ...world.step } : null, skew: 0 },
+    }, act).top
+  const takeover: Snap = { ...SNAP, sessions: { s1: { ...SNAP.sessions.s1!, takeover: 'claude-k' } } }
+  /** Each warning a notice must not cover, with how its row begins. */
+  const warnings: [string, Parameters<typeof top>[1], RegExp][] = [
+    ['a read error', { bandError: { kind: 'network', message: 'connect ECONNREFUSED' } }, /^cannot reach the proxy/],
+    ['a waiting retry', { snap: retrying(NOW, 10_000), step: { startedAt: NOW - 20_000, contentAt: 0 } }, /^d••• returned HTTP 529 · retrying it/],
+    ["the plugin's warning", { snap: USED_UP }, /^weekly quota used up on d•••/],
+    ['the hang watch', { snap: takeover, step: { startedAt: NOW - 45_000, contentAt: 0 } }, /^no answer for 45s/],
+  ]
+
+  test('a notice with no time limit stays on top for its first 10 s, then gives way to each warning and stays under it', () => {
+    for (const [name, world, row] of warnings) {
+      expect(top({}, world), name).toMatchObject({ key: 'notice', title: HANDED })
+      expect(top({ noticeAt: NOW - 10_000 }, world)?.title, name).toMatch(row)
+      // As 0.1.19 left it, with no time of its own.
+      expect(top({ noticeAt: undefined as never }, world)?.title, name).toMatch(row)
+    }
+    // With nothing wrong it stays until ok.
+    expect(top({ noticeAt: NOW - 3_600_000 })).toMatchObject({ key: 'notice', title: HANDED, close: { label: 'ok' } })
+  })
+
+  test('a notice with time left, of something running, or of a command on its way stays on top of every warning', () => {
+    const sending = { id: 'c1', text: 'Switch to k•••', boot: 'b1', at: NOW - 30_000 }
+    for (const [name, world] of warnings) {
+      expect(top({ noticeAt: NOW - 60_000, noticeLife: { text: HANDED, short: '', until: NOW + 1 } }, world), name).toMatchObject({ key: 'notice', title: HANDED })
+      expect(top({ noticeAt: NOW - 60_000, busy: true }, world), name).toMatchObject({ key: 'notice', busy: true, close: undefined })
+      expect(top({ noticeAt: NOW - 60_000, notice: 'Switch to k•••…', pending: [sending] }, world), name).toMatchObject({ key: 'notice', title: 'Switch to k•••…', close: undefined })
+    }
+  })
 })

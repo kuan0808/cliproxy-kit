@@ -301,13 +301,22 @@ export type UiState = {
   viewTurn: number
   /** Main-conversation turns completed in this session. */
   turns: number
-  /** The account switch whose notice the reader dismissed, by its time. */
-  dismissedSwitch: string
   /**
-   * For the notice whose words are `text` (Switch now's refusal and no answer): when it goes by
-   * itself, on the band's clock, and its short form. Any other notice stays until `ok`.
+   * The notes the reader dismissed (a move, a retry that kept the session, a fallback), by their
+   * keys, the last few. 0.1.19 kept one key, as a string, which still reads (`pickAlert`).
+   */
+  dismissedSwitch: string[]
+  /**
+   * For the notice whose words are `text` (a command that worked, Switch now's refusal and no
+   * answer): when it goes by itself, on the band's clock, and its short form. Any other notice
+   * stays until `ok`.
    */
   noticeLife: { text: string; short: string; until: number } | null
+  /**
+   * When the notice was set, on the band's clock: for a while from then it stays above the
+   * warnings, as while it has time left. 0 for one 0.1.19 set.
+   */
+  noticeAt: number
   /** A press of `switch to k•••` under way, and what came of the last one that switched. */
   press: Press | null
   pressed: Pressed | null

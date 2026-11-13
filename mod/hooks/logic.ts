@@ -334,7 +334,9 @@ const movesNextTurn = (s: SnapSession | undefined): boolean =>
  * The single alert the band shows, most important first. Confirmations and notices are drawn
  * by the caller before this.
  */
-export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxied: boolean, now: number, dismissed = '', pressed: Pressed | null = null, asked = acct?.session.requested_model || acct?.session.model || ''): Alert | null {
+export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxied: boolean, now: number, dismissed: string | readonly string[] = [], pressed: Pressed | null = null, asked = acct?.session.requested_model || acct?.session.model || ''): Alert | null {
+  // Each note is dismissed for itself, by its key (0.1.19 kept the last key alone, as a string).
+  const hidden = [dismissed].flat()
   if (proxied && snap) {
     const age = now - Date.parse(snap.generated_at)
     if (age > 3 * MIN) return { level: 'warn', ...W.stale(fmtDuration(age)) }
@@ -368,20 +370,20 @@ export function pickAlert(snap: Snap | null, acct: SessionAccount | null, proxie
   const fell = route
   if (fell?.auto && fell.from) {
     const key = `fallback:${fell.from}:${fell.model}`
-    if (key !== dismissed) return { level: 'info', ...W.fallback(shortModel(fell.from), shortModel(fell.model)), action: 'dismiss', key }
+    if (!hidden.includes(key)) return { level: 'info', ...W.fallback(shortModel(fell.from), shortModel(fell.model)), action: 'dismiss', key }
   }
   // A retry that kept the session where it was shows for 15 minutes, or until dismissed, unless a
   // move came after it.
   const kept = session.retry_outcome
   const sw = session.last_switch
-  if (kept && kept.at !== dismissed && now - Date.parse(kept.at) < 15 * MIN && (!sw || Date.parse(sw.at) < Date.parse(kept.at))) {
+  if (kept && !hidden.includes(kept.at) && now - Date.parse(kept.at) < 15 * MIN && (!sw || Date.parse(sw.at) < Date.parse(kept.at))) {
     const from = view.credentials.find(c => c.id === kept.account)?.label ?? 'its account'
     return { level: 'info', ...W.kept(from, kept.cause, kept.after_ms, kept.cache_read), action: 'dismiss', key: kept.at }
   }
   // A move shows for 15 minutes, or until dismissed, and says why the session left, from its
   // record; `switch back` while quota-pilot says the account it left can take the session again.
   // After a press that stopped the waiting turn, how to go on, until a main turn starts.
-  if (sw && sw.at !== dismissed && now - Date.parse(sw.at) < 15 * MIN) {
+  if (sw && !hidden.includes(sw.at) && now - Date.parse(sw.at) < 15 * MIN) {
     const from = view.credentials.find(c => c.id === sw.from)?.label ?? 'previous account'
     const to = view.credentials.find(c => c.id === sw.to)?.label ?? 'another account'
     const back = session.switch_back && session.switch_back === sw.from && sw.kind !== 'user' ? sw.from : undefined
@@ -437,6 +439,8 @@ export function readBand(status: number, text: string): { snap: Snap; error: nul
 // A command goes with the band's next read of /band, which answers with its acknowledgement: a
 // minute without one means the proxy is not answering.
 const PENDING_MS = MIN
+/** How long the band says that a command worked. */
+const DONE_MS = 5_000
 
 /**
  * Pending commands as the snapshot leaves them: its acknowledgement settles one; one sent to an
@@ -459,7 +463,7 @@ export function settlePending(pending: readonly Pending[], snap: Snap | null, no
       continue
     }
     if (ack) {
-      notice = ack.status === 'applied' ? { text: W.done(p.text), isError: false } : { text: W.refused(p.text, ack.reason), isError: true }
+      notice = ack.status === 'applied' ? { text: W.done(p.text), isError: false, lifeMs: DONE_MS } : { text: W.refused(p.text, ack.reason), isError: true }
     } else if (snap && snap.boot_id !== p.boot) {
       notice = { text: W.restarted(p.text), isError: true }
     } else if (now - p.at > PENDING_MS) {

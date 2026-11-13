@@ -355,6 +355,35 @@ describe('accounts', () => {
     expect(pickAlert(chosen, sessionAccount(chosen, 's1'), true, NOW)).toBe(null)
   })
 
+  test('a note is dismissed for itself: ok on one never brings another back, and the one key 0.1.19 kept still reads', () => {
+    // A session on a fallback that moved 5 minutes ago and whose retry kept it there 2 minutes ago.
+    const route = { provider: 'claude', model: 'claude-opus-5-5', auto: true, from: 'claude-fable-5-2', at: iso(-60_000) }
+    const moved = iso(-5 * 60_000)
+    const stayed = iso(-2 * 60_000)
+    const snap: Snap = {
+      ...SNAP,
+      sessions: { s1: {
+        ...SNAP.sessions.s1!, model: 'claude-opus-5-5', requested_model: 'claude-fable-5-2', route, auth_id: 'claude-k',
+        last_switch: { from: 'claude-d', to: 'claude-k', at: moved, reason: '', kind: 'quota', cause: { reason: 'Weekly Fable quota used up' } },
+        retry_outcome: { account: 'claude-k', cause: { kind: 'overloaded', status: 529 }, tries: 1, after_ms: 61_000, cache_read: 400_000, at: stayed },
+      } },
+    }
+    const fallback = 'fallback:claude-fable-5-2:claude-opus-5-5'
+    const note = (dismissed?: string | string[]) => pickAlert(snap, sessionAccount(snap, 's1'), true, NOW, dismissed)?.short ?? ''
+    const [fell, kept, left] = ['fable-5-2 used up · on opus-5-5', 'Stayed on k••• · retry worked', 'Switched d••• → k••• · d••• Weekly Fable quota used up']
+    expect(note()).toBe(fell)
+    expect(note([fallback])).toBe(kept)
+    expect(note([fallback, stayed])).toBe(left)
+    expect(note([fallback, stayed, moved])).toBe('')
+    // In the other order: the notes dismissed before stay dismissed.
+    expect(note([moved])).toBe(fell)
+    expect(note([moved, fallback])).toBe(kept)
+    expect(note([moved, fallback, stayed])).toBe('')
+    // 0.1.19 kept the last dismissal alone, as one string.
+    expect(note(fallback)).toBe(kept)
+    expect(note(moved)).toBe(fell)
+  })
+
   test('an exhausted model alert names the core offer instead of a provider-wide account', () => {
     const snap: Snap = {
       ...SNAP,
@@ -454,7 +483,7 @@ describe('accounts', () => {
     const ack = (command_id: string, status: string, reason?: string) => ({ command_id, status, reason, at: iso(0) })
     // Waiting, and nothing has answered yet.
     expect(settlePending([sent('a')], SNAP, NOW + 30_000)).toEqual({ left: [sent('a')], notice: null })
-    expect(settlePending([sent('a')], { ...SNAP, acks: [ack('a', 'applied')] }, NOW)).toEqual({ left: [], notice: { text: 'Switch to a: done', isError: false } })
+    expect(settlePending([sent('a')], { ...SNAP, acks: [ack('a', 'applied')] }, NOW)).toEqual({ left: [], notice: { text: 'Switch to a: done', isError: false, lifeMs: 5_000 } })
     expect(settlePending([sent('a'), sent('b')], { ...SNAP, acks: [ack('a', 'rejected', 'unknown account')] }, NOW))
       .toEqual({ left: [sent('b')], notice: { text: 'Switch to a: unknown account', isError: true } })
     // A new run of the proxy cannot acknowledge what the last one was sent; its own rejection still wins.

@@ -33,7 +33,7 @@ import {
 } from './logic'
 import { accountsPart, quotaPane } from './pane'
 import { cellBar, terminalBand } from './terminal'
-import { PRESS_WAIT_MS, bandFacts, nextTurn, settingsRows, type BandInput, type Do, type Handoff, type SettingRow } from './view'
+import { NOTICE_TOP_MS, PRESS_WAIT_MS, bandFacts, nextTurn, settingsRows, type BandInput, type Do, type Handoff, type SettingRow } from './view'
 import { W } from './wording'
 
 const PANE = 'quota'
@@ -47,7 +47,7 @@ const EMPTY_CACHE: CacheInfo = { lastAt: 0, prompt: 0, read: 0, creation: 0, inp
 const EMPTY_UI: UiState = {
   switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
   pending: [], notice: '', noticeIsError: false, busy: false,
-  viewOverride: '', viewPhase: '', viewTurn: 0, turns: 0, dismissedSwitch: '', noticeLife: null, press: null, pressed: null,
+  viewOverride: '', viewPhase: '', viewTurn: 0, turns: 0, dismissedSwitch: [], noticeLife: null, noticeAt: 0, press: null, pressed: null,
 }
 
 const snapA = atom({ plugin: 'quota-band', key: 'snap' } as const, null)
@@ -352,13 +352,13 @@ async function settle($: $T, snap: Snap | null, now: number): Promise<void> {
     await update($, uiA, (u: UiState): UiState => {
       const { left, notice } = settlePending(u.pending, snap, now)
       if (!notice) return left.length === u.pending.length ? u : { ...u, pending: left }
-      life = notice.lifeMs ?? 0
+      life = notice.lifeMs ?? NOTICE_TOP_MS
       return {
-        ...u, pending: left, notice: notice.text, noticeIsError: notice.isError,
-        noticeLife: life ? { text: notice.text, short: notice.short ?? '', until: now + life } : null,
+        ...u, pending: left, notice: notice.text, noticeIsError: notice.isError, noticeAt: now,
+        noticeLife: notice.lifeMs ? { text: notice.text, short: notice.short ?? '', until: now + life } : null,
       }
     })
-    if (life) redrawAt($, now + life)
+    redrawAt($, now + life)
     return
   }
   const landed = snap?.sessions[(await read($, sessA)).id]?.auth_id
@@ -420,7 +420,7 @@ async function sendPress($: $T, op: Press): Promise<void> {
     const now = await $.clock.now()
     const text = W.pressUnanswered
     await update($, uiA, (u: UiState): UiState => (u.press?.id === id && u.press.stage === 'sending'
-      ? { ...u, press: null, notice: text, noticeIsError: false, noticeLife: { text, short: '', until: now + 10_000 } }
+      ? { ...u, press: null, notice: text, noticeIsError: false, noticeAt: now, noticeLife: { text, short: '', until: now + 10_000 } }
       : u))
     redrawAt($, now + 10_000)
   })
@@ -466,7 +466,7 @@ const moveTarget = (move: Move) => (move.action === 'switch' ? move.fields.auth_
 async function sendCommand($: $T, move: Move, session?: string): Promise<void> {
   const [sess, snap, bandError, cache] = await Promise.all([read($, sessA), read($, snapA), read($, bandErrorA), read($, cacheA)])
   if (!snap || bandError) {
-    await setUi($, { notice: bandError ? bandErrorText(bandError) : W.pluginDown, noticeIsError: true, confirm: '', move: null })
+    await say($, bandError ? bandErrorText(bandError) : W.pluginDown, true, { confirm: '', move: null })
     return
   }
   // The reader chose this move, with what it costs in front of them: its cold turn is neither
@@ -478,7 +478,7 @@ async function sendCommand($: $T, move: Move, session?: string): Promise<void> {
   const pending = { id, text: move.text, boot: snap.boot_id, at }
   await update($, uiA, (u: UiState): UiState => ({
     ...u, confirm: '', switchStep: '', move: null, coldOk: chosen, coldDismissed: chosen,
-    notice: W.sending(move.text), noticeIsError: false, pending: [...u.pending, pending],
+    notice: W.sending(move.text), noticeIsError: false, noticeAt: at, pending: [...u.pending, pending],
   }))
   outbox.push(doc)
   await refresh($, false)
@@ -509,9 +509,17 @@ async function moveAfterHandoff($: $T, id: string, snap: Snap, now: number): Pro
   }
 }
 
-async function setNotice($: $T, notice: string, isError: boolean): Promise<void> {
-  await setUi($, { notice, noticeIsError: isError, busy: false, confirm: '' })
+/**
+ * Says what came of an action: a notice, stamped with when it was set, from which it stays above
+ * the warnings for a while (view.ts), and a redraw when that ends.
+ */
+async function say($: $T, notice: string, isError: boolean, more: Partial<UiState> = {}): Promise<void> {
+  const at = await $.clock.now()
+  await setUi($, { ...more, notice, noticeIsError: isError, noticeAt: at })
+  redrawAt($, at + NOTICE_TOP_MS)
 }
+
+const setNotice = ($: $T, notice: string, isError: boolean) => say($, notice, isError, { busy: false, confirm: '' })
 
 // One band action at a time, its own model call included (a handoff, sending a held message,
 // keeping the cache warm): taken before anything is awaited, so a second press meanwhile does
@@ -567,7 +575,7 @@ const mentionsFile = (text: string) => /(^|\s)@\S/.test(text)
 async function handoffNow($: $T, given: Handoff = {}): Promise<void> {
   const ran = await exclusive(() => runHandoff($, given))
   // Pressed again while one runs, its row says so already; else the cache was being kept warm.
-  if (!ran && !(await read($, uiA)).busy) await setUi($, { notice: W.handoffBusy, noticeIsError: true })
+  if (!ran && !(await read($, uiA)).busy) await say($, W.handoffBusy, true)
 }
 
 async function runHandoff($: $T, given: Handoff): Promise<void> {
@@ -661,7 +669,7 @@ async function sendHeld($: $T): Promise<void> {
     await setUi($, { confirm: '', held: '' })
     if (!text.trim()) return
     if (mentionsFile(text)) {
-      await setUi($, { notice: W.sendFromBox, noticeIsError: false })
+      await say($, W.sendFromBox, false)
       return
     }
     await $.prompt.fill({ text: '' }).catch(() => undefined)
@@ -807,10 +815,10 @@ export const register: Register = (on, options) => {
     mine = { ...NO_CHOICE, ...(await read($, autoA)) }
     // A reload keeps the band's state, perhaps an older version's, but none of the module's
     // timers or the actions it was running: a handoff it stopped gives its message back.
-    const before = await read($, uiA)
+    const [before, started] = await Promise.all([read($, uiA), $.clock.now()])
     await update($, cacheA, c => ({ ...EMPTY_CACHE, ...c }))
     await update($, uiA, (u: UiState): UiState => ({
-      ...EMPTY_UI, ...u, busy: false, notice: u.busy ? W.handoffReloaded : u.notice,
+      ...EMPTY_UI, ...u, busy: false, ...(u.busy ? { notice: W.handoffReloaded, noticeAt: started } : {}),
       confirm: CONFIRMS.includes(u.confirm) ? u.confirm : '',
     }))
     if (before.busy && before.held) await giveBack($, before.held)
@@ -1028,7 +1036,10 @@ export const register: Register = (on, options) => {
       mainTurn = ''
       stopWarm()
       await update($, cacheA, c => ({ ...EMPTY_CACHE, ttlMs: c.ttlMs }))
-      await update($, uiA, (u: UiState): UiState => ({ ...EMPTY_UI, notice: u.notice, noticeIsError: u.noticeIsError, busy: u.busy, held: u.held, afterHandoff: u.afterHandoff }))
+      // A notice goes on with its times: one whose time ended is not drawn again.
+      await update($, uiA, (u: UiState): UiState => ({
+        ...EMPTY_UI, notice: u.notice, noticeIsError: u.noticeIsError, noticeLife: u.noticeLife, noticeAt: u.noticeAt, busy: u.busy, held: u.held, afterHandoff: u.afterHandoff,
+      }))
     }
     const result = await next(e)
     void refresh($, true)

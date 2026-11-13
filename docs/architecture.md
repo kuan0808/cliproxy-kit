@@ -174,6 +174,7 @@ back in 5m`.
 | Takeover margin | 1 s before the step's start | The proxy's clock and the band's agree to within a read's latency |
 | Acknowledgement wait | 5 s for a press's switch; then 5 s after the stop before saying it is not confirmed | The proxy answers within one read; a turn's end comes at once unless a hook holds it |
 | Switch now's notices | 10 s for a refusal or no answer | Long enough to read; then the waiting row and its control come back |
+| A band notice on top | 5 s for a command that worked; 10 s for one that waits for `ok` | Long enough to read; a warning that came meanwhile is never hidden for longer |
 
 ### Running another model when one is used up
 
@@ -427,7 +428,11 @@ character cells in a terminal (`terminal.tsx`), and as cards in the desktop app 
 whose font is proportional, whose widths are CSS lengths and whose colours follow its light or dark
 theme. Both show cards while Claude waits and one line while it works (also when another mod draws
 above the prompt), and the row says one thing at a time: a question, what came of an action, or an alert
-(the proxy's, a cold next turn, a session moved or kept, a full context), in that order. The waiting
+(the proxy's, a cold next turn, a session moved or kept, a full context), in that order. What came of
+an action stays on top while it has time left (a switch, route or back that worked says so for 5 s
+and goes by itself), while it runs or is on its way, and for its first 10 s; after that, a notice
+that waits for `ok` gives way to the proxy's alerts (no quota data, a retry, the plugin's warnings,
+the hang watch) and comes back after them. `ok` on a note dismisses that note alone. The waiting
 rows carry `switch to k•••` (Switch now, in [When an account fails](#when-an-account-fails)).
 
 The quota cards are the account's windows, each with its reset (`view.ts`, `quota`):
