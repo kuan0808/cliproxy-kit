@@ -118,9 +118,19 @@ function inTime<T>($: $T, call: Promise<T>, late: () => T): Promise<T> {
   return Promise.race([call, gaveUp.then(late)]).finally(() => timer?.cancel())
 }
 
+const MAX_FETCHES = 3
+const fetchesInFlight = new Map<string, number>()
+
 /** A read of the proxy that rejects as a network error once it outlasts the deadline. */
-const fetchInTime = ($: $T, url: string, headers: Record<string, string>) => {
-  let call = $.http.fetch(url, { headers })
+async function fetchInTime($: $T, url: string, headers: Record<string, string>) {
+  const active = fetchesInFlight.get(url) ?? 0
+  if (active >= MAX_FETCHES) throw new Error(W.readGaveUp(READ_DEADLINE_MS))
+  fetchesInFlight.set(url, active + 1)
+  let call = $.http.fetch(url, { headers }).finally(() => {
+    const left = fetchesInFlight.get(url)! - 1
+    if (left) fetchesInFlight.set(url, left)
+    else fetchesInFlight.delete(url)
+  })
   if (headers['X-Band-Command']) {
     commandInFlight = true
     call = call.finally(() => {
@@ -143,6 +153,7 @@ let waitingFull = false
 // sendCommand): plugin resources are read-only routes.
 const outbox: { command_id: string; session: string; waited_ms?: number }[] = []
 let commandInFlight = false
+let sendingPress: Press | null = null
 // The base URL whose /band has answered with a snapshot: quota-pilot is there. Only it is told
 // what the session is about (refreshOnce).
 let answeredBy = ''
@@ -222,13 +233,14 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
       )
     }
     for (const [name, value] of said) if (value) headers[name] = encodeURIComponent(value)
+    const bandUrl = `${url}/v0/resource/plugins/quota-pilot/band`
     let command: (typeof outbox)[number] | undefined
-    if (!commandInFlight && outbox.length) {
-      const [ui, at] = await Promise.all([read($, uiA), $.clock.now()])
+    if (!commandInFlight && (fetchesInFlight.get(bandUrl) ?? 0) < MAX_FETCHES && outbox.length) {
+      const at = await $.clock.now()
       while (outbox.length) {
         const next = outbox.shift()!
         if (next.session !== id) continue
-        if (next.waited_ms !== undefined && (ui.press?.id !== next.command_id || ui.press.stage !== 'sending' || at - ui.press.sentAt >= PRESS_WAIT_MS)) continue
+        if (next.waited_ms !== undefined && (sendingPress?.id !== next.command_id || at - sendingPress.sentAt >= PRESS_WAIT_MS)) continue
         command = next
         break
       }
@@ -236,7 +248,7 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
     if (command) headers['X-Band-Command'] = encodeURIComponent(JSON.stringify(command))
     let error: BandError | null = null
     try {
-      const r = await fetchInTime($, `${url}/v0/resource/plugins/quota-pilot/band`, headers)
+      const r = await fetchInTime($, bandUrl, headers)
       ;({ snap, error } = readBand(r.status, r.text))
     } catch (err) {
       error = { kind: 'network', message: networkReason(err instanceof Error ? err.message : String(err)) }
@@ -432,6 +444,7 @@ async function settlePress($: $T, snap: Snap | null, now: number): Promise<void>
   let stopping = false
   await update($, uiA, (u: UiState): UiState => {
     if (u.press?.id !== press.id || u.press.stage !== 'sending') return u
+    if (sendingPress?.id === press.id) sendingPress = null
     stopping = ack.status === 'applied'
     return { ...u, press: stopping ? { ...u.press, stage: 'stopping', abortAt: now, switchAt: ack.at } : null }
   })
@@ -461,15 +474,17 @@ async function sendPress($: $T, op: Press): Promise<void> {
   await update($, uiA, (u: UiState): UiState => {
     sent = !u.press || (u.press.stage === 'asking' && u.press.turnId === op.turnId && u.press.index === op.index)
     if (!sent) return u
+    sendingPress = { ...op, id, stage: 'sending', sentAt: at }
     return {
       ...u, confirm: '', switchStep: '', move: null, coldOk: chosen, coldDismissed: chosen,
-      press: { ...op, id, stage: 'sending', sentAt: at },
+      press: sendingPress,
       pending: [...u.pending, { id, text: W.switchTo(op.label), boot: snap.boot_id, at, press: op.label }],
     }
   })
   if (!sent) return
   outbox.push(doc)
   $.clock.after(PRESS_WAIT_MS, async () => {
+    if (sendingPress?.id === id) sendingPress = null
     const now = await $.clock.now()
     const text = W.pressUnanswered
     await update($, uiA, (u: UiState): UiState => (u.press?.id === id && u.press.stage === 'sending'
@@ -482,6 +497,7 @@ async function sendPress($: $T, op: Press): Promise<void> {
 
 /** A press asking or sending goes void, with nothing more done, at an event of its step or turn. */
 async function voidPress($: $T, mine: (p: Press) => boolean): Promise<void> {
+  if (sendingPress && mine(sendingPress)) sendingPress = null
   if (!(await read($, uiA)).press) return
   await update($, uiA, (u: UiState): UiState => (u.press && u.press.stage !== 'stopping' && mine(u.press) ? { ...u, press: null } : u))
 }
@@ -491,6 +507,7 @@ async function voidPress($: $T, mine: (p: Press) => boolean): Promise<void> {
  * what came of it, `aborted` meaning the turn stopped, any other reason that it ended by itself.
  */
 async function endPress($: $T, turnId: string, reason: string): Promise<void> {
+  if (sendingPress?.turnId === turnId) sendingPress = null
   if ((await read($, uiA)).press?.turnId !== turnId) return
   await update($, uiA, (u: UiState): UiState => {
     const p = u.press
@@ -868,6 +885,10 @@ export const register: Register = (on, options) => {
       ...EMPTY_UI, ...u, busy: false, ...(u.busy ? { notice: W.handoffReloaded } : {}),
       confirm: CONFIRMS.includes(u.confirm) ? u.confirm : '',
     }))
+    const notice = before.busy ? W.handoffReloaded : before.notice
+    if (before.noticeLife?.text === notice && before.noticeLife.until > await $.clock.now()) {
+      redrawAt($, before.noticeLife.until)
+    }
     if (before.busy && before.held) await giveBack($, before.held)
     // A question an earlier version left open about a held message is not asked while holding is off.
     if (!isOn('holdCold')) await update($, uiA, (u: UiState): UiState => (u.confirm === 'send' ? { ...u, confirm: '', held: '' } : u))
@@ -1083,6 +1104,7 @@ export const register: Register = (on, options) => {
     // After a clear or a resume the process goes on with another conversation: a handoff's
     // notice and the move it leaves for the new one stay.
     if (e.reason === 'clear' || e.reason === 'resume') {
+      sendingPress = null
       // Another conversation taken up in this window starts from the defaults; a /clear, the
       // handoff's too, goes on with the work and keeps the choice.
       if (e.reason === 'resume') mine = NO_CHOICE

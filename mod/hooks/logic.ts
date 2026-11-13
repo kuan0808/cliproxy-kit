@@ -269,8 +269,12 @@ export function nextUp(view: SnapProvider, current: string, now: number, session
   if (ready) return `next up: ${ready.label} ${usedText(session ? weeklyFor(ready, session.model) : windowOf(ready, '7d'))}`
   // When the window that stops each account resets: the plugin knows which one it is.
   const back = others
-    .map(c => ({ c, t: Date.parse(c.back_at ?? '') }))
-    .filter(x => Number.isFinite(x.t) && x.t > now)
+    .map(c => {
+      const week = session?.blocked?.includes(c.id) ? weeklyFor(c, session.model) : undefined
+      const reset = week && week.remaining <= 0 ? Date.parse(week.reset_at ?? '') : 0
+      return { c, t: Math.max(Date.parse(c.back_at ?? '') || 0, reset || 0) }
+    })
+    .filter(x => x.t > now)
     .sort((a, b) => a.t - b.t)[0]
   if (back) return `${back.c.label} back in ${fmtDuration(back.t - now)}`
   return others.length ? 'no other account ready' : 'single account'

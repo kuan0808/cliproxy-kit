@@ -265,8 +265,8 @@ Cards while Claude waits, one line while it works:
 | **Weekly Fable** | On a proxied Claude account with no 5-hour limit: Fable's own weekly limit fills the freed place, whatever the session's model and whichever limit has less left. `no separate limit` when the account has none, so Fable draws on the week alone. |
 | **Context** | How full the conversation is. |
 | **Cache** | Time left before the prompt cache goes cold, with `kept warm 0/3` counting refreshes while keeping it warm is on; once cold, what the next turn rewrites and costs. |
-| **Accounts** | Every account's weekly use, and the one a switch or a new session gets next: never one that cannot serve this session's model, with the weekly limit that holds that model back, as the switch menu shows it. When none is ready, a known reset counts down. |
-| **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy `retrying` your account or an account `resting`, no answer yet, a cold next turn, a session moved, a context filling up). A command's `done` goes 5 s after acknowledgement and never covers a warning. Switch now's refusal or no answer stays above the waiting row for 10 s. A queued Switch now is dropped if its press becomes void before sending. Dismissed fallback notes stay dismissed while `/model` suspends their route. |
+| **Accounts** | Every account's weekly use, and the one a switch or a new session gets next: never one that cannot serve this session's model, with the weekly limit that holds that model back, as the switch menu shows it. When none is ready, a blocked account counts down to its model's weekly reset or its account-wide recovery, whichever is later. |
+| **The row above** | One thing at a time: a question for you, what came of an action, or a warning (the proxy `retrying` your account or an account `resting`, no answer yet, a cold next turn, a session moved, a context filling up). A command's `done` goes 5 s after acknowledgement, including across a band reload, and never covers a warning. Switch now's refusal or no answer stays above the waiting row for 10 s. A queued Switch now is dropped if its press becomes void before sending. Dismissed fallback notes stay dismissed while `/model` suspends their route. |
 
 <details>
 <summary>No 5-hour limit: before and after</summary>
@@ -492,6 +492,9 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   its repository's root and remote, in headers the proxy keeps out of its request log, and only then
   does it read the session's transcript on your device for a title. A gateway that is not
   quota-pilot never receives them.
+  Reads give up after 3 s; at most three HTTP requests per URL remain open. When all three
+  are unanswered, refreshes skip new requests until a slot clears; the band keeps its last snapshot and
+  reports `no answer within 3s` for an unanswered quota read.
 - **Behind keys.** The page carries no data: it reads everything through management routes, behind
   the management key. The band's and the Codex hooks' routes need a client key the proxy accepted.
 

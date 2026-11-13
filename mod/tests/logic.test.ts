@@ -245,7 +245,24 @@ describe('accounts', () => {
     const kOut = { ...k, windows: [...k.windows, fableWeek(0)] }
     const x = { ...k, id: 'claude-x', auth_index: '3', label: 'x•••', order: 3, windows: [...k.windows, fableWeek(0.4)] }
     const fable = { model: 'claude-fable-5-2', blocked: ['claude-k'] }
-    expect(nextUp({ ...view, credentials: [d, kOut] }, 'claude-d', NOW, fable)).toBe('no other account ready')
+    expect(nextUp({ ...view, credentials: [d, kOut] }, 'claude-d', NOW, fable)).toBe('k••• back in 2d 2h')
+    for (const [back, expected] of [[2 * H, '2d 2h'], [60 * H, '2d 12h']] as const) {
+      expect(nextUp({ ...view, credentials: [d, { ...kOut, back_at: iso(back) }] }, 'claude-d', NOW, fable)).toBe(`k••• back in ${expected}`)
+    }
+    expect(nextUp({ ...view, credentials: [d, { ...kOut, tier: 3, back_at: iso(2 * H) }] }, 'claude-d', NOW)).toBe('k••• back in 2h')
+    for (const model of ['claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5']) {
+      const kind = `7d_${model.split('-')[1]}`
+      for (const windows of [
+        k.windows.map(w => w.kind === '7d' ? { ...w, remaining: 0, reset_at: iso(50 * H) } : w),
+        [...k.windows, { ...fableWeek(0), kind }],
+      ]) {
+        expect(nextUp({ ...view, credentials: [d, { ...k, windows }] }, 'claude-d', NOW, { model, blocked: ['claude-k'] })).toBe('k••• back in 2d 2h')
+      }
+    }
+    for (const reset_at of [undefined, 'invalid', iso(-H)]) {
+      const unknown = { ...k, windows: [...k.windows, { ...fableWeek(0), reset_at }] }
+      expect(nextUp({ ...view, credentials: [d, unknown] }, 'claude-d', NOW, fable)).toBe('no other account ready')
+    }
     expect(nextUp({ ...view, credentials: [d, kOut, x] }, 'claude-d', NOW, fable)).toBe('next up: x••• 60% used')
     // On Opus nothing stops k•••, and its week is the one that limits.
     expect(nextUp({ ...view, credentials: [d, kOut, x] }, 'claude-d', NOW, { model: 'claude-opus-5-5', blocked: [] })).toBe('next up: k••• 7% used')

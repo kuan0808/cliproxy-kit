@@ -116,6 +116,7 @@ let duringStep: (() => unknown) | undefined
 /** What else happens while the band asks the session's id or the surfaces it draws on, at the test clock's time. */
 let duringId: ((now: number) => unknown) | undefined
 let duringSurfaces: (() => unknown) | undefined
+let duringFetch: ((url: string) => Promise<void>) | undefined
 /** The files the band wrote, the prompts it sent or put in the box. */
 let files: Record<string, string> = {}
 let submitted: string[] = []
@@ -166,6 +167,7 @@ function stubSession(
   duringStep = undefined
   duringId = undefined
   duringSurfaces = undefined
+  duringFetch = undefined
   files = {}
   submitted = []
   filled = []
@@ -217,14 +219,18 @@ function stubSession(
     },
   }))
   const ok = (body: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } })
-  on('http.fetch', (_$, e) => {
+  on('http.fetch', async (_$, e) => {
     const silent = hang?.test(e.url) ? new Promise<never>(() => undefined) : undefined
-    if (!e.url.endsWith('/band')) return silent ?? ok({ data: models })
+    if (!e.url.endsWith('/band')) {
+      await duringFetch?.(e.url)
+      return silent ?? ok({ data: models })
+    }
     bandReads++
     sentTo = e.url
     sent = { ...(e.init?.headers as Record<string, string> | undefined) }
     reads.push(sent)
     if (sent['X-Band-Command']) commands.push(JSON.parse(decodeURIComponent(sent['X-Band-Command'])))
+    await duringFetch?.(e.url)
     return silent ?? failure ?? ok(stampReads ? { ...snapshot, generated_at: new Date(clock.now()).toISOString() } : snapshot)
   })
   on('session.root', () => ({ value: root }))
@@ -2621,6 +2627,36 @@ test('a done notice keeps its full 5 s after a /band answer delayed by 2 s', asy
   expect(await rowText($, 'notice')).toBe('')
 })
 
+test('a done notice restored one second after acknowledgement expires at five seconds without another read', async ($, on) => {
+  const clock = stubSession(on, SNAP)
+  const text = 'Switch to k•••: done'
+  const stored: UiState = {
+    switchStep: '', confirm: '', move: null, held: '', coldOk: '', coldDismissed: '', handoffDismissedAt: 0, afterHandoff: null,
+    pending: [], notice: text, noticeIsError: false, busy: false,
+    viewOverride: '', viewPhase: '', viewTurn: 0, turns: 0, dismissedSwitch: [], press: null, pressed: null,
+    noticeLife: { text, short: '', until: NOW + 4_000 },
+  }
+  let restored = false
+  on('state.get', async (_$, e, next) => {
+    const r = await next(e)
+    return e.plugin === 'quota-band' && e.key === 'ui' && !restored && 'value' in r
+      ? { value: { value: stored, version: r.value?.version ?? 0 } }
+      : r
+  })
+  on('state.set', (_$, e, next) => {
+    if (e.plugin === 'quota-band' && e.key === 'ui') restored = true
+    return next(e)
+  })
+  await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+  const reads = bandReads
+  expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
+  await clock.advance(3_999)
+  expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
+  await clock.advance(1)
+  expect(await rowText($, 'notice')).toBe('')
+  expect(bandReads).toBe(reads)
+})
+
 test('a done notice never covers an account read as used up, even with its 5 s left', async ($, on) => {
   const clock = stubSession(on, USED_UP)
   await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
@@ -2883,11 +2919,67 @@ test('a model list the proxy never answers gives up after 3 s: the read of /band
   expect(bandReads).toBe(reads + 3)
 })
 
+for (const [endpoint, withCommand] of [['/band', false], ['/band', true], ['/v1/models', false]] as const) {
+  test(`${endpoint} has at most three open reads${withCommand ? ' including a command' : ''}, and a freed slot permits a fresh successful read`, async ($, on) => {
+    const clock = stubSession(on, SNAP)
+    const releases: (() => void)[] = []
+    let holding = false
+    let calls = 0
+    let open = 0
+    let peak = 0
+    duringFetch = async url => {
+      if (!url.endsWith(endpoint)) return
+      calls++
+      open++
+      peak = Math.max(peak, open)
+      try {
+        if (holding) await new Promise<void>(resolve => { releases.push(resolve) })
+      } finally {
+        open--
+      }
+    }
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    const initial = calls
+    holding = true
+    if (withCommand) await switchToK($)
+    for (let n = 0; n < 8; n++) {
+      if (endpoint === '/band') await clock.advance(10_000)
+      else {
+        const quota = $.command.run({ command: 'quota', args: '', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+        await clock.advance(3_000)
+        await quota
+      }
+    }
+    await clock.advance(3_000)
+    expect(calls - initial).toBe(3)
+    expect(open).toBe(3)
+    expect(peak).toBe(3)
+    if (endpoint === '/band') expect(await rowText($)).toBe('! cannot reach the proxy for quota data: no answer within 3s ')
+    holding = false
+    releases.shift()!()
+    await clock.settle()
+    expect(open).toBe(2)
+    if (endpoint === '/band') await clock.advance(10_000)
+    else await $.command.run({ command: 'quota', args: '', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+    expect(calls - initial).toBe(4)
+    expect(await rowText($)).toBe('')
+    expect(open).toBe(2)
+    for (const release of releases) release()
+    await clock.settle()
+  })
+}
+
 for (const cancellation of ['timeout', 'content', 'step end', 'turn completion', 'clear', 'resume', 'still valid'] as const) {
-  test(`a queued Switch now press is checked before sending after ${cancellation}`, async ($, on) => {
+  test(`a refresh snapshot taken before ${cancellation} cannot revive a queued Switch now press`, async ($, on) => {
     const steps = heldSteps(on)
     const aborts = recordAborts(on)
     const clock = stubSession(on, SNAP)
+    let delayModels = false
+    let finishModels: () => void = () => undefined
+    const heldModels = new Promise<void>(resolve => { finishModels = resolve })
+    duringFetch = async url => {
+      if (delayModels && url.endsWith('/v1/models')) await heldModels
+    }
     on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
     await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
     let release: (reply: OpEventResult<'http.fetch'>) => void = () => undefined
@@ -2900,6 +2992,9 @@ for (const cancellation of ['timeout', 'content', 'step end', 'turn completion',
     const { step } = await waitingOn($, clock, steps, 'queued-press')
     await pressSwitchNow($)
     expect(commands).toHaveLength(1)
+    delayModels = true
+    const quota = $.command.run({ command: 'quota', args: '', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+    await clock.settle()
     if (cancellation === 'timeout') await clock.advance(5_000)
     else if (cancellation === 'content') {
       steps.then = [TEXT]
@@ -2913,6 +3008,9 @@ for (const cancellation of ['timeout', 'content', 'step end', 'turn completion',
     release({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(snapshot) } })
     await clock.settle()
     await clock.advance(2_000)
+    finishModels()
+    await quota
+    await clock.settle()
     expect(commands).toHaveLength(cancellation === 'still valid' ? 2 : 1)
     if (cancellation === 'still valid') expect(commands[1]).toMatchObject({ action: 'switch', auth_id: 'claude-k', waited_ms: 10_000 })
     expect(aborts).toEqual([])

@@ -434,7 +434,8 @@ above the prompt), and the row says one thing at a time. Questions and actions s
 on their way come first. Completed notices yield immediately to read errors, waiting or running
 retries, the plugin's warnings, the hang watch and a cold next turn. A switch, route or back that
 worked says so for 5 s after its acknowledgement is processed and goes by itself; other completed
-notices wait for `ok` below warnings. Switch now's refused notice also starts at processing time.
+notices wait for `ok` below warnings. Reloading the band restores a stored matching notice's
+expiry redraw, keeping its original deadline. Switch now's refused notice also starts at processing time.
 Only Switch now's refusal and no-answer notices stay above a waiting retry for their 10 s.
 `ok` on a note dismisses that note alone; the current fallback's dismissal survives later move
 and stayed-note dismissals, including while `/model` suspends the route, while the eight most
@@ -488,13 +489,19 @@ Each read, `/band` and the model list a full refresh reads first, gives up after
 `no answer within 3s`, a model list that gave up leaves the switch menu with accounts only, and the
 next read goes on as usual. A command-bearing request holds the outbox until its HTTP call
 actually answers or fails, even after the deadline; reads without commands continue meanwhile.
-Before a queued Switch now command is sent, its press must still be sending within its 5 s wait.
+At most three HTTP calls per URL remain open, including command-bearing calls. When all three are unanswered, refreshes
+report the same deadline error without another fetch; a completed or failed call frees its slot
+for the next refresh. One or two unanswered calls do not hold up a newer read.
+Before a queued Switch now command is sent, its live module token must still name that press
+within its 5 s wait; dispatch state snapshots cannot revive a cancelled press.
 A timeout, content, a step or turn ending, or a clear or resume makes that queued press void.
 The switch list leaves out accounts that cannot serve the session's model (the snapshot's `blocked`)
 and second credentials of an account; the Accounts tile's `next up` follows the same rule, and
 both give an account's use of the weekly window that limits the session's model. Before the proxy
 has seen the session, `next up` is the first ready account by the plain week. When no account is
 ready, an enabled alternative with a known reset still counts down even if it is `blocked`.
+A blocked account recovers at the later of `back_at` and the exhausted weekly window returned by
+`weeklyFor` for the session's model; an account not blocked keeps its `back_at` countdown.
 
 After a main reply, the band confirms its route with a fresh `/band` read before recording the
 cache, waiting for it no longer than the read deadline. A failed read, one that gave up, or a
