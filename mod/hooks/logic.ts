@@ -4,21 +4,32 @@ import { fmtDuration, moveWhy, W } from './wording'
 
 export { bandErrorText, fmtDuration, fmtWait, moveWhy } from './wording'
 
+export function stepClock(now = () => performance.now()) {
+  let host = 0
+  let local = now()
+  return {
+    count(at: number) {
+      host = at
+      local = now()
+    },
+    now: () => host + now() - local,
+  }
+}
+
 /**
  * The band's main step after one of its chunks: content (text, thinking, a tool call or its input)
- * moves its last content time, at most once a second, as what counts is whether content came since
+ * moves its last content time, as what counts is whether content came since
  * a moment; the engine's own items (its retry marker, the envelope) and the end never do.
  */
 export function stepAfter(step: StepInfo | null, chunk: { kind: string }, at: number): StepInfo | null {
-  if (!step || chunk.kind === 'engine' || chunk.kind === 'stop' || at - step.contentAt < 1000) return step
+  if (!step || chunk.kind === 'engine' || chunk.kind === 'stop') return step
   return { ...step, contentAt: at }
 }
 
 /**
  * Whether the step's reply has produced content since the failure at `failureAt` (the plugin's
  * clock; `skew`, how far the band's clock is ahead): the one answer the retry row and Switch now
- * both read. Content time is sampled once a second, so content the band saw arrive after it knew of
- * this failure, or of a later one, counts too.
+ * both read. Content the band saw arrive after it knew of this failure, or of a later one, counts too.
  */
 export function answeredSince(step: StepInfo, failureAt: string, skew: number): boolean {
   const failure = Date.parse(failureAt)

@@ -28,6 +28,7 @@ import {
   settingsOf,
   settlePending,
   stepAfter,
+  stepClock,
   unattendedOf,
   warmDueAt,
   type Settings,
@@ -278,8 +279,9 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
       error = { kind: 'network', message: networkReason(err instanceof Error ? err.message : String(err)) }
     }
     if (snap) answeredBy = url
-    if (snap) pressInput.snap = snap
     pressInput.bandError = error
+    await settlePress($, snap, await $.clock.now())
+    if (snap) pressInput.snap = snap
     // A read that fails keeps the last snapshot beside the reason.
     const old = await read($, snapA)
     if (snap && (snap.sequence !== old?.sequence || snap.boot_id !== old?.boot_id || snap.generated_at !== old?.generated_at)) {
@@ -437,7 +439,6 @@ function titleLine(text: string): string {
  */
 async function settle($: $T, snap: Snap | null): Promise<void> {
   const now = await $.clock.now()
-  await settlePress($, snap, now)
   const ui = await read($, uiA)
   if (ui.pending.length) {
     let life = 0
@@ -469,14 +470,20 @@ async function settlePress($: $T, snap: Snap | null, now: number): Promise<void>
   const ack = press?.stage === 'sending' ? snap?.acks.find(a => a.command_id === press.id) : undefined
   if (!press || !ack) return
   let stopping = false
+  let stoppingGeneration = 0
   await update($, uiA, (u: UiState): UiState => {
     if (u.press?.id !== press.id || u.press.stage !== 'sending') return u
-    pressGeneration++
+    stopping = ack.status === 'applied' && sendingPress?.press.id === press.id &&
+      sendingPress.generation === pressGeneration && Boolean(pressFor({ ...pressInput, now }, press))
+    stoppingGeneration = ++pressGeneration
     if (sendingPress?.press.id === press.id) sendingPress = null
-    stopping = ack.status === 'applied'
     return { ...u, press: stopping ? { ...u.press, stage: 'stopping', abortAt: now, switchAt: ack.at } : null }
   })
   if (!stopping) return
+  if (stoppingGeneration !== pressGeneration || !pressFor({ ...pressInput, now }, press)) {
+    await update($, uiA, (u: UiState): UiState => (u.press?.id === press.id ? { ...u, press: null } : u))
+    return
+  }
   // A hook above may answer the call and never pass it on: only the turn's end says it stopped.
   void $.turn.abort({ turnId: press.turnId }).catch(() => undefined)
   redrawAt($, now + PRESS_WAIT_MS)
@@ -1046,6 +1053,7 @@ export const register: Register = (on, options) => {
     const gen = generation
     // A cache entry lives from its request's start, the time spent answering included. The clock
     // is asked before the step and answers after it: a streaming hook passes the step on first.
+    const contentClock = stepClock()
     const asked = $.clock.now()
     // The reader's own step (not a subagent's, nor the band's model call): its content chunks say
     // whether it is answering (text, thinking, a tool call or its input; never the engine's own
@@ -1055,16 +1063,13 @@ export const register: Register = (on, options) => {
     const ofStep = (p: Press) => p.turnId === e.turnId && p.index === e.index
     if (watched) {
       const [startedAt, snap, sess] = await Promise.all([asked, read($, snapA), read($, sessA)])
+      contentClock.count(startedAt)
       const generation = snap?.sessions[sess.id]?.generation
       await updateLive($, l => ({ ...l, step: { turnId: e.turnId, index: e.index, startedAt, contentAt: 0, generation } }))
     }
     const inner = next(e)
     let r: Awaited<ReturnType<typeof inner.next>>['value'] | undefined
     let done = false
-    // Content moves the step's time at most once a second (stepAfter): until a second has passed
-    // since the chunk last counted, a chunk costs no host call. Every chunk still tells the module
-    // that content came after the failure the band knows of (answeredSince), which Switch now
-    // reads at once; the band's state hears of it when the second ends.
     let quiet: Timer | null = null
     let unsaid = false
     try {
@@ -1077,31 +1082,25 @@ export const register: Register = (on, options) => {
         }
         const chunk = item.value
         const content = watched && chunk.kind !== 'engine' && chunk.kind !== 'stop'
-        const failure = content ? knownFailure() : undefined
-        const step = pressInput.live.step
-        if (failure && step && mine(pressInput.live) && step.answeredAfter !== failure) {
-          pressInput.live = { ...pressInput.live, step: { ...step, answeredAfter: failure } }
-          // A press offered before this content is void now: nothing queued for it is sent.
+        if (content && mine(pressInput.live)) {
+          const failure = knownFailure()
+          const step = stepAfter(pressInput.live.step, chunk, contentClock.now())!
+          unsaid ||= failure !== undefined && step.answeredAfter !== failure
+          pressInput.live = { ...pressInput.live, step: { ...step, ...(failure ? { answeredAfter: failure } : {}) } }
           pressGeneration++
-          unsaid = true
         }
         if (content && !quiet) {
           const at = await $.clock.now()
+          contentClock.count(at)
           quiet = $.clock.after(1000, () => {
             quiet = null
             if (!unsaid) return
             unsaid = false
             void updateLive($, l => l).then(() => voidPress($, ofStep))
           })
-          const said = unsaid
           unsaid = false
-          let answered = false
-          await updateLive($, l => {
-            const step = mine(l) ? stepAfter(l.step, chunk, at) : l.step
-            answered = step !== l.step
-            return answered ? { ...l, step } : l
-          })
-          if (answered || said) await voidPress($, ofStep)
+          await updateLive($, l => (mine(l) ? { ...l, step: stepAfter(l.step, chunk, at) } : l))
+          await voidPress($, ofStep)
         }
         yield chunk
       }

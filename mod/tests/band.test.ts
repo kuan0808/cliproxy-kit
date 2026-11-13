@@ -10,7 +10,7 @@ const test = (name: string, a: TestOptions | TestBody, b?: TestBody) =>
   typeof a === 'function' ? kitTest(name, { timeoutMs: 120_000 }, a) : kitTest(name, { timeoutMs: 120_000, ...a }, b!)
 
 import type { BandError, Move, SessionInfo, Snap, SnapCred, SnapSwitch, SnapWindow, UiState } from '../types'
-import { parseSnap, settingsOf, stepAfter } from '../hooks/logic'
+import { parseSnap, settingsOf, stepAfter, stepClock } from '../hooks/logic'
 import { bandFacts, nextTurn } from '../hooks/view'
 import { W } from '../hooks/wording'
 import MOVES from './moves.js'
@@ -2513,6 +2513,25 @@ describe('switch now at the view', () => {
     }
   })
 
+  for (const later of [true, false]) {
+    test(`content before failure discovery ${later ? 'refuses' : 'permits'} Switch now when ${later ? 'a chunk followed' : 'no chunk followed'} the failure`, async ($, on) => {
+      const t0 = NOW - 800
+      const clock = mock.clock(on, { now: t0 })
+      const contentClock = stepClock(() => clock.now())
+      contentClock.count(t0)
+      let step = stepAfter({ ...STEP, startedAt: t0 }, TEXT, contentClock.now())!
+      await clock.advance(400)
+      const snap = retrying(NOW, 400)
+      await clock.advance(200)
+      if (later) step = stepAfter(step, { kind: 'text' }, contentClock.now())!
+      await clock.advance(200)
+      if (later) expect(top(snap, { step })).toBeNull()
+      else expect(top(snap, { step })?.title).toMatch(/^d••• returned HTTP 529/)
+      await clock.advance(100)
+      expect(control(snap, { step })).toEqual(later ? [] : ['switch to k•••'])
+    })
+  }
+
   test("only while the step's request is surely on the bound account", () => {
     const snap = retrying(NOW, 10_000)
     // A pick of the binding answered elsewhere since a second before the step began: hidden.
@@ -3392,6 +3411,44 @@ test("the Accounts tile's next up and the switch menu name the same accounts, wi
 })
 
 // ---- Switch now reads one answer to "has the reply produced content since the failure" ----
+
+for (const later of [true, false]) {
+  test(`an applied in-flight press ${later ? 'keeps answering after content within the quiet second' : 'stops a waiting turn after a delayed acknowledgement'}`, async ($, on) => {
+    const steps = heldSteps(on)
+    const aborts = recordAborts(on)
+    const clock = stubSession(on, SNAP)
+    on('ui.open', () => ({ value: undefined }))
+    stampReads = true
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    const step = await holdStep($, 'before-ack', TEXT, steps)
+    const t0 = clock.now()
+    steps.then = [{ kind: 'text', index: 0, text: ' more' }]
+    await clock.advance(500)
+    snapshot = retrying(t0 + 500, 100)
+    await $.command.run({ command: 'quota', args: '', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+    let release: () => void = () => undefined
+    const held = new Promise<void>(resolve => { release = resolve })
+    duringFetch = async url => {
+      if (url.endsWith('/band') && sent['X-Band-Command']) await held
+    }
+    const pressing = pressSwitchNow($)
+    await clock.settle()
+    expect(commands.filter(c => c.action === 'switch')).toHaveLength(1)
+    await clock.advance(later ? 100 : 600)
+    if (later) expect((await step.next()).value).toEqual(steps.then[0])
+    acknowledge(clock, 'applied')
+    release()
+    await pressing
+    await clock.settle()
+    expect(aborts).toEqual(later ? [] : ['before-ack'])
+    if (later) {
+      expect(await liveText($, 200, 'terminal', 'notice')).toBe('')
+      expect(await liveText($)).toBe('↪ Switched d••• → k••• · by you after waiting 1sok')
+    }
+    await step.return(undefined as never)
+    if (!later) await $.turn.complete(aborted('before-ack'))
+  })
+}
 
 for (const [name, later, sent] of [
   ['content that came after the band knew of the failure refuses the press, though its second was not sampled', true, false],
