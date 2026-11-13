@@ -1671,6 +1671,93 @@ func TestAContinuationAfterASwitchIsSentAgainWithoutItsThread(t *testing.T) {
 	}
 }
 
+func TestAContinuationRestoresPreKindBindingOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		replay bool
+	}{
+		{"switched by user", true},
+		{"previous account unavailable; weekly quota resets soonest", true},
+		{"moved while idle; weekly quota resets soonest", true},
+		{"weekly quota resets soonest", false},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			s, c := newTestState()
+			setQuota(s, c, "claude-b", 0.9, 0.5, 24*time.Hour)
+			raw := fmt.Sprintf(`{"schema_version":1,"bindings":{"claude|claude:s1":{"auth_id":"claude-b","reason":%q,"last_used":%q,"at":%q}}}`,
+				tc.reason, c.t.Format(time.RFC3339Nano), c.t.Format(time.RFC3339Nano))
+			var saved Persisted
+			if err := json.Unmarshal([]byte(raw), &saved); err != nil {
+				t.Fatal(err)
+			}
+			s.Import(saved)
+			d := s.Intercept(InterceptInput{Session: "s1", Format: "claude", Model: "claude-opus-5-5", Thread: "continue"})
+			if d.Terminate != tc.replay || tc.replay && d.ErrorCode != "thread_unsupported_request" {
+				t.Fatalf("imported continuation: %+v, want replay %v", d, tc.replay)
+			}
+		})
+	}
+}
+
+func TestAContinuationWaitsForItsAccountsModelListingAfterAnyFailure(t *testing.T) {
+	const model = "claude-opus-5-5"
+	for _, binding := range []string{"main", "child", "inherited"} {
+		for _, failedModel := range []string{model, "claude-fable-5-1"} {
+			t.Run(binding+"/"+failedModel, func(t *testing.T) {
+				s, c := newTestState()
+				setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+				setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+				in := InterceptInput{Session: "s1", Format: "claude", Model: model, Thread: "continue"}
+				parentAccount := "claude-a"
+				if binding == "child" {
+					parentAccount = "claude-b"
+				}
+				served(s, c, "claude:s1", parentAccount, true)
+				if binding != "main" {
+					in.Canonical = "claude:s1:agent:child"
+					if binding == "child" {
+						served(s, c, in.Canonical, "claude-a", true)
+					}
+				}
+				restarted := New("restarted", c.now)
+				restarted.Import(s.Export())
+				if d := restarted.Intercept(in); d.Terminate {
+					t.Fatalf("a restart without listing or failure evidence lost its thread: %+v", d)
+				}
+				pick(s, "claude:probe", model, both)
+				c.add(time.Second)
+				failure := Usage{Provider: "claude", Model: failedModel, SessionID: "claude:other:agent:worker", ParentID: "claude:other",
+					AuthID: "claude-a", RequestedAt: c.t, Failed: true, StatusCode: 529}
+				s.Observe(failure)
+				restarted.Observe(failure)
+				checkReplay := func(st *State, stage string) {
+					t.Helper()
+					if d := st.Intercept(in); !d.Terminate || d.ErrorCode != "thread_unsupported_request" {
+						t.Fatalf("%s: %+v, want stateless replay", stage, d)
+					}
+				}
+				checkReplay(s, "another session's failure")
+				checkReplay(restarted, "failure without a previous listing")
+				c.add(time.Second)
+				pick(s, "claude:probe", "claude-sonnet-5-5", both)
+				checkReplay(s, "listing for another model")
+				pick(s, "claude:probe", model+"(high)", both)
+				if d := s.Intercept(in); d.Terminate {
+					t.Fatalf("listing after the failure did not restore continuation: %+v", d)
+				}
+				failure.RequestedAt = c.t
+				s.Observe(failure)
+				checkReplay(s, "failure at the listing's timestamp")
+				c.add(time.Nanosecond)
+				pick(s, "claude:probe", model, both)
+				if d := s.Intercept(in); d.Terminate {
+					t.Fatalf("a later listing did not restore continuation: %+v", d)
+				}
+			})
+		}
+	}
+}
+
 func TestBoundContinuationsRefreshInventory(t *testing.T) {
 	const model = "claude-opus-5-5"
 	for _, binding := range []string{"main", "child", "inherited"} {
@@ -1741,13 +1828,21 @@ func TestOnlyBoundClaudeContinuationsRefreshInventory(t *testing.T) {
 
 func TestALegacyMoveKeepsItsThreadOwnerUnknown(t *testing.T) {
 	const model = "claude-opus-5-5"
-	for _, kind := range []string{MoveUser, MoveLeftOut} {
-		t.Run(kind, func(t *testing.T) {
+	for _, tc := range []struct {
+		kind, reason string
+	}{
+		{kind: MoveUser},
+		{kind: MoveLeftOut},
+		{kind: MoveUser, reason: "switched by user"},
+		{kind: MoveLeftOut, reason: "previous account unavailable; weekly quota resets soonest"},
+		{kind: MoveLeftOut, reason: "moved while idle; weekly quota resets soonest"},
+	} {
+		t.Run(tc.kind+"/"+tc.reason, func(t *testing.T) {
 			s, c := newTestState()
 			setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
 			setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
 			served(s, c, "claude:s1", "claude-a", true)
-			if kind == MoveUser {
+			if tc.kind == MoveUser {
 				if ack := s.Apply(Command{CommandID: "original", Session: "s1", BootID: "boot-1", CreatedAt: c.t, Action: "switch", AuthID: "claude-b"}); ack.Status != "applied" {
 					t.Fatalf("original switch: %+v", ack)
 				}
@@ -1759,10 +1854,13 @@ func TestALegacyMoveKeepsItsThreadOwnerUnknown(t *testing.T) {
 			}
 			saved := s.Export()
 			b := saved.Bindings["claude|claude:s1"]
-			if b.AuthID != "claude-b" || b.Kind != kind {
+			if b.AuthID != "claude-b" || b.Kind != tc.kind {
 				t.Fatalf("saved binding: %+v", b)
 			}
 			b.ThreadAuth = ""
+			if tc.reason != "" {
+				b.Kind, b.Reason = "", tc.reason
+			}
 			saved.Bindings["claude|claude:s1"] = b
 			s, c = newTestState()
 			s.Import(saved)

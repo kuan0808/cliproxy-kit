@@ -280,3 +280,30 @@ func TestAContinuationOfADisabledThreadIsSentAgainWithoutItsThread(t *testing.T)
 	}
 	waitForUsage(t, session)
 }
+
+func TestAfterAnotherSessionFailsTheThreadIsSentAgainWithoutItsThread(t *testing.T) {
+	session, bound, id := startThread(t)
+	otherSession, otherBound, otherID := startThread(t)
+	if otherBound != bound {
+		t.Fatalf("the two sessions bound to %s and %s, want the same account", bound, otherBound)
+	}
+	proxy.upstream.fail(bound, func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(529)
+		_, _ = fmt.Fprint(w, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+	})
+	status, body, _ := turn(t, otherSession, continuing(otherID))
+	if attempts := proxy.upstream.take(); status != 529 || !slices.Equal(attempts, []string{bound}) {
+		t.Fatalf("other session's failure: %d %s, attempts %v, want one on %s", status, body, attempts, bound)
+	}
+	waitForUsage(t, otherSession)
+	status, body, _ = turn(t, session, continuing(id))
+	if attempts := proxy.upstream.take(); !threadUnsupported(status, body) || len(attempts) != 0 {
+		t.Fatalf("continuation after another session's failure: %d %s, attempts %v; want 400 thread_unsupported_request", status, body, attempts)
+	}
+	status, body, _ = turn(t, session, "")
+	if attempts := proxy.upstream.take(); status != http.StatusOK || len(attempts) != 1 || attempts[0] == bound {
+		t.Fatalf("the turn sent again: %d %s, attempts %v, want another account than %s", status, body, attempts, bound)
+	}
+	waitForUsage(t, session)
+}

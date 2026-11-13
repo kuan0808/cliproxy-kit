@@ -142,8 +142,11 @@ thread_unsupported_request`, which makes Claude Code send the turn again without
 the thread no longer lives on the bound account (after a switch or a move), its owner is unknown
 because an older binding recorded a switch or move without the thread's account, or the bound
 account should not take it (a failure there since its last success, a retry waiting, a `hung` mark,
-an account resting, used up, disabled or removed). An idle session on a low account also sends again
-without its thread when the existing idle-move rule has a known eligible, ready alternative. The
+an account resting, used up, disabled or removed). A failure on that account in any session or model
+also requires replay until a later pick lists it for the continuation's model again. With neither
+a failure nor a listing recorded after restart, the continuation keeps its thread. An idle session
+on a low account also sends again without its thread when the existing idle-move rule has a known
+eligible, ready alternative. The
 check uses the child's own binding for a subagent with its own thread, else its parent's. Before
 that check, a bound Claude continuation rereads the host inventory when it is over five seconds
 old, using the retry episode's account-list age. A failed read leaves the held inventory in use.

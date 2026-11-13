@@ -122,7 +122,8 @@ type Binding struct {
 	Cause *Cause `json:"cause,omitempty"`
 	// ThreadAuth is the account the session's Claude message thread lives on: the one that last
 	// answered a request carrying it. A switch or a move leaves it behind (threadStaysLocked).
-	// An empty value with a recorded move Kind means unknown, not the current AuthID.
+	// An empty value with a move Kind, or a switch or move Reason saved by 0.1.16 or older,
+	// means unknown, not the current AuthID.
 	ThreadAuth string `json:"thread_auth,omitempty"`
 }
 
@@ -1140,8 +1141,8 @@ func (s *State) movedLocked(provider, canonical, root, from, to, model, reason, 
 }
 
 // threadAuth is the account the binding's message thread lives on: the one it last answered on.
-// A binding kept by an older quota-pilot recorded none: one that came by a switch or a move has an
-// unknown owner (""), any other its own account.
+// Older bindings recorded none: a move Kind, or a switch or move Reason from 0.1.16 or older,
+// means an unknown owner (""); any other binding keeps its own account.
 func (b *Binding) threadAuth() string {
 	if b == nil {
 		return ""
@@ -1149,7 +1150,9 @@ func (b *Binding) threadAuth() string {
 	if b.ThreadAuth != "" {
 		return b.ThreadAuth
 	}
-	if b.Kind != "" {
+	if b.Kind != "" || b.Reason == switchedReason ||
+		strings.HasPrefix(b.Reason, "previous account unavailable; ") ||
+		strings.HasPrefix(b.Reason, "moved while idle; ") {
 		return ""
 	}
 	return b.AuthID
@@ -1168,6 +1171,9 @@ func (s *State) threadStaysLocked(canonical, root, model string, now time.Time) 
 	}
 	ek := episodeKey{key, modelKey(model)}
 	if s.failures[key][ek.model] != nil || s.episodes[ek] != nil || s.hung[ek] {
+		return false
+	}
+	if failed := s.failedAt[b.AuthID]; !failed.IsZero() && !failed.Before(s.listed[b.AuthID][ek.model]) {
 		return false
 	}
 	c := s.creds[b.AuthID]
