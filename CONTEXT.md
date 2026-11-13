@@ -16,7 +16,7 @@ One Claude Code conversation or Codex thread, as the proxy knows it by its sessi
 _Avoid_: conversation (when the proxy's unit is meant), chat
 
 **Binding**:
-The account a session's thread is tied to, where its prompt cache lives.
+The account chosen to serve a session's conversation thread.
 _Avoid_: affinity, pin, assignment
 
 **Bound account**:

@@ -108,8 +108,8 @@ type CredInfo struct {
 	NextRetryAfter             time.Time
 }
 
-// Binding ties one conversation thread (a main session, a subagent or a fork) to the
-// credential that holds its upstream message thread and prompt cache.
+// Binding records the credential chosen to serve a conversation thread (a main session, a
+// subagent or a fork), separately from its upstream message thread's owner in ThreadAuth.
 type Binding struct {
 	AuthID   string    `json:"auth_id"`
 	Reason   string    `json:"reason"`
@@ -122,6 +122,7 @@ type Binding struct {
 	Cause *Cause `json:"cause,omitempty"`
 	// ThreadAuth is the account the session's Claude message thread lives on: the one that last
 	// answered a request carrying it. A switch or a move leaves it behind (threadStaysLocked).
+	// An empty value with a recorded move Kind means unknown, not the current AuthID.
 	ThreadAuth string `json:"thread_auth,omitempty"`
 }
 
@@ -1151,11 +1152,9 @@ func (b *Binding) threadAuth() string {
 	return b.AuthID
 }
 
-// threadStaysLocked tells whether a Claude request that continues its session's message thread may
-// run where the thread lives. From CLIProxyAPI 8.0.68 the proxy offers such a request only the
-// account that answered the message it continues, so it may only while that is the bound account
-// and quota-pilot would still give the session that account: no failure there since its last
-// success, no retry waiting, not marked hung, and an account that can take the model.
+// threadStaysLocked prevents a pinned continuation from undoing a binding change or bypassing
+// routing rules such as idle relocation. From CLIProxyAPI 8.0.68 the host offers only the thread's
+// owner, so a session that should run elsewhere needs a stateless replay.
 func (s *State) threadStaysLocked(canonical, root, model string, now time.Time) bool {
 	key, b := s.boundLocked([]string{"claude"}, canonical, root)
 	if b == nil {

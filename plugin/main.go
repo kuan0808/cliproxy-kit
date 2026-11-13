@@ -567,9 +567,8 @@ func fromSubagent(body []byte) bool {
 	return false
 }
 
-// intercept runs before credential selection: it stops what must not reach an upstream (a
-// thread continuation on a session routed to another provider, a routed request that could not
-// be sent there) and marks requests that carry a message thread for the usage record.
+// intercept runs before credential selection: it stops continuations that need a stateless replay
+// and routes that cannot run, and marks requests carrying a message thread for the usage record.
 func intercept(raw []byte) ([]byte, error) {
 	var req pluginapi.RequestInterceptRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
@@ -580,6 +579,7 @@ func intercept(raw []byte) ([]byte, error) {
 	if req.SourceFormat == "claude" {
 		parent, _ := req.Metadata["parent_session_id"].(string)
 		if canonical == "" {
+			// The before-auth hook can run before the host populates canonical session metadata.
 			if info, ok := cliproxysession.ExtractSessionInfo(req.Headers, req.Body, req.Metadata); ok && info.ClientType == "claude" {
 				canonical, parent = info.SessionID, info.ParentSessionID
 			}
