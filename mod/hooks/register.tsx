@@ -19,6 +19,7 @@ import {
   lacksFiveHour,
   movedKey,
   parseModels,
+  networkReason,
   readBand,
   repoOf,
   rewriteText,
@@ -219,7 +220,7 @@ async function refreshOnce($: $T, full: boolean): Promise<Snap | null> {
       const r = await fetchInTime($, `${url}/v0/resource/plugins/quota-pilot/band`, headers)
       ;({ snap, error } = readBand(r.status, r.text))
     } catch (err) {
-      error = { kind: 'network', message: err instanceof Error ? err.message : String(err) }
+      error = { kind: 'network', message: networkReason(err instanceof Error ? err.message : String(err)) }
     }
     if (snap) answeredBy = url
     // A read that fails keeps the last snapshot beside the reason.

@@ -35,6 +35,7 @@ import {
   missingText,
   providerOfModel,
   switchTargets,
+  networkReason,
   readBand,
   resetText,
   sessionAccount,
@@ -483,6 +484,16 @@ describe('accounts', () => {
     expect(repoOf('git@x:team/app.git')).toBe('x/team/app')
     expect(repoOf('git@host:./team/app.git')).toBe('host/team/app')
     expect(repoOf(null)).toBe('')
+  })
+
+  test('a read that did not come back is told in the network\'s words, without the host\'s name for the call', () => {
+    // As Claude Code 2.1.323 words a refused connection, in a session and in the mod test kit.
+    expect(networkReason('quota-band: $.http.fetch(http://127.0.0.1:8317/v0/resource/plugins/quota-pilot/band) failed: ECONNREFUSED: ECONNREFUSED: Unable to connect. Is the computer able to access the url?'))
+      .toBe('ECONNREFUSED: Unable to connect. Is the computer able to access the url?')
+    expect(networkReason('quota-band: $.http.fetch: connect ECONNREFUSED 127.0.0.1:8317')).toBe('connect ECONNREFUSED 127.0.0.1:8317')
+    // As 2.1.322 words it, and the band's own deadline: as they are.
+    expect(networkReason('connect ECONNREFUSED 127.0.0.1:8317')).toBe('connect ECONNREFUSED 127.0.0.1:8317')
+    expect(networkReason('no answer within 3s')).toBe('no answer within 3s')
   })
 
   test("the proxy's /band answer, or why there is none", async () => {

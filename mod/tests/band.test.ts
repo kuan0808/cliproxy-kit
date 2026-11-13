@@ -2603,8 +2603,8 @@ test('a done notice nobody dismissed does not cover an unreachable proxy', async
   expect(await rowText($, 'notice')).toBe('· Switch to k•••: doneok')
   failure = { deny: 'connect ECONNREFUSED 127.0.0.1:8317' }
   await clock.advance(10_000)
-  // From Claude Code 2.1.323 the host names itself before the network's error.
-  expect(await rowText($)).toMatch(/^! cannot reach the proxy for quota data: .*connect ECONNREFUSED 127\.0\.0\.1:8317 $/)
+  // The network's own words, without the host's name for the call (Claude Code 2.1.323).
+  expect(await rowText($)).toBe('! cannot reach the proxy for quota data: connect ECONNREFUSED 127.0.0.1:8317 ')
 })
 
 test('a done notice nobody dismissed does not cover a waiting retry, which keeps its switch to k•••', async ($, on) => {

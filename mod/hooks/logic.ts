@@ -429,6 +429,15 @@ export function repoOf(remote: string | null | undefined): string {
   return host && name ? `${host.toLowerCase()}/${name}` : ''
 }
 
+/**
+ * Why a read of the proxy did not come back, in the network's own words. From Claude Code 2.1.323
+ * the host's message starts with the plugin and its call (`quota-band: $.http.fetch(<url>)
+ * failed: `) and may give the error's code twice, which pushed the reason off the row.
+ */
+export function networkReason(message: string): string {
+  return message.replace(/^[\w-]+: \$\.http\.fetch(?:\(.*?\) failed)?: /, '').replace(/^([A-Z][A-Z_]+): \1: /, '$1: ')
+}
+
 /** The proxy's `/band` answer: a snapshot, or why there is none. */
 export function readBand(status: number, text: string): { snap: Snap; error: null } | { snap: null; error: BandError } {
   if (status < 200 || status > 299) return { snap: null, error: { kind: 'status', status } }
