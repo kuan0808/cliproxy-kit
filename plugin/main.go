@@ -78,6 +78,7 @@ import (
 	"github.com/kuan0808/cliproxy-kit/plugin/core"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/tidwall/gjson"
@@ -575,8 +576,20 @@ func intercept(raw []byte) ([]byte, error) {
 		return nil, errUnmarshal
 	}
 	canonical, _ := req.Metadata["canonical_session_id"].(string)
+	sessionID := sessionOf(req.Headers, req.Metadata)
+	if req.SourceFormat == "claude" {
+		parent, _ := req.Metadata["parent_session_id"].(string)
+		if canonical == "" {
+			if info, ok := cliproxysession.ExtractSessionInfo(req.Headers, req.Body, req.Metadata); ok && info.ClientType == "claude" {
+				canonical, parent = info.SessionID, info.ParentSessionID
+			}
+		}
+		if canonical != "" {
+			sessionID = core.RawSession(core.RootSession(canonical, parent))
+		}
+	}
 	d := state.Intercept(core.InterceptInput{
-		Session:        sessionOf(req.Headers, req.Metadata),
+		Session:        sessionID,
 		Canonical:      canonical,
 		TraceID:        req.TraceID,
 		Format:         req.SourceFormat,

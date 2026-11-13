@@ -25,16 +25,30 @@ import (
 // ("" for none), and returns the status, the body and the id of the message it answered with.
 func turn(t *testing.T, session, thread string) (int, string, string) {
 	t.Helper()
+	return turnWithIdentity(t, http.Header{"X-Claude-Code-Session-Id": {session}}, nil, thread)
+}
+
+func turnWithIdentity(t *testing.T, headers http.Header, metadata map[string]any, thread string) (int, string, string) {
+	t.Helper()
 	extra := ""
 	if thread != "" {
 		extra = `,"thread":` + thread
+	}
+	if metadata != nil {
+		raw, err := json.Marshal(metadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		extra += `,"metadata":` + string(raw)
 	}
 	body := fmt.Sprintf(`{"model":%q,"max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}],`+
 		`"tools":[{"name":"Read","description":"Reads a file","input_schema":{"type":"object"}}]%s}`, model, extra)
 	req, _ := http.NewRequest(http.MethodPost, proxy.url+"/v1/messages", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+clientKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Claude-Code-Session-Id", session)
+	for key, values := range headers {
+		req.Header[key] = values
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +131,7 @@ func idOf(name string) string {
 func startThread(t *testing.T) (session, bound, message string) {
 	t.Helper()
 	proxy.manager.SetRetryConfig(3, 30*time.Second, 0)
-	session = fmt.Sprintf("host-contract-thread-%d", sessions.Add(1))
+	session = fmt.Sprintf("00000000-0000-4000-8000-%012d", sessions.Add(1))
 	status, body, id := turn(t, session, `{"type":"create"}`)
 	attempts := proxy.upstream.take()
 	if status != http.StatusOK || id == "" || len(attempts) != 1 {
@@ -173,5 +187,62 @@ func TestAfterTheBoundAccountFailsAContinuationIsSentAgainWithoutItsThread(t *te
 	status, body, _ = turn(t, session, "")
 	if attempts := proxy.upstream.take(); status != http.StatusOK || len(attempts) != 1 || attempts[0] == bound {
 		t.Fatalf("the turn sent again: %d %s, attempts %v, want another account than %s", status, body, attempts, bound)
+	}
+}
+
+func TestAChildContinuationChecksItsOwnBindingBeforeAuth(t *testing.T) {
+	session, bound, _ := startThread(t)
+	headers := http.Header{"X-Claude-Code-Session-Id": {session}, "X-Claude-Code-Agent-Id": {"child"},
+		"X-Claude-Code-Parent-Agent-Id": {"parent"}}
+	status, body, child := turnWithIdentity(t, headers, nil, `{"type":"create"}`)
+	if attempts := proxy.upstream.take(); status != http.StatusOK || child == "" || !slices.Equal(attempts, []string{bound}) {
+		t.Fatalf("child thread: %d %s, attempts %v, want %s", status, body, attempts, bound)
+	}
+	time.Sleep(300 * time.Millisecond)
+	other := "B"
+	if bound == other {
+		other = "C"
+	}
+	switchTo(t, session, other)
+	status, body, parent := turn(t, session, `{"type":"create"}`)
+	if attempts := proxy.upstream.take(); status != http.StatusOK || parent == "" || !slices.Equal(attempts, []string{other}) {
+		t.Fatalf("parent's new thread: %d %s, attempts %v, want %s", status, body, attempts, other)
+	}
+	time.Sleep(300 * time.Millisecond)
+	proxy.upstream.fail(bound, func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(529)
+		_, _ = fmt.Fprint(w, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+	})
+	status, body, _ = turnWithIdentity(t, headers, nil, continuing(child))
+	if attempts := proxy.upstream.take(); status != 529 || !slices.Equal(attempts, []string{bound}) {
+		t.Fatalf("child's failure: %d %s, attempts %v", status, body, attempts)
+	}
+	time.Sleep(300 * time.Millisecond)
+	user, _ := json.Marshal(map[string]string{"session_id": session, "agent_id": "child", "parent_agent_id": "parent"})
+	for _, tc := range []struct {
+		name     string
+		headers  http.Header
+		metadata map[string]any
+	}{
+		{name: "headers", headers: headers},
+		{name: "header with body agent", headers: http.Header{"X-Claude-Code-Session-Id": {session}}, metadata: map[string]any{"user_id": string(user)}},
+		{name: "JSON user id", metadata: map[string]any{"user_id": string(user)}},
+		{name: "legacy user id", metadata: map[string]any{"user_id": "user_test_account_test_session_" + session, "subagent_id": "child", "parent_agent_id": "parent"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, _ := turnWithIdentity(t, tc.headers, tc.metadata, continuing(child))
+			if attempts := proxy.upstream.take(); !threadUnsupported(status, body) || len(attempts) != 0 {
+				t.Fatalf("child continuation: %d %s, attempts %v; want 400 thread_unsupported_request before any attempt", status, body, attempts)
+			}
+		})
+	}
+	status, body, _ = turn(t, session, continuing(parent))
+	if attempts := proxy.upstream.take(); status != http.StatusOK || !slices.Equal(attempts, []string{other}) {
+		t.Fatalf("healthy parent continuation: %d %s, attempts %v, want %s", status, body, attempts, other)
+	}
+	status, body, _ = turnWithIdentity(t, headers, nil, "")
+	if attempts := proxy.upstream.take(); status != http.StatusOK || len(attempts) != 1 || attempts[0] == bound {
+		t.Fatalf("child replay: %d %s, attempts %v, want another account than %s", status, body, attempts, bound)
 	}
 }

@@ -139,10 +139,14 @@ only to the account that answered the message it continues: the pick is offered 
 alone, so a move would be undone at the session's next continuation, and the request would fail
 while that account cannot serve. So quota-pilot answers a continuation `400
 thread_unsupported_request`, which makes Claude Code send the turn again without the thread, once
-the thread no longer lives on the bound account (after a switch or a move) or the bound account
-should not take it (a failure there since its last success, a retry waiting, a `hung` mark, an
-account resting, used up, disabled or removed). The turn sent again goes where quota-pilot chooses,
-and that session then runs without a server-side thread on that model, as on a route.
+the thread no longer lives on the bound account (after a switch or a move), its owner is unknown
+because an older binding recorded a switch or move without the thread's account, or the bound
+account should not take it (a failure there since its last success, a retry waiting, a `hung` mark,
+an account resting, used up, disabled or removed). An idle session on a low account also sends again
+without its thread when the existing idle-move rule has a known eligible, ready alternative. The
+check uses the child's own binding for a subagent with its own thread, else its parent's. The turn
+sent again goes where quota-pilot chooses, and that session then runs without a server-side thread
+on that model, as on a route.
 
 **Switch now.** While a turn waits (the band's hang watch, waiting and running rows), the band
 offers `switch to k•••`, k••• being the account a failover would take now (the snapshot's

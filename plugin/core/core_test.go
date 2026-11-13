@@ -1670,3 +1670,152 @@ func TestAContinuationAfterASwitchIsSentAgainWithoutItsThread(t *testing.T) {
 		}
 	}
 }
+
+func TestALegacyMoveKeepsItsThreadOwnerUnknown(t *testing.T) {
+	const model = "claude-opus-5-5"
+	for _, kind := range []string{MoveUser, MoveLeftOut} {
+		t.Run(kind, func(t *testing.T) {
+			s, c := newTestState()
+			setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+			setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+			served(s, c, "claude:s1", "claude-a", true)
+			if kind == MoveUser {
+				if ack := s.Apply(Command{CommandID: "original", Session: "s1", BootID: "boot-1", CreatedAt: c.t, Action: "switch", AuthID: "claude-b"}); ack.Status != "applied" {
+					t.Fatalf("original switch: %+v", ack)
+				}
+			} else {
+				if got := pick(s, "claude:s1", model, []Candidate{credB}); got.AuthID != "claude-b" {
+					t.Fatalf("original move: %+v", got)
+				}
+				served(s, c, "claude:s1", "claude-b", false)
+			}
+			saved := s.Export()
+			b := saved.Bindings["claude|claude:s1"]
+			if b.AuthID != "claude-b" || b.Kind != kind {
+				t.Fatalf("saved binding: %+v", b)
+			}
+			b.ThreadAuth = ""
+			saved.Bindings["claude|claude:s1"] = b
+			s, c = newTestState()
+			s.Import(saved)
+			continuation := InterceptInput{Session: "s1", Format: "claude", Model: model, RequestedModel: model, Thread: "continue", Tools: 20}
+			check := func(stage string) {
+				t.Helper()
+				if b := s.Export().Bindings["claude|claude:s1"]; b.ThreadAuth != "" {
+					t.Fatalf("%s inferred a thread owner: %+v", stage, b)
+				}
+				if d := s.Intercept(continuation); !d.Terminate || d.ErrorCode != threadUnsupported {
+					t.Fatalf("%s allowed an unknown thread owner: %+v", stage, d)
+				}
+			}
+			check("import")
+			if ack := s.Apply(Command{CommandID: "same", Session: "s1", BootID: "boot-1", CreatedAt: c.t, Action: "switch", AuthID: "claude-b"}); ack.Status != "applied" {
+				t.Fatalf("later switch: %+v", ack)
+			}
+			check("later switch")
+			if got := pick(s, "claude:s1", model, []Candidate{credA}); got.AuthID != "claude-a" {
+				t.Fatalf("later move: %+v", got)
+			}
+			served(s, c, "claude:s1", "claude-a", false)
+			check("later move")
+			stateless := continuation
+			stateless.Thread = ""
+			if d := s.Intercept(stateless); d.Terminate {
+				t.Fatalf("stateless replay: %+v", d)
+			}
+			if got := pick(s, "claude:s1", model, both); got.AuthID != "claude-a" {
+				t.Fatalf("replay moved the chosen binding: %+v", got)
+			}
+			created := continuation
+			created.Thread, created.TraceID = "create", "new-thread"
+			if d := s.Intercept(created); d.Terminate {
+				t.Fatalf("new thread: %+v", d)
+			}
+			s.Observe(Usage{Provider: "claude", Model: model, SessionID: "claude:s1", TraceID: created.TraceID, AuthID: "claude-a", RequestedAt: c.t})
+			if d := s.Intercept(continuation); d.Terminate {
+				t.Fatalf("continuation of the new thread: %+v", d)
+			}
+		})
+	}
+}
+
+func TestAnIdleThreadUsesTheExistingRelocationRule(t *testing.T) {
+	const model = "claude-opus-5-5"
+	for _, tc := range []struct {
+		name        string
+		idle        time.Duration
+		switched    bool
+		alternative string
+		replay      bool
+	}{
+		{name: "idle with a ready alternative", idle: 61 * time.Minute, replay: true},
+		{name: "active session", idle: 30 * time.Minute},
+		{name: "user choice", idle: 61 * time.Minute, switched: true},
+		{name: "unlisted alternative", idle: 61 * time.Minute, alternative: "unlisted"},
+		{name: "other model only", idle: 61 * time.Minute, alternative: "other model"},
+		{name: "stale quota", idle: 61 * time.Minute, alternative: "stale"},
+		{name: "limited alternative", idle: 61 * time.Minute, alternative: "limited"},
+		{name: "disabled alternative", idle: 61 * time.Minute, alternative: "disabled"},
+		{name: "failed since listing", idle: 61 * time.Minute, alternative: "failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, c := newTestState()
+			setQuota(s, c, "claude-a", 0.9, 0.5, 24*time.Hour)
+			setQuota(s, c, "claude-b", 0.9, 0.5, 4*24*time.Hour)
+			cands := both
+			if tc.alternative == "unlisted" || tc.alternative == "other model" {
+				cands = []Candidate{credA}
+			}
+			served(s, c, "claude:s1", pick(s, "claude:s1", model, cands).AuthID, true)
+			if tc.alternative == "other model" {
+				pick(s, "claude:probe", "claude-fable-5-1", both)
+			}
+			if tc.switched {
+				if ack := s.Apply(Command{CommandID: "chosen", Session: "s1", BootID: "boot-1", CreatedAt: c.t, Action: "switch", AuthID: "claude-a"}); ack.Status != "applied" {
+					t.Fatalf("switch: %+v", ack)
+				}
+			}
+			c.add(tc.idle)
+			setQuota(s, c, "claude-a", 0.05, 0.5, 24*time.Hour)
+			if tc.alternative != "stale" {
+				five := 0.9
+				if tc.alternative == "limited" {
+					five = 0.05
+				}
+				setQuota(s, c, "claude-b", five, 0.5, 4*24*time.Hour)
+			}
+			switch tc.alternative {
+			case "disabled":
+				s.UpdateInventory([]CredInfo{{ID: "claude-a", Provider: "claude"}, {ID: "claude-b", Provider: "claude", Disabled: true}})
+			case "failed":
+				s.Observe(Usage{Provider: "claude", Model: model, AuthID: "claude-b", RequestedAt: c.t, Failed: true, StatusCode: 529})
+			}
+			lastUsed := s.Export().Bindings["claude|claude:s1"].LastUsed
+			continuation := InterceptInput{Session: "s1", Format: "claude", Model: model, RequestedModel: model, Thread: "continue", Tools: 20}
+			d := s.Intercept(continuation)
+			if d.Terminate != tc.replay || tc.replay && d.ErrorCode != threadUnsupported {
+				t.Fatalf("continuation: %+v, want stateless replay %v", d, tc.replay)
+			}
+			if got := s.Export().Bindings["claude|claude:s1"].LastUsed; !got.Equal(lastUsed) {
+				t.Fatalf("checking the continuation refreshed last use: %s, want %s", got, lastUsed)
+			}
+			if !tc.replay {
+				if got := pick(s, "claude:s1", model, []Candidate{credA}); got.AuthID != "claude-a" {
+					t.Fatalf("pinned continuation: %+v", got)
+				}
+				return
+			}
+			continuation.Thread = ""
+			if d := s.Intercept(continuation); d.Terminate {
+				t.Fatalf("stateless replay: %+v", d)
+			}
+			if got := pick(s, "claude:s1", model, both); got.AuthID != "claude-b" {
+				t.Fatalf("idle replay: %+v, want claude-b", got)
+			}
+			served(s, c, "claude:s1", "claude-b", false)
+			if b := s.Export().Bindings["claude|claude:s1"]; b.AuthID != "claude-b" || b.Kind != MoveIdle {
+				t.Fatalf("idle replay's binding: %+v", b)
+			}
+		})
+	}
+}

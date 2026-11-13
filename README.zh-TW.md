@@ -258,6 +258,8 @@ Claude 等待時顯示方塊，工作時縮成一行：
 
 失敗的請求會先在 session 原本的帳號上重試，保住它的 prompt 快取；重試也失敗，session 才換帳號，額度列會說明原因。這一輪還在等的時候，按額度列上的 `switch to k•••` 就不再等：session 換到 k•••，這一輪停下，你的下一則訊息就在那裡接著做。一直失敗的帳號會暫停使用。這些都不用設定；規則和所有數字寫在 [docs/architecture.md](docs/architecture.md#when-an-account-fails)。
 
+Claude 的訊息執行緒也遵守同樣規則，包括閒置滿一小時後離開額度偏低的帳號。需要換帳號，或舊版儲存的切換紀錄無法確認執行緒所屬帳號時，Claude Code 會不帶原執行緒重送這一輪。有自己執行緒的 subagent 會檢查自己的帳號綁定。
+
 | 情況 | 會發生什麼 | 額度列顯示 |
 | --- | --- | --- |
 | 很快就失敗（連線中斷、HTTP 529） | 在同一個帳號上重試 | `! d••• returned HTTP 529 · retrying it in about 50s; k••• is next if needed`，成功後顯示 `↪ Stayed on d••• after HTTP 529 · the retry 61s later worked; cache kept` |
