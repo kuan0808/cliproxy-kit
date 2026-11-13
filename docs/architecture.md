@@ -426,7 +426,7 @@ decided once (`view.ts`: the facts, and the one row above the band) and drawn pe
 character cells in a terminal (`terminal.tsx`), and as cards in the desktop app (`desktop.tsx`),
 whose font is proportional, whose widths are CSS lengths and whose colours follow its light or dark
 theme. Both show cards while Claude waits and one line while it works (also when another mod draws
-beneath it), and the row says one thing at a time: a question, what came of an action, or an alert
+above the prompt), and the row says one thing at a time: a question, what came of an action, or an alert
 (the proxy's, a cold next turn, a session moved or kept, a full context), in that order. The waiting
 rows carry `switch to k•••` (Switch now, in [When an account fails](#when-an-account-fails)).
 
@@ -610,6 +610,11 @@ Checked against CLIProxyAPI 8.0.16 and Claude Code 2.1.296; the quota headers, t
 - The desktop app lays a plugin's tree out as CSS: widths in `ch`, heights and vertical spacing in
   half lines, colour names from its theme, an SVG as an image that sees none of the theme. Beneath
   the band it draws a slot for the engine's own drawing, as an element even when that is empty.
+- Up to Claude Code 2.1.322 the mods that draw above the prompt are one chain, and a mod's
+  `next(e)` answers what the mods beneath it drew; from 2.1.323 each plugin draws a row of its own,
+  `next(e)` answers the engine's, and `AbovePromptList` lists the rows once they settled. The band
+  reads both, so it keeps to one line beside another mod's row on either (its tests pass on 2.1.321,
+  2.1.322 and 2.1.323).
 - A plugin's `$.state` survives a module reload but is wiped at the end of every `session.end`, a
   `/clear` included, which no `session.start` follows; `classic.SessionStart` with `source: 'clear'`
   does. Every `$.state` read within one dispatch sees one moment, so a change made meanwhile by

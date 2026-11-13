@@ -540,6 +540,8 @@ let working = false
 let forking = false
 // The turn a /clear or a resume left running: its end, heard later, is not the new conversation's.
 let leftTurn = ''
+// Whether another plugin drew a row above the prompt, as the band's arrangement last listed them.
+let othersDraw = false
 const ownStep = (e: { agentId?: string; turnId: string }) =>
   Boolean(e.agentId) || e.turnId === leftTurn || (forking && (!mainTurn || e.turnId !== mainTurn))
 
@@ -1035,12 +1037,14 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    // The band is one link of a chain: what the hooks beneath draw (another mod's band, such as
-    // pasted image thumbnails) goes under it, by the prompt, and the engine's own drawing comes
-    // back as `{ type: 'engine' }`. No link can shrink another's `maxRows`, so while something is
-    // drawn beneath, the band keeps to its one line, as while Claude works; `more` opens the cards.
+    // Up to Claude Code 2.1.322 the band is one link of a chain: what the hooks beneath draw
+    // (another mod's band, such as pasted image thumbnails) goes under it, by the prompt, and the
+    // engine's own drawing comes back as `{ type: 'engine' }`. From 2.1.323 each plugin draws a
+    // row of its own and `next(e)` is always the engine's: `othersDraw` says whether another
+    // plugin has one. No row can shrink another's `maxRows`, so while another is drawn the band
+    // keeps to its one line, as while Claude works; `more` opens the cards.
     const below = await next(e)
-    const beneath = below.type !== 'engine'
+    const beneath = below.type !== 'engine' || othersDraw
     working = e.props.isWorking
     const input = await bandInput($, working)
     const act = actsOf($)
@@ -1049,6 +1053,18 @@ export const register: Register = (on, options) => {
     const site = { bodyColumns: e.props.bodyColumns, maxRows: e.props.maxRows, working, beneath }
     if (e.surface === 'desktop' && 'Svg' in els) return desktopBand(els, input, f, act, site, below)
     return terminalBand(els, input, f, act, site, below)
+  })
+
+  // The band's arrangement, once every plugin's row has settled (Claude Code 2.1.323 and later;
+  // never raised before): whether another plugin drew a row, and a redraw when that changed. The
+  // rows go on as they came.
+  on('ui.render', { component: 'AbovePromptList' }, ($, e, next) => {
+    const others = e.props.rows.some(r => r.plugin !== 'quota-band')
+    if (others !== othersDraw) {
+      othersDraw = others
+      $.ui.invalidate('ui.render')
+    }
+    return next(e)
   })
 
   // The pane: the proxy's accounts, or why there are none, then what the plugin and the band are
