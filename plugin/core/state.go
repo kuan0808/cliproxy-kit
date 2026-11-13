@@ -1036,6 +1036,9 @@ func (s *State) failedLocked(u Usage, provider, root, model string, compact bool
 func (s *State) commitLocked(provider, canonical, root, authID, model string, threaded, side bool, at, now time.Time) {
 	key := provider + "|" + canonical
 	b := s.bindings[key]
+	if b != nil && b.AuthID != authID && at.Before(b.At) {
+		return // sent before the binding was set: it says nothing of where the thread lives now
+	}
 	if threaded {
 		// Whatever becomes of the binding, the thread's latest message is on authID now.
 		defer func() {
@@ -1057,8 +1060,6 @@ func (s *State) commitLocked(provider, canonical, root, authID, model string, th
 		delete(s.displaced[key], m)
 		delete(s.failures[key], m)
 		return
-	case b != nil && at.Before(b.At):
-		return // sent before the binding was set: it says nothing of where the thread lives now
 	case b != nil && !moved, b != nil && b.Reason == switchedReason && !displaced:
 		// A late success elsewhere, a thread on the old account answering after the user switched,
 		// leaves the account the user chose: it moves only once that one stops being offered.

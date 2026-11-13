@@ -438,6 +438,12 @@ func TestAnOlderThreadedSuccessDoesNotMoveAFresherBinding(t *testing.T) {
 	served(s, c, "claude:s1", "claude-a", true) // sent after the request to b, answered first
 	s.Intercept(InterceptInput{Session: "s1", TraceID: "late", Format: "claude", Model: "claude-opus-5-5", Thread: "continue", Tools: 20})
 	s.Observe(Usage{Provider: "claude", Model: "claude-opus-5-5", SessionID: "claude:s1", TraceID: "late", AuthID: "claude-b", RequestedAt: sentToB})
+	if b := s.Export().Bindings["claude|claude:s1"]; b.AuthID != "claude-a" || b.ThreadAuth != "claude-a" {
+		t.Fatalf("an older answer changed the binding or thread owner: %+v", b)
+	}
+	if d := s.Intercept(InterceptInput{Session: "s1", Format: "claude", Model: "claude-opus-5-5", Thread: "continue"}); d.Terminate {
+		t.Fatalf("the continuation on the newer thread owner was stopped: %+v", d)
+	}
 	if got := pick(s, "claude:s1", "claude-opus-5-5", both); got.AuthID != "claude-a" {
 		t.Fatalf("binding moved to %s by an older answer", got.AuthID)
 	}
