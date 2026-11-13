@@ -231,8 +231,11 @@ export type Move = { action: string; fields: Record<string, string>; text: strin
  * The band's own main step while it streams: when it began and its latest content chunk (text,
  * thinking, a tool call or its input; 0 for none yet), on the band's clock, and the session's
  * generation in the snapshot then (none when the snapshot did not name the session).
+ * `answeredAfter` is the latest failure the band already knew of (the retry's `first_failure_at`,
+ * on the plugin's clock) when content of the step arrived: that content came after it, whatever
+ * second the content time was sampled in.
  */
-export type StepInfo = { turnId: string; index: number; startedAt: number; contentAt: number; generation?: number }
+export type StepInfo = { turnId: string; index: number; startedAt: number; contentAt: number; generation?: number; answeredAfter?: string }
 
 /**
  * A press of `switch to k•••` while a turn waits (Switch now): one operation, by its command id, for

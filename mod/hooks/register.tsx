@@ -71,6 +71,9 @@ const updateLive = ($: $T, change: (live: Live) => Live) => {
   return update($, liveA, () => pressInput.live)
 }
 
+/** The failure of the session's account the band last read of, while the plugin retries it. */
+const knownFailure = (): string | undefined => pressInput.snap?.sessions[pressInput.sess.id]?.retry?.first_failure_at
+
 /** The plugin's settings (its `userConfig`), as the module last loaded with them. */
 let settings: Settings = settingsOf({})
 
@@ -1059,8 +1062,11 @@ export const register: Register = (on, options) => {
     let r: Awaited<ReturnType<typeof inner.next>>['value'] | undefined
     let done = false
     // Content moves the step's time at most once a second (stepAfter): until a second has passed
-    // since the chunk last counted, a chunk costs no host call.
+    // since the chunk last counted, a chunk costs no host call. Every chunk still tells the module
+    // that content came after the failure the band knows of (answeredSince), which Switch now
+    // reads at once; the band's state hears of it when the second ends.
     let quiet: Timer | null = null
+    let unsaid = false
     try {
       for (;;) {
         const item = await inner.next()
@@ -1070,18 +1076,32 @@ export const register: Register = (on, options) => {
           break
         }
         const chunk = item.value
-        if (watched && !quiet && chunk.kind !== 'engine' && chunk.kind !== 'stop') {
+        const content = watched && chunk.kind !== 'engine' && chunk.kind !== 'stop'
+        const failure = content ? knownFailure() : undefined
+        const step = pressInput.live.step
+        if (failure && step && mine(pressInput.live) && step.answeredAfter !== failure) {
+          pressInput.live = { ...pressInput.live, step: { ...step, answeredAfter: failure } }
+          // A press offered before this content is void now: nothing queued for it is sent.
+          pressGeneration++
+          unsaid = true
+        }
+        if (content && !quiet) {
           const at = await $.clock.now()
           quiet = $.clock.after(1000, () => {
             quiet = null
+            if (!unsaid) return
+            unsaid = false
+            void updateLive($, l => l).then(() => voidPress($, ofStep))
           })
+          const said = unsaid
+          unsaid = false
           let answered = false
           await updateLive($, l => {
             const step = mine(l) ? stepAfter(l.step, chunk, at) : l.step
             answered = step !== l.step
             return answered ? { ...l, step } : l
           })
-          if (answered) await voidPress($, ofStep)
+          if (answered || said) await voidPress($, ofStep)
         }
         yield chunk
       }

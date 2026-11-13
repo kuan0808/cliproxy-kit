@@ -3,6 +3,7 @@
 import type { Auto, BandError, CacheInfo, Live, ModelInfo, Move, Press, SessionInfo, Snap, UiState } from '../types'
 import { W, type Words } from './wording'
 import {
+  answeredSince,
   autoState,
   bandErrorText,
   cacheState,
@@ -454,7 +455,7 @@ function liveRows(i: Pick<BandInput, 'live' | 'now'>, acct: SessionAccount | nul
   const next = label(s.takeover)
   const r = s.retry
   if (r) {
-    if (step.contentAt >= onBand(r.first_failure_at)) return null
+    if (answeredSince(step, r.first_failure_at, i.live.skew)) return null
     const from = label(r.account) ?? 'this account'
     const noQuota = otherAccounts(acct.view, r.account).filter(c => !c.disabled).every(c => c.unavailable)
     if (r.try_started_at) return { kind: 'retry', ...W.running(from, r.cause, i.now - onBand(r.try_started_at), next, noQuota) }

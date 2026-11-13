@@ -512,7 +512,9 @@ A blocked account recovers at the latest of `back_at` and all exhausted windows 
 session's model: `5h`, `7d`, and its own `7d_opus`, `7d_sonnet` or `7d_fable`. Simultaneous limits
 must all reset; another model's window does not hold it back. An account not blocked keeps its
 `back_at` countdown. If any exhausted applicable window has no valid reset, that account has no
-finite recovery countdown, even when `back_at` or another window has a known reset.
+finite recovery countdown, even when `back_at` or another window has a known reset. The plugin
+writes an unknown reset as Go's zero time (`0001-01-01T00:00:00Z`); the band reads it as no reset
+where the snapshot enters it (`parseSnap`).
 
 After a main reply, the band confirms its route with a fresh `/band` read before recording the
 cache, waiting for it no longer than the read deadline. A failed read, one that gave up, or a
@@ -547,7 +549,9 @@ answer for 45s`, adding `if it fails, a retry or another account takes over` whi
 one: it names no account, as the band cannot see where the request is. These rows show only while
 the band's own main step has had no content (text, thinking, a tool call or its input) since the
 first failure, or since it started for the hang watch; Claude Code's retry marker and the stream's
-envelope do not count. They go at the first content, the step's end or a cancel. While `retry` names
+envelope do not count. The band samples content time at most once a second, so content that arrives
+after the band has read of a failure counts as content since that failure whatever second it came
+in; the retry row and `switch to k•••` read that one answer (`answeredSince`). They go at the first content, the step's end or a cancel. While `retry` names
 the session the band reads `/band` at the live rate, then as before, and counts every live number on
 its own clock shifted by the snapshot's `generated_at`, so a band on another device agrees with the
 proxy. A retry that kept the session leaves a note for 15 minutes, `↪ Stayed on d••• after HTTP 529

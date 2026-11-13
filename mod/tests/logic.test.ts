@@ -45,10 +45,15 @@ import {
   weeklyFor,
   currentModel,
 } from '../hooks/logic'
-import type { CacheInfo, Pending, Snap, SnapCred } from '../types'
+import type { CacheInfo, Pending, Snap, SnapCred, SnapProvider } from '../types'
 
 const NOW = Date.parse('2026-10-04T12:00:00Z')
 const iso = (ms: number) => new Date(NOW + ms).toISOString()
+/** How the plugin writes a reset it does not know: Go's zero time. */
+const ZERO_TIME = '0001-01-01T00:00:00Z'
+/** A provider's accounts as the band reads them from the proxy's answer. */
+const fromProxy = (view: SnapProvider): SnapProvider =>
+  parseSnap(JSON.stringify({ ...SNAP, providers: { claude: view } }))!.providers.claude!
 const H = 3_600_000
 
 const SNAP: Snap = {
@@ -259,9 +264,9 @@ describe('accounts', () => {
         expect(nextUp({ ...view, credentials: [d, { ...k, windows }] }, 'claude-d', NOW, { model, blocked: ['claude-k'] })).toBe('k••• back in 2d 2h')
       }
     }
-    for (const reset_at of [undefined, 'invalid', iso(-H)]) {
+    for (const reset_at of [undefined, 'invalid', iso(-H), ZERO_TIME]) {
       const unknown = { ...k, windows: [...k.windows, { ...fableWeek(0), reset_at }] }
-      expect(nextUp({ ...view, credentials: [d, unknown] }, 'claude-d', NOW, fable)).toBe('no other account ready')
+      expect(nextUp(fromProxy({ ...view, credentials: [d, unknown] }), 'claude-d', NOW, fable)).toBe('no other account ready')
     }
     expect(nextUp({ ...view, credentials: [d, kOut, x] }, 'claude-d', NOW, fable)).toBe('next up: x••• 60% used')
     // On Opus nothing stops k•••, and its week is the one that limits.
@@ -301,26 +306,29 @@ describe('accounts', () => {
   test('an unknown exhausted reset prevents a finite recovery countdown for that account', () => {
     const view = SNAP.providers.claude!
     const [d, k] = view.credentials as [SnapCred, SnapCred]
+    // Every case as the proxy sends it, through the snapshot's reader.
+    const up = (credentials: SnapCred[], session: { model: string; blocked: string[] }) =>
+      nextUp(fromProxy({ ...view, credentials }), 'claude-d', NOW, session)
     for (const [model, own, other] of [
       ['claude-fable-5-2', '7d_fable', '7d_opus'],
       ['claude-opus-5-5', '7d_opus', '7d_sonnet'],
       ['claude-sonnet-5-5', '7d_sonnet', '7d_fable'],
     ] as const) {
       for (const unknown of ['5h', '7d', own]) {
-        for (const reset of [undefined, '', 'invalid']) {
+        for (const reset of [undefined, '', 'invalid', ZERO_TIME]) {
           const windows = ['5h', '7d', own].map(kind => ({
             kind, label: kind, remaining: 0, reset_at: kind === unknown ? reset : iso(120_000), observed_at: iso(0), stale: false,
           }))
           windows.push({ kind: other, label: other, remaining: 0, reset_at: undefined, observed_at: iso(0), stale: false })
           const c = { ...k, tier: 3, back_at: iso(120_000), windows }
           const session = { model, blocked: ['claude-k'] }
-          expect(nextUp({ ...view, credentials: [d, c] }, 'claude-d', NOW, session)).toBe('no other account ready')
-          expect(nextUp({ ...view, credentials: [d, { ...c, back_at: iso(H) }] }, 'claude-d', NOW, session)).toBe('no other account ready')
+          expect(up([d, c], session)).toBe('no other account ready')
+          expect(up([d, { ...c, back_at: iso(H) }], session)).toBe('no other account ready')
           const x = { ...k, id: 'claude-x', label: 'x•••', tier: 3, back_at: iso(180_000), windows: [] }
-          expect(nextUp({ ...view, credentials: [d, c, x] }, 'claude-d', NOW, session)).toBe('x••• back in 3m')
-          expect(nextUp({ ...view, credentials: [d, c] }, 'claude-d', NOW, { ...session, blocked: [] })).toBe('k••• back in 2m')
+          expect(up([d, c, x], session)).toBe('x••• back in 3m')
+          expect(up([d, c], { ...session, blocked: [] })).toBe('k••• back in 2m')
           const recovering = { ...c, windows: windows.map(w => w.kind === unknown ? { ...w, remaining: 0.5 } : w) }
-          expect(nextUp({ ...view, credentials: [d, recovering] }, 'claude-d', NOW, session)).toBe('k••• back in 2m')
+          expect(up([d, recovering], session)).toBe('k••• back in 2m')
         }
       }
     }

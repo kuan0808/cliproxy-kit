@@ -3390,3 +3390,43 @@ test("the Accounts tile's next up and the switch menu name the same accounts, wi
   expect(await ui.find({ text: /^k••• Weekly Fable used up, back in 2d 2h$/ })).toBeDefined()
   await ui.unmount()
 })
+
+// ---- Switch now reads one answer to "has the reply produced content since the failure" ----
+
+for (const [name, later, sent] of [
+  ['content that came after the band knew of the failure refuses the press, though its second was not sampled', true, false],
+  ['with no content after the failure the press goes', false, true],
+] as const) {
+  test(name, async ($, on) => {
+    const steps = heldSteps(on)
+    const clock = stubSession(on, SNAP)
+    stampReads = true
+    await $.session.start({ cwd: SESSION.cwd, surface: 'terminal', isInteractive: true } as never)
+    // T+0: the main reply's content, counted.
+    const step = await holdStep($, 'r18', TEXT, steps)
+    const t0 = clock.now()
+    steps.then = [{ kind: 'text', index: 0, text: ' more' }]
+    // T+400: a request of the session fails; the T+500 read says so, and Switch now is offered.
+    snapshot = retrying(t0 + 500, 100)
+    await clock.advance(500)
+    await $.command.run({ command: 'quota', args: '', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+    expect(await liveText($)).toMatch(/switch to k•••$/)
+    if (later) {
+      // T+600: more content, within the second after the counted one: no host call samples it.
+      await clock.advance(100)
+      expect((await step.next()).value).toEqual({ kind: 'text', index: 0, text: ' more' })
+      await clock.advance(200)
+    } else {
+      await clock.advance(300)
+    }
+    // T+800: the press.
+    await pressSwitchNow($)
+    expect(commands.filter(c => c.action === 'switch')).toHaveLength(sent ? 1 : 0)
+    if (later) {
+      // When the second ends the row is gone too.
+      await clock.advance(300)
+      expect(await liveText($)).toBe('')
+    }
+    await step.return(undefined as never)
+  })
+}

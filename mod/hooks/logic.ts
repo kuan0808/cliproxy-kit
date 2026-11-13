@@ -14,6 +14,18 @@ export function stepAfter(step: StepInfo | null, chunk: { kind: string }, at: nu
   return { ...step, contentAt: at }
 }
 
+/**
+ * Whether the step's reply has produced content since the failure at `failureAt` (the plugin's
+ * clock; `skew`, how far the band's clock is ahead): the one answer the retry row and Switch now
+ * both read. Content time is sampled once a second, so content the band saw arrive after it knew of
+ * this failure, or of a later one, counts too.
+ */
+export function answeredSince(step: StepInfo, failureAt: string, skew: number): boolean {
+  const failure = Date.parse(failureAt)
+  if (step.contentAt >= failure + skew) return true
+  return step.answeredAfter !== undefined && Date.parse(step.answeredAfter) >= failure
+}
+
 /** Whether an account rests now: it serves only when nothing else can. */
 export const restingNow = (c: SnapCred | undefined, now: number): boolean => Boolean(c?.rest && Date.parse(c.rest.until) > now)
 
@@ -414,7 +426,14 @@ export function parseSnap(text: string): Snap | null {
     if (!isObject(s.providers) || !isObject(s.sessions) || !isObject(s.context_lengths) || !Array.isArray(s.acks)) return null
     const providersOk = Object.values(s.providers).every(p => isObject(p) && Array.isArray(p.credentials) &&
       p.credentials.every(c => isObject(c) && typeof c.id === 'string' && Array.isArray(c.windows)))
-    return providersOk ? (s as unknown as Snap) : null
+    if (!providersOk) return null
+    // The plugin writes an unknown reset as Go's zero time (0001-01-01T00:00:00Z): it is not a time.
+    for (const p of Object.values(s.providers) as { credentials: { windows: { reset_at?: unknown }[] }[] }[]) {
+      for (const c of p.credentials) {
+        for (const w of c.windows) if (isObject(w) && !(Date.parse(String(w.reset_at)) > 0)) delete w.reset_at
+      }
+    }
+    return s as unknown as Snap
   } catch {
     return null
   }
