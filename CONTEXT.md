@@ -81,8 +81,8 @@ _Avoid_: retry window, hold
 
 **Takeover account**:
 The account a failover of a session would go to now, as far as the proxy's own listings show; none when
-none is known.
-_Avoid_: next account, fallback account
+none is known. The band calls it `next`.
+_Avoid_: fallback account
 
 **Failover**:
 A request served by another account after its bound account failed or was left out; its success moves
@@ -90,8 +90,8 @@ the session there.
 _Avoid_: switch, fallback (a fallback runs another model)
 
 **Fallback**:
-The model a session runs in place of the one it asks for, while that one is used up on every account,
-as the fallback map names it; on another provider only by the user's say or `cross_provider: auto`.
+The model a session runs in place of the one it asks for, by a fallback rule and without the user's
+press, while that one is used up on every account.
 _Avoid_: failover (another account, same model), downgrade
 
 **Move**:
@@ -111,3 +111,99 @@ _Avoid_: skip, force failover, resend
 A turn whose prompt cache on the account that serves it is gone, so the whole conversation is written
 again.
 _Avoid_: cache miss (in prose), cold start
+
+### Quota
+
+**Window**:
+A span over which a provider meters an account: 5-hour, Weekly, or a model's own week (Weekly Fable).
+_Avoid_: bucket, period
+
+**Reading**:
+A window's used share as the provider last reported it, with the time it was read.
+_Avoid_: poll, sample
+
+**Used up**:
+A window read with nothing left whose reset is still ahead; it stays used up until that reset, however
+old the reading.
+_Avoid_: exhausted (in prose), depleted
+
+**Low**:
+An account with too little left to be given a new session: under the 5-hour threshold, or under 3% of
+a weekly window that limits the session's model.
+_Avoid_: nearly used up
+
+**Label**:
+An account's short public name (`k•••`), the same on the band, the ledger and the usage view.
+_Avoid_: alias, masked email
+
+### Running another model
+
+**Route**:
+A session's standing order to run another model than the one it asks for, kept by quota-pilot until it
+ends.
+_Avoid_: redirect, override
+
+**Fallback rule**:
+One entry of the fallback map: what runs in place of a provider's models, or of one model.
+_Avoid_: mapping
+
+**Use**:
+The user's choice of a route, from the band.
+_Avoid_: route (as a verb), switch (a switch changes the account)
+
+**Back**:
+The end of a route, after which the session runs the model it asks for; the band says `back` of nothing
+else.
+_Avoid_: return, unroute (in prose)
+
+**Stop**:
+Why a fallback rule cannot run now, as quota-pilot or the ledger found it.
+_Avoid_: blocker, error
+
+### Surfaces
+
+**Ledger**:
+The page's view of every account with its windows, its place in the order and its fallback rules.
+_Avoid_: dashboard, accounts page
+
+**Usage view**:
+The page's view of where quota went, by project and session.
+_Avoid_: report (the report is the data behind it), analytics
+
+**Band**:
+quota-band's rows above the Claude Code prompt: one row of words over a row of tiles.
+_Avoid_: status bar, banner
+
+**Tile**:
+One box of the band: Account, a window, Context, Cache or Accounts.
+_Avoid_: card (the desktop app's drawing of a tile), widget
+
+**Pane**:
+The band's list of every account, window, fallback rule and setting, opened with `quota`.
+_Avoid_: panel (the panel is CLIProxyAPI's), sidebar
+
+**Notice**:
+What came of the user's own press; it goes by itself.
+_Avoid_: toast, alert
+
+**Alert**:
+A row that says something is wrong or about to change; it stays while that is true.
+_Avoid_: warning (in prose), notice
+
+**Note**:
+A row that tells what quota-pilot did; the user dismisses it.
+_Avoid_: notice, log
+
+### Words in zh-TW
+
+One word per thing in every zh-TW text (the page's locale, `README.zh-TW.md`):
+
+| English | zh-TW | Not |
+| --- | --- | --- |
+| plugin | 外掛 | 插件 |
+| session | session | 工作階段 |
+| quota | 額度 | 配額 |
+| account | 帳號 | 憑證 |
+| window (of quota) | 時段 | 視窗 |
+
+A name the panel itself shows is quoted as the panel shows it.
