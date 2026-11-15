@@ -440,9 +440,10 @@ week when the provider's accounts hold one, as the pick judges it. It is read on
 it takes is fresh: younger than `stale_after_seconds`, with no reset passed. A fresh 0 is read as
 0. An account with only response-header readings is not read, for a model whose own week another
 account holds, until its first full reading. Sign-ins to one provider account are combined by the
-[window rules](#reading-quota); a fall still waiting, or a disagreement on whether the model's own
-week exists, leaves them not read. Two windows that leave the same figure resolve to the later
-known reset, then a known reset over an unknown one, then the model's own week. A credential
+[window rules](#reading-quota). A fall still waiting in any member or in their combined windows
+leaves the account not read, including a single sign-in. A disagreement on whether the model's own
+week exists also leaves the group not read. Two windows that leave the same figure resolve to the
+later known reset, then a known reset over an unknown one, then the model's own week. A credential
 quota-pilot does not read counts when it has registered the name, and is never read.
 
 `verdict`, given a floor, is the first that holds: `unmeasured` (`inventory` or `registry`);

@@ -111,7 +111,7 @@ assert seen == [(POOL, '', 'Bearer ' + KEY)], seen
 
 # The query arrives encoded, whatever the model id holds.
 odd = 'claude-opus-5-5[1m] & x=1'
-run('--model', odd, '--model=gpt-6-sol', '--floor', '15.5', env=pair)
+run('--model', odd, '--model', 'gpt-6-sol', '--floor', '15.5', env=pair)
 assert parse_qs(seen[0][1]) == {'model': [odd, 'gpt-6-sol'], 'floor': ['15.5']}, seen
 assert '&' not in seen[0][1].split('&')[0][len('model='):], seen
 
@@ -151,13 +151,16 @@ doc = failed('PROXY_UNREACHABLE', run(env={'QUOTA_POOL_URL': f'http://127.0.0.1:
 assert doc['error'] == f'the proxy did not answer at http://127.0.0.1:{closed}', doc
 
 # A usage error is exit 2, said on stderr, and sends nothing.
-for args in (('--floor', '15'), ('--model',), ('--bogus',), ('--model', 'm', '--floor', '15', '--floor', '20'),
-             *(('--model', 'm', '--floor', bad) for bad in ('', '-1', '+5', '1e1', 'NaN', '100.5', '101', '0100.1', '.5', '5.'))):
+for args in (('--floor', '15'), ('--model',), ('--floor',), ('--bogus',), ('-h',), ('--model=m',),
+             ('--floor=15',), ('--model', 'm', '--floor=15'), ('--model', 'm', '--floor', '15', '--floor', '20'),
+             *(('--model', 'm', '--floor', bad) for bad in ('', '-1', '+5', '1e1', 'NaN', '100.5', '101',
+               '0100.1', '100.000000000000001', '0100.000000000000001', '000101', '9' * 400, '.5', '5.'))):
     status, out, err, argv = run(*args, env=pair)
-    assert status == 2 and out == b'' and err.startswith('quota-pool: ') and seen == [], (args, status, out, err)
-for good in ('0', '100', '100.00', '007', '15.25'):
+    assert status == 2 and out == b'' and err.startswith('quota-pool: ') and seen == [] and argv == '', (args, status, out, err)
+for good in ('0', '100', '100.00', '0100.00', '000100.000', '007', '15.25', '99.99', '0' * 400 + '100.00'):
     status, _, err, _ = run('--model', 'm', '--floor', good, env=pair)
     assert status == 0, (good, err)
+    assert parse_qs(seen[0][1]) == {'model': ['m'], 'floor': [good]}, seen
 status, out, err, _ = run('--help', env=pair)
 assert status == 0 and out.startswith(b'Usage: quota-pool') and seen == [], (status, err)
 

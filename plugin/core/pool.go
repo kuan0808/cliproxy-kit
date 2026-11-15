@@ -385,6 +385,12 @@ func (s *State) weeklyLocked(group []*Cred, k string, inPool bool, now time.Time
 	}
 	var bounds []bound
 	for _, kind := range kinds {
+		for _, c := range group {
+			c.settle(kind, now)
+			if t := c.tracks[kind]; t != nil && t.fall != nil {
+				return 0, "", time.Time{}, false
+			}
+		}
 		var rem float64
 		var reset time.Time
 		var present, fresh bool
@@ -396,7 +402,6 @@ func (s *State) weeklyLocked(group []*Cred, k string, inPool bool, now time.Time
 			scratch := &Cred{Provider: group[0].Provider, Windows: map[string]Window{}}
 			var held []Window
 			for _, c := range group {
-				c.settle(kind, now)
 				if w, ok := c.Windows[kind]; ok {
 					held = append(held, w)
 				}

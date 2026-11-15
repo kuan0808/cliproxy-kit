@@ -194,6 +194,8 @@ func TestPoolRejectsAFloorOfAnyOtherForm(t *testing.T) {
 			{"model": model, "floor": {""}}, {"model": model, "floor": {"-1"}}, {"model": model, "floor": {"+5"}},
 			{"model": model, "floor": {"1e1"}}, {"model": model, "floor": {"NaN"}}, {"model": model, "floor": {"Inf"}},
 			{"model": model, "floor": {"100.5"}}, {"model": model, "floor": {"101"}}, {"model": model, "floor": {" 5"}},
+			{"model": model, "floor": {"100.000000000000001"}}, {"model": model, "floor": {"0100.000000000000001"}},
+			{"model": model, "floor": {"000101"}}, {"model": model, "floor": {strings.Repeat("9", 400)}},
 			{"model": model, "floor": {".5"}}, {"model": model, "floor": {"5."}}, {"model": model, "floor": {"0x10"}},
 			{"model": model, "floor": {"15", "15"}}, {"floor": {"15"}},
 		} {
@@ -201,9 +203,20 @@ func TestPoolRejectsAFloorOfAnyOtherForm(t *testing.T) {
 				t.Fatalf("%v = %d %s", bad, status, body)
 			}
 		}
-		for _, good := range []string{"0", "15", "15.5", "100", "100.00"} {
-			if status, body := poolGet(t, "sk-made-up", url.Values{"model": model, "floor": {good}}); status != http.StatusOK {
-				t.Fatalf("floor %s = %d %s", good, status, body)
+		for _, good := range []struct {
+			text string
+			want float64
+		}{
+			{"0", 0}, {"15", 15}, {"15.5", 15.5}, {"100", 100}, {"100.00", 100},
+			{"0100.00", 100}, {"000100.000", 100}, {"007", 7}, {"99.99", 99.99},
+			{strings.Repeat("0", 400) + "100.00", 100},
+		} {
+			status, body := poolGet(t, "sk-made-up", url.Values{"model": model, "floor": {good.text}})
+			if status != http.StatusOK {
+				t.Fatalf("floor %s = %d %s", good.text, status, body)
+			}
+			if doc := poolDoc(t, body); doc.Floor == nil || *doc.Floor != good.want {
+				t.Fatalf("floor %s decoded as %v, want %v", good.text, doc.Floor, good.want)
 			}
 		}
 		if reads := h.reads["claude-a.json"]; reads != 1 {

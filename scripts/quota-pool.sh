@@ -59,20 +59,18 @@ floor=
 floor_given=false
 while [ $# -gt 0 ]; do
   case $1 in
-    --model | --floor)
+    --model)
       [ $# -ge 2 ] || usage_error "$1 needs a value"
-      set -- "$1=$2" "${@:3}"
+      models+=("$2")
+      shift 2
       ;;
-    --model=*)
-      models+=("${1#--model=}")
-      shift
-      ;;
-    --floor=*)
+    --floor)
+      [ $# -ge 2 ] || usage_error "$1 needs a value"
       $floor_given && usage_error "--floor is given once"
-      floor=${1#--floor=} floor_given=true
-      shift
+      floor=$2 floor_given=true
+      shift 2
       ;;
-    -h | --help)
+    --help)
       usage
       exit 0
       ;;
@@ -83,8 +81,9 @@ if $floor_given; then
   [ ${#models[@]} -gt 0 ] || usage_error "--floor needs --model"
   [[ $floor =~ ^[0-9]+(\.[0-9]+)?$ ]] || usage_error "--floor is a percent from 0 to 100"
   whole=${floor%%.*}
+  fraction=${floor#"$whole"}
   while [[ $whole == 0?* ]]; do whole=${whole#0}; done
-  if [ ${#whole} -gt 3 ] || [ "$whole" -gt 100 ] || { [ "$whole" -eq 100 ] && [[ ${floor#"$whole"} == *[1-9]* ]]; }; then
+  if [ ${#whole} -gt 3 ] || [ "$whole" -gt 100 ] || { [ "$whole" -eq 100 ] && [[ $fraction == *[1-9]* ]]; }; then
     usage_error "--floor is a percent from 0 to 100"
   fi
 fi

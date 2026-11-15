@@ -383,7 +383,7 @@ whose name hides the model family is judged on the all-models week alone.
 <summary>Install the command and its skill</summary>
 
 ```sh
-curl -fsSL https://github.com/kuan0808/cliproxy-kit/releases/latest/download/quota-pool -o ~/.local/bin/quota-pool && chmod +x ~/.local/bin/quota-pool
+mkdir -p ~/.local/bin && curl -fsSL https://github.com/kuan0808/cliproxy-kit/releases/latest/download/quota-pool -o ~/.local/bin/quota-pool && chmod +x ~/.local/bin/quota-pool
 npx skills add kuan0808/cliproxy-kit --skill quota-pool -g
 ```
 
@@ -531,7 +531,10 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | A move offers `switch back` | The account the session left can take it again. `switch back` returns, asking first while the cache is warm; quota-pilot never moves a session back on its own, as the new account's cache is the warm one. |
 | `quota-pool` says `POOL_NOT_SUPPORTED` | The proxy has no pool to read: update quota-pilot to 0.2.1 or newer from the Plugin Store and check it is on. A proxy that serves no plugin resources, or another service at that address, answers the same. |
 | `quota-pool` says `KEY_NOT_ACCEPTED` | The proxy has not served a request with that key in the last week: send one prompt with it, or use another of its client keys. |
-| `quota-pool` says `NO_PROXY_URL`, `KEY_OVER_HTTP` or `PROXY_UNREACHABLE` | Point `QUOTA_POOL_URL` and `QUOTA_POOL_KEY`, or `ANTHROPIC_BASE_URL` with its token, at a running proxy. Over `http://` only `127.0.0.1` and `localhost` go without `ALLOW_HTTP=1`. |
+| `quota-pool` says `NO_PROXY_URL` | The proxy address is missing or does not start with `http://` or `https://`: set `QUOTA_POOL_URL` with `QUOTA_POOL_KEY`, or `ANTHROPIC_BASE_URL` with its token, to the proxy's HTTP(S) address. |
+| `quota-pool` says `KEY_OVER_HTTP` | The address would send the key unencrypted across the network: use HTTPS, or a local proxy at `127.0.0.1` or `localhost`. Set `ALLOW_HTTP=1` only if the network already encrypts the connection, such as a VPN. |
+| `quota-pool` says `PROXY_UNREACHABLE` | The proxy did not answer: start CLIProxyAPI and check that the chosen address and port reach it. |
+| `quota-pool` says `PROXY_ERROR` | The proxy answered another HTTP status, including a redirect: check the status in the error and point the address directly at CLIProxyAPI; the command does not follow redirects. |
 | Every verdict is `unmeasured` with `inventory` or `registry` | The proxy has just started, or an enabled account has no model registered (`registered_models` in `accounts` shows which). Ask again in a minute; if it stays, disable that account or give it a model. |
 | A verdict is `unmeasured` with `name_not_registered` | No account has registered that name: ask with the name the proxy lists for clients, without an account's prefix. |
 | A verdict is `unmeasured` with `unread` | An account that serves the model could not be read, and none read has the floor left: `read_failure` and `read_at` in `accounts` say which and why. **Refresh** on the page reads every account again. |

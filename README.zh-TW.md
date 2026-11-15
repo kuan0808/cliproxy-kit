@@ -309,7 +309,7 @@ quota-pool --model claude-opus-5-5 --floor 15
 <summary>安裝指令和它的 skill</summary>
 
 ```sh
-curl -fsSL https://github.com/kuan0808/cliproxy-kit/releases/latest/download/quota-pool -o ~/.local/bin/quota-pool && chmod +x ~/.local/bin/quota-pool
+mkdir -p ~/.local/bin && curl -fsSL https://github.com/kuan0808/cliproxy-kit/releases/latest/download/quota-pool -o ~/.local/bin/quota-pool && chmod +x ~/.local/bin/quota-pool
 npx skills add kuan0808/cliproxy-kit --skill quota-pool -g
 ```
 
@@ -421,7 +421,10 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | 切換提示附上 `switch back` | session 離開的帳號現在又能接手。按 `switch back` 換回去，快取還熱著時會先問；quota-pilot 不會自己把 session 換回去，因為新帳號的快取才是熱的。 |
 | `quota-pool` 說 `POOL_NOT_SUPPORTED` | proxy 沒有額度池可讀：到插件商店把 quota-pilot 更新到 0.2.1 以上，並確認它已開啟。不提供外掛資源的 proxy，或那個位址上的其他服務，也會這樣回應。 |
 | `quota-pool` 說 `KEY_NOT_ACCEPTED` | proxy 最近一週沒有服務過這把 key 的請求：用它送出一個 prompt，或改用 proxy 的另一把 client key。 |
-| `quota-pool` 說 `NO_PROXY_URL`、`KEY_OVER_HTTP` 或 `PROXY_UNREACHABLE` | 把 `QUOTA_POOL_URL` 和 `QUOTA_POOL_KEY`，或 `ANTHROPIC_BASE_URL` 和它的 token，指向正在執行的 proxy。走 `http://` 時，只有 `127.0.0.1` 和 `localhost` 不需要 `ALLOW_HTTP=1`。 |
+| `quota-pool` 說 `NO_PROXY_URL` | 缺少 proxy 位址，或位址沒有以 `http://` 或 `https://` 開頭：把 `QUOTA_POOL_URL` 和 `QUOTA_POOL_KEY`，或 `ANTHROPIC_BASE_URL` 和它的 token，設為 proxy 的 HTTP(S) 位址。 |
+| `quota-pool` 說 `KEY_OVER_HTTP` | 這個位址會讓 key 以明文跨網路傳送：改用 HTTPS，或位於 `127.0.0.1` 或 `localhost` 的本機 proxy。只有網路已經加密連線，例如 VPN，才設定 `ALLOW_HTTP=1`。 |
+| `quota-pool` 說 `PROXY_UNREACHABLE` | proxy 沒有回應：啟動 CLIProxyAPI，確認選用的位址和連接埠能連到它。 |
+| `quota-pool` 說 `PROXY_ERROR` | proxy 回應其他 HTTP 狀態，包含重新導向：查看錯誤裡的狀態碼，把位址直接指向 CLIProxyAPI；指令不會跟隨重新導向。 |
 | 每個 verdict 都是 `unmeasured`，原因是 `inventory` 或 `registry` | proxy 剛啟動，或有個啟用中的帳號沒有註冊任何模型（`accounts` 裡的 `registered_models` 會顯示是哪個）。一分鐘後再問；還是一樣的話，停用那個帳號或替它加上模型。 |
 | verdict 是 `unmeasured`，原因是 `name_not_registered` | 沒有帳號註冊這個名稱：改用 proxy 列給 client 的名稱，不加帳號的前綴。 |
 | verdict 是 `unmeasured`，原因是 `unread` | 有個服務這個模型的帳號讀不到，讀到的帳號也都低於門檻：`accounts` 裡的 `read_failure` 和 `read_at` 會說是哪個帳號、為什麼。頁面上的**重新整理**會重新讀取每個帳號。 |

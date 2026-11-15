@@ -742,13 +742,15 @@ func poolResponse(req pluginapi.ManagementRequest) ([]byte, error) {
 	case len(floors) > 1:
 		return httpResponse(http.StatusBadRequest, []byte(`{"error":"floor is given once"}`))
 	case len(floors) == 1:
-		f, errParse := strconv.ParseFloat(floors[0], 64)
-		if !poolFloor.MatchString(floors[0]) || errParse != nil || f > 100 {
+		whole, fraction, _ := strings.Cut(floors[0], ".")
+		whole = strings.TrimLeft(whole, "0")
+		if !poolFloor.MatchString(floors[0]) || len(whole) > 3 || len(whole) == 3 && whole > "100" || whole == "100" && strings.Trim(fraction, "0") != "" {
 			return httpResponse(http.StatusBadRequest, []byte(`{"error":"floor is a percent from 0 to 100"}`))
 		}
 		if len(in.Models) == 0 {
 			return httpResponse(http.StatusBadRequest, []byte(`{"error":"floor needs a model"}`))
 		}
+		f, _ := strconv.ParseFloat(floors[0], 64)
 		in.Floor = &f
 	}
 	readDueForPool()

@@ -550,6 +550,74 @@ func TestPoolWeeklyFigure(t *testing.T) {
 	})
 }
 
+func TestPoolPendingMemberReadingsStayUnread(t *testing.T) {
+	for _, window := range []struct{ kind, model string }{
+		{"7d", opus}, {"7d_opus", opus}, {"7d_sonnet", "claude-sonnet-5-5"}, {"7d_fable", fable},
+	} {
+		for _, members := range []struct {
+			name, pending string
+			ids           []string
+		}{
+			{"singleton", "a", []string{"a"}},
+			{"first member", "a", []string{"a", "b"}},
+			{"last member", "b", []string{"a", "b"}},
+		} {
+			for _, source := range []string{"full", "headers"} {
+				t.Run(window.kind+"/"+members.name+"/"+source, func(t *testing.T) {
+					p := newPool(members.ids...)
+					reset := poolNow.Add(7 * 24 * time.Hour)
+					windows := []Window{win("5h", 90, poolNow.Add(time.Hour)), win("7d", 90, reset)}
+					if window.kind == "7d" {
+						windows[1] = win("7d", 0, reset)
+					} else {
+						windows = append(windows, win(window.kind, 0, reset))
+					}
+					for _, id := range members.ids {
+						if len(members.ids) > 1 {
+							p.s.SetIdentity(id, "claude:same/org")
+						}
+						p.full(id, windows...)
+						p.c.add(time.Minute)
+					}
+					if m := p.read(floor(15), window.model).Models[0]; verdictText(m) != "short/null" || m.Accounts != 1 || m.Read != 1 {
+						t.Fatalf("initial zero = %s %+v", verdictText(m), m)
+					}
+					windows[len(windows)-1] = win(window.kind, 80, reset)
+					read := p.full
+					if source == "headers" {
+						read = p.header
+					}
+					read(members.pending, windows...)
+					m := p.read(floor(15), window.model).Models[0]
+					if verdictText(m) != "unmeasured/unread" || m.Accounts != 1 || m.Read != 0 || m.BestWeeklyLeft != nil || m.Rows[0].WeeklyLeft != nil || m.Rows[0].WeeklyWindow != nil || m.Rows[0].WeeklyResetAt != nil {
+						t.Fatalf("pending member = %s %+v", verdictText(m), m)
+					}
+					p.c.add(6 * time.Minute)
+					if m = p.read(floor(15), window.model).Models[0]; verdictText(m) != "enough/null" || m.Read != 1 || m.BestWeeklyLeft == nil || *m.BestWeeklyLeft != 80 {
+						t.Fatalf("settled member = %s %+v", verdictText(m), m)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestPoolPendingUnboundWindowsDoNotHideWeeklyQuota(t *testing.T) {
+	for _, kind := range []string{"5h", "7d_fable"} {
+		t.Run(kind, func(t *testing.T) {
+			p := newPool("a")
+			reset := poolNow.Add(7 * 24 * time.Hour)
+			p.full("a", win("5h", 0, reset), win("7d", 80, reset), win("7d_fable", 0, reset))
+			p.c.add(time.Minute)
+			p.header("a", win(kind, 80, reset))
+			m := p.read(floor(15), opus).Models[0]
+			if verdictText(m) != "enough/null" || m.Read != 1 || m.BestWeeklyLeft == nil || *m.BestWeeklyLeft != 80 {
+				t.Fatalf("unbound pending window = %s %+v", verdictText(m), m)
+			}
+		})
+	}
+}
+
 // Sign-ins to one provider account count once, their windows reconciled by the window rules.
 func TestPoolGroups(t *testing.T) {
 	r1, r2 := poolNow.Add(24*time.Hour), poolNow.Add(7*24*time.Hour)
