@@ -119,6 +119,21 @@ assert '&' not in seen[0][1].split('&')[0][len('model='):], seen
 failed('NO_PROXY_URL', run(env={}))
 failed('NO_PROXY_URL', run(env={'QUOTA_POOL_URL': 'ftp://127.0.0.1', 'QUOTA_POOL_KEY': KEY}))
 failed('NO_PROXY_URL', run(env={'QUOTA_POOL_URL': '127.0.0.1:8317', 'QUOTA_POOL_KEY': KEY}))
+for prefix in ('', 'ftp://', 'made-up-scheme://'):
+    address = prefix + 'operator:made-up-secret@proxy.example:8317/made-up-path'
+    for url_var, key_var in (('QUOTA_POOL_URL', 'QUOTA_POOL_KEY'),
+                             ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN'),
+                             ('ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY')):
+        got = run(env={url_var: address, key_var: KEY})
+        doc = failed('NO_PROXY_URL', got)
+        assert doc == {
+            'error': 'the proxy address must start with http:// or https://',
+            'code': 'NO_PROXY_URL',
+            'help': "set QUOTA_POOL_URL or ANTHROPIC_BASE_URL to the proxy's http(s) address",
+        }, doc
+        assert got[2] == '' and got[3] == '' and seen == [], got
+        for part in (address, 'operator', 'made-up-secret', 'proxy.example', '8317', 'made-up-path', 'made-up-scheme', 'ftp'):
+            assert part.encode() not in got[1] and part not in got[2], (part, got)
 for address in ('http://127.0.0.2:9', 'http://localhost.example:9', 'http://localhost@remote.example:9',
                 'http://user:hunter2@127.0.0.1:9', 'http://192.168.0.9:9/'):
     got = run(env={'QUOTA_POOL_URL': address, 'QUOTA_POOL_KEY': KEY})

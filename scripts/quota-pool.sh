@@ -99,13 +99,13 @@ while [[ $raw == */ ]]; do raw=${raw%/}; done
 # Scheme and host are case-insensitive; the rest keeps its case. Userinfo is never printed.
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 scheme=$(lower "${raw%%://*}")
+if [[ $raw != *://* || ($scheme != http && $scheme != https) ]]; then
+  fail "the proxy address must start with http:// or https://" NO_PROXY_URL "set QUOTA_POOL_URL or ANTHROPIC_BASE_URL to the proxy's http(s) address"
+fi
 rest=${raw#*://}
 authority=${rest%%[/?#]*}
 host=$(lower "${authority##*@}")
 shown=$scheme://$host${rest#"$authority"}
-if [[ $raw != *://* || ($scheme != http && $scheme != https) ]]; then
-  fail "the proxy address $shown does not start with http:// or https://" NO_PROXY_URL "set QUOTA_POOL_URL or ANTHROPIC_BASE_URL to the proxy's http(s) address"
-fi
 base=$scheme://${authority%"${authority##*@}"}$host${rest#"$authority"}
 # The key goes with the request: across a network, only over an encrypted connection.
 if [ "$scheme" = http ] && ! [[ $scheme://$(lower "$authority") =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?$ ]] && [ "${ALLOW_HTTP:-}" != 1 ]; then

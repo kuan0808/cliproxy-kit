@@ -410,7 +410,11 @@ Each call first reads, within 10 seconds, the accounts not read within twice `id
 and those holding a weekly window whose reset has passed, at most once a minute whoever asks; the
 poll loop pauses while the proxy is idle, and a `/pool` call is not activity. Then it reads the
 host's account list and `host.auth.models`, the model names the host's registry holds for every
-credential. The document (`core/pool.go`) has every key always, with `null` for a value not known:
+credential. The list leaves out a credential with no file that is not a runtime credential, such
+as an API key written in the proxy's config; the registry can still hold its models. An enabled
+runtime credential of a supported provider is listed, enters the ledger and is read like any
+other account of that provider. The document (`core/pool.go`) has every key always, with `null`
+for a value not known:
 
 - `schema_version` (1; an added field does not raise it), `quota_pilot` (the plugin's version),
   `generated_at`, `stale_after_seconds` (twice `idle_poll_minutes` plus 5 minutes), `floor`, and
@@ -442,9 +446,12 @@ it takes is fresh: younger than `stale_after_seconds`, with no reset passed. A f
 account holds, until its first full reading. Sign-ins to one provider account are combined by the
 [window rules](#reading-quota). A fall still waiting in any member or in their combined windows
 leaves the account not read, including a single sign-in. A disagreement on whether the model's own
-week exists also leaves the group not read. Two windows that leave the same figure resolve to the
-later known reset, then a known reset over an unknown one, then the model's own week. A credential
-quota-pilot does not read counts when it has registered the name, and is never read.
+week exists also leaves the group not read. The group reader summarises the readings in force at
+the time of the call and keeps no group history across calls. A fall seen across two sign-ins in
+separate calls is therefore not held as pending; the verdict follows the newest reading until
+the window rules settle it. Two windows that leave the same figure resolve to the later known
+reset, then a known reset over an unknown one, then the model's own week. A credential quota-pilot
+does not read counts when it has registered the name, and is never read.
 
 `verdict`, given a floor, is the first that holds: `unmeasured` (`inventory` or `registry`);
 `unmeasured` with `name_not_registered` (no account registered the name); `not_pooled` (only
