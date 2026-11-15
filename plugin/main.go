@@ -69,6 +69,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -204,6 +206,7 @@ func handleMethod(method string, request []byte) (out []byte, err error) {
 			"resources": []map[string]string{
 				{"Path": "/band", "Description": "Snapshot for quota-band, and its commands; needs a client key the proxy accepted"},
 				{"Path": "/codex", "Description": "Quota notices for Codex hooks; needs a client key the proxy accepted"},
+				{"Path": "/pool", "Description": "Pooled quota per model for agents, read by quota-pool; needs a client key the proxy accepted"},
 				pageResource,
 			},
 		})
@@ -665,7 +668,8 @@ func sessionOf(headers http.Header, metadata map[string]any) string {
 
 // managementResponse serves the full snapshot on the management route (management key checked
 // by the host), and on the resource routes, which the host does not authenticate, the email-free
-// band snapshot and the Codex hooks' notices, each behind a client key the proxy accepted.
+// band snapshot, the Codex hooks' notices and the pool, each behind a client key the proxy
+// accepted. A path it does not know gets no snapshot.
 func managementResponse(raw []byte) ([]byte, error) {
 	var req pluginapi.ManagementRequest
 	if len(raw) > 0 {
@@ -688,12 +692,15 @@ func managementResponse(raw []byte) ([]byte, error) {
 	if strings.HasSuffix(req.Path, "/codex") {
 		return codexHookResponse(req)
 	}
+	if strings.HasSuffix(req.Path, "/pool") {
+		return poolResponse(req)
+	}
 	var doc any
-	if strings.HasSuffix(req.Path, "/band") {
-		token, _ := strings.CutPrefix(req.Headers.Get("Authorization"), "Bearer ")
-		client, known := state.Client(strings.TrimSpace(token))
+	switch {
+	case strings.HasSuffix(req.Path, "/band"):
+		client, known := requestClient(req.Headers)
 		if !known {
-			return httpResponse(http.StatusUnauthorized, []byte(`{"error":"a client key the proxy accepted in the last week is required"}`))
+			return httpResponse(http.StatusUnauthorized, keyRequired)
 		}
 		// The band says what its session is, which only its device knows, and sends its switch,
 		// route or back with a read (resources are read-only routes): applied to its own session,
@@ -708,14 +715,105 @@ func managementResponse(raw []byte) ([]byte, error) {
 			state.Apply(cmd)
 		}
 		doc = state.BuildForBand(session, headerText(req.Headers, "X-Band-Model"), client)
-	} else {
+	case strings.HasSuffix(req.Path, "/snapshot"):
 		doc = state.Build()
+	default:
+		return httpResponse(http.StatusNotFound, []byte(`{"error":"not found"}`))
 	}
 	body, errMarshal := json.Marshal(doc)
 	if errMarshal != nil {
 		return nil, errMarshal
 	}
 	return httpResponse(http.StatusOK, body)
+}
+
+// poolFloor is a floor as /pool takes it: one unsigned decimal number, from 0 to 100.
+var poolFloor = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+
+// poolResponse answers /pool, the pooled quota an agent decides dispatch on (core/pool.go), behind
+// the band's key check. It has the providers read the accounts that are due, then reads the host's
+// account list and the models its registry holds for each credential.
+func poolResponse(req pluginapi.ManagementRequest) ([]byte, error) {
+	if _, known := requestClient(req.Headers); !known {
+		return httpResponse(http.StatusUnauthorized, keyRequired)
+	}
+	in := core.PoolInput{Version: version, Models: req.Query["model"]}
+	switch floors := req.Query["floor"]; {
+	case len(floors) > 1:
+		return httpResponse(http.StatusBadRequest, []byte(`{"error":"floor is given once"}`))
+	case len(floors) == 1:
+		f, errParse := strconv.ParseFloat(floors[0], 64)
+		if !poolFloor.MatchString(floors[0]) || errParse != nil || f > 100 {
+			return httpResponse(http.StatusBadRequest, []byte(`{"error":"floor is a percent from 0 to 100"}`))
+		}
+		if len(in.Models) == 0 {
+			return httpResponse(http.StatusBadRequest, []byte(`{"error":"floor needs a model"}`))
+		}
+		in.Floor = &f
+	}
+	readDueForPool()
+	in.List, in.ListRead = readInventory()
+	if in.ListRead && len(in.List) > 0 {
+		state.UpdateInventory(in.List)
+	}
+	in.Registry, in.RegistryRead = readRegistry()
+	body, errMarshal := json.Marshal(state.Pool(in))
+	if errMarshal != nil {
+		return nil, errMarshal
+	}
+	return httpResponse(http.StatusOK, body)
+}
+
+// poolReadMu holds poolReadAt, when a /pool call last had the providers read: at most once a
+// minute however many callers ask, and one asking meanwhile waits for that read.
+var (
+	poolReadMu sync.Mutex
+	poolReadAt time.Time
+)
+
+// readDueForPool reads, within 10 seconds, the accounts not read within twice the idle poll
+// interval, or holding a weekly window whose reset passed since: the loop pauses while the proxy
+// is idle, and a /pool read does not count as activity.
+func readDueForPool() {
+	poolReadMu.Lock()
+	defer poolReadMu.Unlock()
+	if now := time.Now(); !poolReadAt.IsZero() && now.Sub(poolReadAt) < minRepoll {
+		return
+	}
+	poolReadAt = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pollOnce(ctx, 2*time.Duration(state.Config().IdlePollMinutes)*time.Minute, false)
+}
+
+// readRegistry reads the model names the host's registry holds for every credential it holds;
+// false when it did not answer.
+func readRegistry() ([]core.Registered, bool) {
+	raw, errModels := callHost(pluginabi.MethodHostAuthModels, pluginapi.HostAuthModelsRequest{})
+	if errModels != nil {
+		state.NoteError("auth models: " + errModels.Error())
+		return nil, false
+	}
+	var answer pluginapi.HostAuthModelsResponse
+	if errDecode := json.Unmarshal(raw, &answer); errDecode != nil {
+		state.NoteError("auth models decode: " + errDecode.Error())
+		return nil, false
+	}
+	out := make([]core.Registered, 0, len(answer.Credentials))
+	for _, c := range answer.Credentials {
+		out = append(out, core.Registered{ID: c.ID, Provider: c.Provider, Models: c.Models})
+	}
+	return out, true
+}
+
+// keyRequired is the answer of a resource to a key the proxy has not accepted in the last week.
+var keyRequired = []byte(`{"error":"a client key the proxy accepted in the last week is required"}`)
+
+// requestClient is who a resource request's client key is to the proxy, when it accepted that key
+// in the last week (see core.State.Client).
+func requestClient(h http.Header) (string, bool) {
+	token, _ := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
+	return state.Client(strings.TrimSpace(token))
 }
 
 func httpResponse(status int, body []byte) ([]byte, error) {
@@ -940,8 +1038,9 @@ func pollOnce(ctx context.Context, fresh time.Duration, asked bool) (complete bo
 		if info.Disabled || !core.Supported(info.Provider) {
 			continue
 		}
-		j := pollJob{info: info, usage: due(polledAt[info.ID], now, fresh), planReadAt: planReadAt[info.ID],
-			plan: asked && due(planReadAt[info.ID], now, fresh)}
+		// A weekly window whose reset passed since it was read shows full until it is read again.
+		usage := due(polledAt[info.ID], now, fresh) || state.ResetPassed(info.ID) && due(polledAt[info.ID], now, minRepoll)
+		j := pollJob{info: info, usage: usage, planReadAt: planReadAt[info.ID], plan: asked && due(planReadAt[info.ID], now, fresh)}
 		if j.usage || info.Provider != "codex" && planDue(j.planReadAt, state.StartedOver(info.ID), now, j.plan) {
 			jobs = append(jobs, j)
 		}
@@ -977,6 +1076,7 @@ func pollOnce(ctx context.Context, fresh time.Duration, asked bool) (complete bo
 		if f := r.outcome.Failure; f == "" || f == "limited" {
 			polledAt[r.outcome.ID] = r.at
 		}
+		state.NoteRead(r.outcome.ID, r.outcome.Failure)
 		outcomes = append(outcomes, r.outcome)
 	}
 	return true, outcomes
@@ -1080,6 +1180,7 @@ func pollCredential(ctx context.Context, j pollJob) (r pollResult) {
 				state.MergePoll(info.ID, info.Provider, windows, scoped)
 				if info.Provider == "codex" {
 					state.SetPlan(info.ID, info.Provider, core.CodexPlan(body))
+					state.SetCredits(info.ID, info.Provider, core.CodexCredits(body), r.at)
 				}
 			} else {
 				fail("unreadable", 0, "unreadable answer")

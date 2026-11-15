@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"testing"
@@ -1033,6 +1034,95 @@ func TestPlans(t *testing.T) {
 	s.SetPlan("claude-a", "claude", "Max 20x")
 	if got := s.BuildForBand("", "", "").Providers["claude"].Credentials[0].Plan; got != "Max 20x" {
 		t.Fatalf("snapshot plan = %q", got)
+	}
+}
+
+// The credits of a Codex usage answer, every balance made up: the state a rule branches on, and the
+// balance exactly when there is one, as read and not rounded.
+func TestCodexCreditsReadTheBalanceAndNeverContradictCodex(t *testing.T) {
+	balance := func(f float64) *float64 { return &f }
+	for body, want := range map[string]Credits{
+		`{"credits":{"balance":"12.75","unlimited":false}}`:  {"some", balance(12.75)},
+		`{"credits":{"balance":12.75,"unlimited":false}}`:    {"some", balance(12.75)},
+		`{"credits":{"balance":" 0.125 "}}`:                  {"some", balance(0.125)},
+		`{"credits":{"balance":"0","unlimited":false}}`:      {"none", balance(0)},
+		`{"credits":{"balance":-0,"unlimited":false}}`:       {"none", balance(0)},
+		`{"credits":{"balance":null,"unlimited":true}}`:      {"unlimited", nil},
+		`{"credits":{"unlimited":true,"has_credits":false}}`: {"unlimited", nil},
+		`{"credits":{"balance":"3","has_credits":true}}`:     {"some", balance(3)},
+		`{}`:                              {"unknown", nil},
+		`{"credits":null}`:                {"unknown", nil},
+		`{"credits":{"unlimited":false}}`: {"unknown", nil},
+		`{"credits":{"balance":null,"unlimited":false}}`:                   {"unknown", nil},
+		`{"credits":{"balance":"","unlimited":false}}`:                     {"unknown", nil},
+		`{"credits":{"balance":"-4","unlimited":false}}`:                   {"unknown", nil},
+		`{"credits":{"balance":-4,"unlimited":false}}`:                     {"unknown", nil},
+		`{"credits":{"balance":"many","unlimited":false}}`:                 {"unknown", nil},
+		`{"credits":{"balance":"inf","unlimited":false}}`:                  {"unknown", nil},
+		`{"credits":{"balance":"NaN","unlimited":false}}`:                  {"unknown", nil},
+		`{"credits":{"balance":1e999,"unlimited":false}}`:                  {"unknown", nil},
+		`{"credits":{"balance":true,"unlimited":false}}`:                   {"unknown", nil},
+		`{"credits":{"balance":"0"}}`:                                      {"unknown", nil},
+		`{"credits":{"balance":"0","unlimited":"false"}}`:                  {"unknown", nil},
+		`{"credits":{"balance":"5","has_credits":false}}`:                  {"unknown", nil},
+		`{"credits":{"balance":"5","has_credits":"false"}}`:                {"some", balance(5)},
+		`{"credits":{"balance":"0","unlimited":false,"has_credits":true}}`: {"unknown", nil},
+		`{"credits":{"balance":"7","unlimited":"true"}}`:                   {"some", balance(7)},
+		`{"rate_limit":{"credits":{"balance":"5","unlimited":false}}}`:     {"unknown", nil},
+		`{"credits":"5"}`: {"unknown", nil},
+		`{"plan_type":"plus","credits":{"balance":"5"},"rate_limit":{"x":true}}`: {"some", balance(5)},
+	} {
+		got := CodexCredits([]byte(body))
+		if got.State != want.State || (got.Balance == nil) != (want.Balance == nil) || got.Balance != nil && *got.Balance != *want.Balance {
+			t.Fatalf("CodexCredits(%s) = %s %v, want %s %v", body, got.State, got.Balance, want.State, want.Balance)
+		}
+		if got.Balance != nil && math.Signbit(*got.Balance) {
+			t.Fatalf("CodexCredits(%s) kept a negative zero", body)
+		}
+	}
+}
+
+// A Codex account's credits are kept in memory only: the saved state never holds the balance, and
+// after a restart they are unknown until the next reading.
+func TestCodexCreditsStayInMemory(t *testing.T) {
+	s, c := newTestState()
+	s.UpdateInventory([]CredInfo{{ID: "codex-x", Provider: "codex"}, {ID: "claude-a", Provider: "claude"}})
+	credits := func(s *State) map[string]*PoolCredits {
+		out := map[string]*PoolCredits{}
+		for _, a := range s.Pool(PoolInput{}).Accounts {
+			out[a.ID] = a.Credits
+		}
+		return out
+	}
+	x := opaqueID("codex-x")
+	if got := credits(s); got[opaqueID("claude-a")] != nil || *got[x] != (PoolCredits{State: "unknown"}) {
+		t.Fatalf("before any reading: %+v", got[x])
+	}
+	read := c.t
+	s.MergePoll("codex-x", "codex", []Window{{Kind: KindWeekly, Remaining: 0.4, ResetAt: c.t.Add(72 * time.Hour), ObservedAt: c.t}}, false)
+	s.SetCredits("codex-x", "codex", CodexCredits([]byte(`{"credits":{"balance":"4321.5","unlimited":false}}`)), read)
+	c.add(time.Minute)
+	got := credits(s)[x]
+	if got.State != "some" || *got.Balance != 4321.5 || !got.ReadAt.Equal(read) || *got.Stale {
+		t.Fatalf("after a reading: %+v", got)
+	}
+	c.add(25 * time.Minute)
+	if got := credits(s)[x]; !*got.Stale || *got.Balance != 4321.5 {
+		t.Fatalf("an old reading: %+v", got)
+	}
+	saved, _ := json.Marshal(s.Export())
+	if !strings.Contains(string(saved), `"codex-x"`) || strings.Contains(string(saved), "4321") || strings.Contains(string(saved), "credit") {
+		t.Fatalf("the saved state holds the credits: %s", saved)
+	}
+	restarted := New("boot-2", c.now)
+	restarted.Import(s.Export())
+	if got := credits(restarted)[x]; *got != (PoolCredits{State: "unknown"}) {
+		t.Fatalf("after a restart: %+v", got)
+	}
+	// A reading that carried no credit object is a new unknown reading.
+	s.SetCredits("codex-x", "codex", CodexCredits([]byte(`{"rate_limit":{}}`)), c.t)
+	if got := credits(s)[x]; got.State != "unknown" || got.Balance != nil || !got.ReadAt.Equal(c.t) || *got.Stale {
+		t.Fatalf("a reading without credits: %+v", got)
 	}
 }
 

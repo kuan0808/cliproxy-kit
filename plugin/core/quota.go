@@ -403,3 +403,56 @@ func CodexPlan(body []byte) string {
 	}
 	return titleCase(strings.ToLower(doc.PlanType))
 }
+
+// Credits is what a Codex usage answer says of the account's credits: State is "unlimited",
+// "some", "none" or "unknown", and Balance is the provider's figure as read, set exactly when the
+// state is some or none.
+type Credits struct {
+	State   string
+	Balance *float64
+}
+
+// decimal is a balance as the answer may type it, in a string or as a JSON number: "inf", "NaN"
+// and the like are not numbers.
+var decimal = regexp.MustCompile(`^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$`)
+
+// CodexCredits reads the credits object at the top level of a Codex usage answer, where the Codex
+// client's model has it. has_credits is read only so as never to contradict the Codex client: no
+// "some" where it shows no credits, no "none" where it shows them available.
+func CodexCredits(body []byte) Credits {
+	var doc struct {
+		Credits *struct {
+			Balance    json.RawMessage `json:"balance"`
+			Unlimited  json.RawMessage `json:"unlimited"`
+			HasCredits json.RawMessage `json:"has_credits"`
+		} `json:"credits"`
+	}
+	if json.Unmarshal(body, &doc) != nil || doc.Credits == nil {
+		return Credits{State: "unknown"}
+	}
+	// Only the JSON values true and false count; anything else is taken as missing.
+	flag := func(raw json.RawMessage) string {
+		if v := string(raw); v == "true" || v == "false" {
+			return v
+		}
+		return ""
+	}
+	unlimited, has := flag(doc.Credits.Unlimited), flag(doc.Credits.HasCredits)
+	text := string(doc.Credits.Balance)
+	var quoted string
+	if json.Unmarshal(doc.Credits.Balance, &quoted) == nil {
+		text = strings.TrimSpace(quoted)
+	}
+	balance, errParse := strconv.ParseFloat(text, 64)
+	number := decimal.MatchString(text) && errParse == nil && !math.IsInf(balance, 0)
+	switch {
+	case unlimited == "true":
+		return Credits{State: "unlimited"}
+	case number && balance > 0 && has != "false":
+		return Credits{State: "some", Balance: &balance}
+	case number && balance == 0 && unlimited == "false" && has != "true":
+		balance = 0 // not -0
+		return Credits{State: "none", Balance: &balance}
+	}
+	return Credits{State: "unknown"}
+}

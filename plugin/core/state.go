@@ -99,6 +99,12 @@ type Cred struct {
 	planAt time.Time
 	// health is its failure moments and rest (rest.go). In memory only.
 	health health
+	// credits is what its last Codex usage reading said of its credits, read at creditsAt, and
+	// readFailure why its last quota read failed, "" after one that worked. In memory only, so the
+	// balance never lands on disk.
+	credits     Credits
+	creditsAt   time.Time
+	readFailure string
 }
 
 // CredInfo is the inventory the host reports for a credential.
@@ -718,6 +724,24 @@ func (s *State) SetPlan(authID, provider, plan string) {
 		}
 		c.Plan = plan
 		s.dirty = true
+	}
+}
+
+// SetCredits keeps what a Codex usage reading taken at at says of the account's credits.
+func (s *State) SetCredits(authID, provider string, credits Credits, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c := s.memberLocked(authID, provider); c != nil {
+		c.credits, c.creditsAt = credits, at
+	}
+}
+
+// NoteRead keeps what an account's last quota read came to: a poll failure code, "" when it read.
+func (s *State) NoteRead(authID, failure string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c := s.creds[authID]; c != nil {
+		c.readFailure = failure
 	}
 }
 

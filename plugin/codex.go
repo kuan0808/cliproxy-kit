@@ -22,8 +22,7 @@ import (
 // systemMessage as a notice, apart from the model's context; "{}" says nothing.
 func codexHookResponse(req pluginapi.ManagementRequest) ([]byte, error) {
 	start := req.Query.Get("event") == "SessionStart"
-	token, _ := strings.CutPrefix(req.Headers.Get("Authorization"), "Bearer ")
-	client, known := state.Client(strings.TrimSpace(token))
+	client, known := requestClient(req.Headers)
 	text := ""
 	switch id := strings.TrimSpace(req.Headers.Get("X-Codex-Session")); {
 	case !known:
