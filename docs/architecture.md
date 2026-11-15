@@ -402,14 +402,15 @@ through the proxy, as Claude does, so Codex should be set up to use it (see the 
 `quota-pool` asks `GET /v0/resource/plugins/quota-pilot/pool?model=<id>&model=<id>&floor=<percent>`
 with `Authorization: Bearer <client key>`, under the band's key rule (401 otherwise). `floor` is
 given at most once, as digits with an optional fraction, at most 100, and only with a `model`;
-anything else answers 400. The command is transport only: it prints the body of a 200 unchanged,
-and any other outcome as one JSON object `{error, code, help}` with exit 3. Why a client key, and
-why a read may poll: [ADR-0011](adr/0011-an-agent-reads-the-pool-with-a-client-key.md).
+anything else answers 400. The command is transport only; `quota-pool --help` defines its options,
+environment and exit codes. Why a client key, and why a read may poll:
+[ADR-0011](adr/0011-an-agent-reads-the-pool-with-a-client-key.md).
 
 Each call first reads, within 10 seconds, the accounts not read within twice `idle_poll_minutes`
 and those holding a weekly window whose reset has passed, at most once a minute whoever asks; the
-poll loop pauses while the proxy is idle, and a `/pool` call is not activity. Then it reads the
-host's account list and `host.auth.models`, the model names the host's registry holds for every
+poll loop pauses while the proxy is idle, and a `/pool` call is not activity. Concurrent callers
+wait for that read; the provider-read budget does not bound the whole HTTP response. Then it reads
+the host's account list and `host.auth.models`, the model names the host's registry holds for every
 credential. The list leaves out a credential with no file that is not a runtime credential, such
 as an API key written in the proxy's config; the registry can still hold its models. An enabled
 runtime credential of a supported provider is listed, enters the ledger and is read like any

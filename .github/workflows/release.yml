@@ -1,8 +1,9 @@
 name: release
 
 # A tag v<version> publishes the release the CLIProxyAPI plugin store installs from: one
-# quota-pilot_<version>_<goos>_<goarch>.zip per platform, with the library at its root, and
-# checksums.txt. Run by hand, it builds the same files as version 0.0.0 without publishing them.
+# quota-pilot_<version>_<goos>_<goarch>.zip per platform, with the library at its root,
+# quota-pool and checksums.txt. Run by hand, it builds the same files as version 0.0.0 without
+# publishing them.
 on:
   push:
     tags: ["v*"]

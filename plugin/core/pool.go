@@ -44,9 +44,8 @@ type Pool struct {
 	Errors            []string      `json:"errors"`
 }
 
-// PoolAccount is one credential the host holds. One quota-pilot does not read (another
-// provider's, or one with no file) has its id, provider, registered_models and, when the host's
-// list names it, disabled; the rest is null.
+// PoolAccount is one credential the host holds. One with no supported ledger entry has its id,
+// provider, registered_models and, when the host's list names it, disabled; the rest is null.
 type PoolAccount struct {
 	ID               string       `json:"id"`
 	Label            *string      `json:"label"`

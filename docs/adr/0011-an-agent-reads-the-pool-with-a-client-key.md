@@ -26,10 +26,8 @@ it sends the request with a key from its environment and prints the answer uncha
 
 ## Consequences
 
-Every client key the proxy accepted reads what the band reads and more: each Codex account's credit
-balance, how many models each account has registered, why a read failed and the plugin's version;
-and it can make the plugin read early, at most once a minute. The README's privacy section says so.
-A resource handler now polls, so a `/pool` answer can take up to 10 seconds. Agents are built on
-the document, which is what makes this hard to undo: fields are only added under `schema_version`
-1, and a field that changes meaning raises it. The resource handler answers only the paths it
-knows, so a missed branch never falls through to the management snapshot.
+See the [README's privacy section](../../README.md#privacy-and-security) for what a client key can
+read and trigger, and [The pool](../architecture.md#the-pool) for the read limits. Agents are built
+on the document, which is what makes this hard to undo: fields are only added under `schema_version`
+1, and a field that changes meaning raises it. The resource handler answers only the paths it knows,
+so a missed branch never falls through to the management snapshot.

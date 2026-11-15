@@ -990,8 +990,8 @@ func readInventory() ([]core.CredInfo, bool) {
 	return infos, true
 }
 
-// pollOnce reads each account's quota, skipping those read within `fresh`, and reports whether the
-// inventory was complete (an incomplete one is retried soon) and what reading each account came to.
+// pollOnce skips quota read within fresh unless a weekly reset passed and minRepoll elapsed. It
+// reports whether the inventory was complete (else retried soon) and each quota read's outcome.
 // A refresh asks for each Claude plan too, read within `fresh` of the last plan read only once.
 func pollOnce(ctx context.Context, fresh time.Duration, asked bool) (complete bool, outcomes []pollOutcome) {
 	select {

@@ -137,8 +137,8 @@ An account's short public name (`k•••`).
 _Avoid_: alias, masked email
 
 **Pool**:
-A provider's accounts the proxy holds, taken together; for one model, the ones that serve it are
-its `accounts`.
+The accounts the proxy holds, taken together; [The pool](docs/architecture.md#the-pool) defines
+which count for each model.
 _Avoid_: route (a session's standing order), fleet
 
 ### Running another model

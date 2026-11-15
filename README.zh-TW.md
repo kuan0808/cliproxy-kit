@@ -429,12 +429,12 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | `quota-pool` 說 `PROXY_ERROR` | proxy 回應其他 HTTP 狀態，包含重新導向：查看錯誤裡的狀態碼，把位址直接指向 CLIProxyAPI；指令不會跟隨重新導向。 |
 | 每個 verdict 都是 `unmeasured`，原因是 `inventory` 或 `registry` | proxy 剛啟動，或有個啟用中的帳號沒有註冊任何模型（`accounts` 裡的 `registered_models` 會顯示是哪個）。一分鐘後再問；還是一樣的話，停用那個帳號或替它加上模型。 |
 | verdict 是 `unmeasured`，原因是 `name_not_registered` | 沒有帳號註冊這個名稱：改用 proxy 列給 client 的名稱，不加帳號的前綴。 |
-| verdict 是 `unmeasured`，原因是 `unread` | 有個服務這個模型的帳號讀不到，讀到的帳號也都低於門檻：`accounts` 裡的 `read_failure` 和 `read_at` 會說是哪個帳號、為什麼。頁面上的**重新整理**會重新讀取每個帳號。 |
+| verdict 是 `unmeasured`，原因是 `unread` | 讀到的帳號都低於門檻，而且有計入的帳號未讀到，或沒有帳號計入。查看 `rows` 裡的 `counts`、`why_not`，以及每個帳號的 `read_failure` 和 `windows` 裡的 `read_at`、`stale`。尚未確認的讀數見[每週額度規則](docs/architecture.md#the-pool)；頁面上的**重新整理**會重試到期的 Claude 和 Codex 額度讀取。 |
 
 ## 隱私與安全
 
 - **單一擁有者。** proxy 的每一把 client key 都視為可信。proxy 接受過某把 key 的請求後，這把 key 就能讀到所有帳號的額度（遮蔽過的名稱，不含 email 或路徑）和每個 Codex 帳號的點數餘額，也能替它開的 session 命名、切換帳號。只把 key 給你願意讓他看到用量和 Codex 點數餘額的人；從 proxy 移除的 key 最多還能讀這兩樣一週。不要求 key 的 proxy，只要最近一週服務過不帶 key 的請求，任何連得到它位址的人都能讀到同樣的內容；開啟 key 之後，直到它第一次收到帶 key 的請求為止也是如此。透過 [`quota-pool`](#給-agent-用)，key 還能讀到每個帳號註冊了幾個模型、某個帳號上次為什麼讀取失敗、quota-pilot 不讀取的帳號屬於哪些供應商，以及外掛的版本，也能讓 quota-pilot 提早讀取帳號額度，最多每分鐘一次。
-- **留在本機。** 所有資料都放在 proxy 使用者的 `~/.cache/cliproxy-kit/`（權限 0600），client key 只存雜湊。除了轉送的請求，插件只會用帳號既有的 token 呼叫供應商自己的用量和帳號資料端點，以及查詢裝置名稱的 DNS。
+- **留在本機。** 狀態和用量檔案放在 proxy 使用者的 `~/.cache/cliproxy-kit/`（權限 0600），client key 只存雜湊。除了轉送的請求，外掛只會用帳號既有的 token 呼叫供應商自己的用量和帳號資料端點，以及查詢裝置名稱的 DNS。
 - **對話記錄。** 它只讀自己那台機器上、同一個使用者的 Claude Code 對話記錄。
 - **額度列送出的內容。** 額度列每 10 秒向 `ANTHROPIC_BASE_URL` 讀取快照，帶著 Claude Code 用的 client key、session 的 id 和模型。要等這個位址回過 quota-pilot 的快照，它才會再附上 session 的標題、開始時的資料夾，以及 repository 的根目錄和 remote（放在 header 裡，不會進 proxy 的請求記錄），也才會讀你這台裝置上的對話記錄來找標題。不是 quota-pilot 的 gateway 永遠收不到這些資料。[讀取期限與連線上限](docs/architecture.md#quota-band)會限制沒有回應時的等待時間。
 - **都在金鑰後面。** 頁面本身不含任何資料，一切都經過 management 路由讀取，需要 management key。額度列、Codex hook 和 `quota-pool` 的路由需要 proxy 接受過的 client key。
@@ -445,6 +445,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 cd plugin && go test ./...                                   # 插件
 cd ui && bun install && bun run verify                       # 頁面：測試、lint、型別、建置
 cd mod && claude plugin test . && claude plugin validate .   # 額度列
+python3 scripts/test_quota_pool.py                           # 獨立 CLI，從專案根目錄執行
 ```
 
 `scripts/install-plugin.sh` 會安裝本機建置的版本。`git config core.hooksPath scripts/git-hooks` 會開啟 commit 前的憑證檢查（需要 PyYAML；讀 Codex 的設定需要 Python 3.11 以上）。打上 `v<版本>` tag 會發布商店安裝用的 release，版本必須和 `mod/.claude-plugin/plugin.json` 一致；release 說明是 tag 的訊息（`git tag -a`），一般 tag 則用那個 commit 的訊息。各部分怎麼決定、存了什麼：[docs/architecture.md](docs/architecture.md)。

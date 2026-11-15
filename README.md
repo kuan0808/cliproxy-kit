@@ -541,7 +541,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | `quota-pool` says `PROXY_ERROR` | The proxy answered another HTTP status, including a redirect: check the status in the error and point the address directly at CLIProxyAPI; the command does not follow redirects. |
 | Every verdict is `unmeasured` with `inventory` or `registry` | The proxy has just started, or an enabled account has no model registered (`registered_models` in `accounts` shows which). Ask again in a minute; if it stays, disable that account or give it a model. |
 | A verdict is `unmeasured` with `name_not_registered` | No account has registered that name: ask with the name the proxy lists for clients, without an account's prefix. |
-| A verdict is `unmeasured` with `unread` | An account that serves the model could not be read, and none read has the floor left: `read_failure` and `read_at` in `accounts` say which and why. **Refresh** on the page reads every account again. |
+| A verdict is `unmeasured` with `unread` | No read account meets the floor, and some counting account is unread or none counts. Check `rows` for `counts` and `why_not`, and each account's `read_failure` and `windows` for `read_at` and `stale`. See the [weekly figure rules](docs/architecture.md#the-pool) for unsettled readings; **Refresh** retries due Claude and Codex readings. |
 
 ## Privacy and security
 
@@ -555,9 +555,9 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   [`quota-pool`](#for-agents), a key also reads how many models each account has registered, why an
   account's last read failed, the providers of accounts quota-pilot does not read, and the
   plugin's version, and can make quota-pilot read the accounts early, at most once a minute.
-- **Local.** Everything stays in `~/.cache/cliproxy-kit/` (mode 0600) of the proxy's user, client
-  keys only as hashes. Besides the requests it routes, the plugin calls only the providers' own
-  usage and profile endpoints, with the accounts' existing tokens, and DNS for device names.
+- **Local.** State and usage files stay in `~/.cache/cliproxy-kit/` (mode 0600) of the proxy's user,
+  client keys only as hashes. Besides the requests it routes, the plugin calls only the providers'
+  own usage and profile endpoints, with the accounts' existing tokens, and DNS for device names.
 - **Transcripts.** It reads Claude Code's transcripts only on its own machine, as its own user.
 - **What the band sends.** Every 10 seconds the band asks `ANTHROPIC_BASE_URL` for its snapshot,
   with the client key Claude Code uses, the session's id and its model. Only after that address has
@@ -576,6 +576,7 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 cd plugin && go test ./...                                   # the plugin
 cd ui && bun install && bun run verify                       # the page: tests, lint, types, build
 cd mod && claude plugin test . && claude plugin validate .   # the band
+python3 scripts/test_quota_pool.py                           # the standalone CLI, from the repo root
 ```
 
 `scripts/install-plugin.sh` installs a local build. `git config core.hooksPath scripts/git-hooks`
