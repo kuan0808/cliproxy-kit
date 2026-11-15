@@ -130,13 +130,6 @@ func sameJSON(t *testing.T, doc Pool, want string, ids ...string) {
 	}) {
 		t.Fatalf("accounts out of order: %+v", doc.Accounts)
 	}
-	var expected Pool
-	if err := json.Unmarshal([]byte(want), &expected); err != nil {
-		t.Fatalf("expected document: %v", err)
-	}
-	sort.Slice(expected.Accounts, func(i, j int) bool { return expected.Accounts[i].ID < expected.Accounts[j].ID })
-	reordered, _ := json.Marshal(expected)
-	want = string(reordered)
 	got, err := json.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
@@ -148,6 +141,12 @@ func sameJSON(t *testing.T, doc Pool, want string, ids ...string) {
 	if err := json.Unmarshal([]byte(want), &w); err != nil {
 		t.Fatalf("expected document: %v", err)
 	}
+	accounts := w.(map[string]any)["accounts"].([]any)
+	sort.Slice(accounts, func(i, j int) bool {
+		a, b := accounts[i].(map[string]any), accounts[j].(map[string]any)
+		pa, pb := a["provider"].(string), b["provider"].(string)
+		return pa < pb || pa == pb && a["id"].(string) < b["id"].(string)
+	})
 	if !reflect.DeepEqual(g, w) {
 		pretty, _ := json.MarshalIndent(g, "", "  ")
 		t.Fatalf("document:\n%s\nwant:\n%s", pretty, want)
