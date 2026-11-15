@@ -550,6 +550,41 @@ func TestPoolWeeklyFigure(t *testing.T) {
 	})
 }
 
+func TestSettledWindowViewsUseTheSettledReading(t *testing.T) {
+	for _, kind := range []string{"5h", "7d", "7d_opus", "7d_sonnet", "7d_fable"} {
+		for _, resource := range []string{"pool", "snapshot"} {
+			t.Run(kind+"/"+resource, func(t *testing.T) {
+				p := newPool("a")
+				reset := poolNow.Add(24 * time.Hour)
+				p.full("a", win(kind, 0, reset))
+				p.c.add(time.Hour)
+				p.full("a", win(kind, 80, reset))
+				readAt := p.c.t
+				p.c.add(6 * time.Minute)
+				if resource == "pool" {
+					doc := p.read(nil)
+					if len(doc.Accounts) != 1 || len(doc.Accounts[0].Windows) != 1 {
+						t.Fatalf("pool windows = %+v", doc.Accounts)
+					}
+					w := doc.Accounts[0].Windows[0]
+					if w.Kind != kind || w.Left != 80 || !w.ReadAt.Equal(readAt) || w.Stale || w.ResetAt == nil || !w.ResetAt.Equal(reset) {
+						t.Fatalf("settled pool window = %+v, want 80 read at %v and fresh", w, readAt)
+					}
+				} else {
+					provider := p.s.Build().Providers["claude"]
+					if provider == nil || len(provider.Credentials) != 1 || len(provider.Credentials[0].Windows) != 1 {
+						t.Fatalf("snapshot windows = %+v", provider)
+					}
+					w := provider.Credentials[0].Windows[0]
+					if w.Kind != kind || w.Remaining != 0.8 || !w.ObservedAt.Equal(readAt) || w.Stale || !w.ResetAt.Equal(reset) {
+						t.Fatalf("settled snapshot window = %+v, want 0.8 read at %v and fresh", w, readAt)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestPoolPendingMemberReadingsStayUnread(t *testing.T) {
 	for _, window := range []struct{ kind, model string }{
 		{"7d", opus}, {"7d_opus", opus}, {"7d_sonnet", "claude-sonnet-5-5"}, {"7d_fable", fable},

@@ -609,8 +609,8 @@ func (s *State) windowViewsLocked(c *Cred, now time.Time) []WindowView {
 	})
 	out := make([]WindowView, 0, len(kinds))
 	for _, k := range kinds {
-		w := c.Windows[k]
 		rem, reset, _, fresh := s.effective(c, k, now)
+		w := c.Windows[k]
 		out = append(out, WindowView{Kind: k, Label: windowLabel(k), Remaining: rem, ResetAt: reset, ObservedAt: w.ObservedAt, Stale: !fresh})
 	}
 	return out
