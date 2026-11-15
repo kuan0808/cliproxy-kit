@@ -136,6 +136,11 @@ _Avoid_: nearly used up
 An account's short public name (`k•••`).
 _Avoid_: alias, masked email
 
+**Pool**:
+A provider's accounts the proxy holds, taken together; for one model, the ones that serve it are
+its `accounts`.
+_Avoid_: route (a session's standing order), fleet
+
 ### Running another model
 
 **Route**:

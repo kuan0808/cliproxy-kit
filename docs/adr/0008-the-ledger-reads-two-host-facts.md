@@ -36,3 +36,9 @@ crosses the wire for this. The models are asked for the accounts quota-pilot lis
 Claude's and Codex's: a target on any other provider is marked "not checked", never "not served".
 If the plugin API ever hands these facts to a plugin, the module goes and quota-pilot reports the
 stops with the others.
+
+Note, 0.2.1: the plugin API now hands the models half to plugins. `host.auth.models` answers the
+model names the host's registry holds for every credential, and quota-pilot's `/pool` reads it
+([The pool](../architecture.md#the-pool)). The ledger's check is not moved by that: it still reads
+the models through the management API until the 0.3.0 work above, and no host call hands a plugin
+the cooling setting.

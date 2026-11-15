@@ -1,12 +1,13 @@
 # How cliproxy-kit works
 
-Three parts, one version, released together:
+Four parts, one version, released together:
 
 | Part | Folder | Language | Runs in |
 | --- | --- | --- | --- |
 | quota-pilot | `plugin/` | Go, built as a C shared library | CLIProxyAPI, through its plugin C ABI |
 | quota-pilot page | `ui/` | React, built into one HTML file | the management panel, served by the plugin |
 | quota-band | `mod/` | TypeScript | Claude Code, as a mod (function hooks) |
+| quota-pool | `scripts/quota-pool.sh`, `skills/quota-pool/` | bash and curl, with an Agent Skills skill | an agent's shell, wherever it runs |
 
 ```mermaid
 flowchart LR
@@ -19,6 +20,7 @@ flowchart LR
   qp -- "quota polls" --> up
   cc -. "GET /band (client key)" .-> qp
   cx -. "GET /codex (client key)" .-> qp
+  ag["an agent<br/>+ quota-pool"] -. "GET /pool (client key)" .-> qp
   panel["management panel"] -- "management API (management key)" --> qp
   qp -- "state, log, sessions" --> files[("~/.cache/cliproxy-kit")]
   qp -. "reads, when beside them" .-> logs[("Claude Code transcripts")]
@@ -395,6 +397,67 @@ repository known by no remote on another device stays that device's own; one pat
 told apart by the repository's remote, else the device's name. Codex counts only what goes
 through the proxy, as Claude does, so Codex should be set up to use it (see the README).
 
+### The pool
+
+`quota-pool` asks `GET /v0/resource/plugins/quota-pilot/pool?model=<id>&model=<id>&floor=<percent>`
+with `Authorization: Bearer <client key>`, under the band's key rule (401 otherwise). `floor` is
+given at most once, as digits with an optional fraction, at most 100, and only with a `model`;
+anything else answers 400. The command is transport only: it prints the body of a 200 unchanged,
+and any other outcome as one JSON object `{error, code, help}` with exit 3. Why a client key, and
+why a read may poll: [ADR-0011](adr/0011-an-agent-reads-the-pool-with-a-client-key.md).
+
+Each call first reads, within 10 seconds, the accounts not read within twice `idle_poll_minutes`
+and those holding a weekly window whose reset has passed, at most once a minute whoever asks; the
+poll loop pauses while the proxy is idle, and a `/pool` call is not activity. Then it reads the
+host's account list and `host.auth.models`, the model names the host's registry holds for every
+credential. The document (`core/pool.go`) has every key always, with `null` for a value not known:
+
+- `schema_version` (1; an added field does not raise it), `quota_pilot` (the plugin's version),
+  `generated_at`, `stale_after_seconds` (twice `idle_poll_minutes` plus 5 minutes), `floor`, and
+  `errors`, which names `inventory` or `registry` while the membership picture below is not
+  complete.
+- `accounts`: every credential the host holds, by opaque id and masked label, with its provider,
+  plan, `disabled`, `same_as` (another credential signed in to the same provider account), `rest`,
+  `registered_models`, `read_failure` (the last quota read's failure), Codex `credits`, `absent`
+  windows and `windows` (`kind`, `left`, `reset_at`, `read_at`, `stale`). A credential
+  quota-pilot does not read has its id, provider, model count and `disabled` only.
+- `models`: per model asked, the `providers` whose accounts registered it, `verdict`,
+  `unmeasured_because`, `accounts` (those that count), `read`, `at_or_above_floor`,
+  `best_weekly_left`, and `rows`, one per account of those providers.
+
+Who serves a model is the registry's answer: the asked name without a context or thinking suffix,
+matched exactly, with no credential prefix or OAuth alias resolved. The picture is complete only
+when the list read and was not empty, `host.auth.models` answered, it holds every listed account,
+and every enabled listed account has a model; otherwise every model is `unmeasured` with
+`inventory` or `registry`, and has no rows. A row does not count when its account is disabled
+(`why_not: disabled`), has not registered the name (`not_registered`), or is a second sign-in to
+a provider account already counted (`same_account`, with `counted_under`). Counting rows come
+first, each part in the order a pick ranks them; `tier`, `blocked`, `resting`, `back_at` and
+`reason` are that ranking's estimate and enter no verdict.
+
+An account's weekly figure is the least of the all-models week and, on Claude, the model's own
+week when the provider's accounts hold one, as the pick judges it. It is read only when each window
+it takes is fresh: younger than `stale_after_seconds`, with no reset passed. A fresh 0 is read as
+0. An account with only response-header readings is not read, for a model whose own week another
+account holds, until its first full reading. Sign-ins to one provider account are combined by the
+[window rules](#reading-quota); a fall still waiting, or a disagreement on whether the model's own
+week exists, leaves them not read. Two windows that leave the same figure resolve to the later
+known reset, then a known reset over an unknown one, then the model's own week. A credential
+quota-pilot does not read counts when it has registered the name, and is never read.
+
+`verdict`, given a floor, is the first that holds: `unmeasured` (`inventory` or `registry`);
+`unmeasured` with `name_not_registered` (no account registered the name); `not_pooled` (only
+providers quota-pilot does not read did); `enough` (a counting account is read at or above the
+floor); `short` (there is a counting account and every one is read); else `unmeasured` with
+`unread`. So a stale, unreadable, half-loaded or empty pool is never `short`. Without a floor
+`verdict` is `null` and the figures stay.
+
+A Codex account's `credits` come from the `credits` object of its usage answer: `unlimited` when it
+says so; `some` with the balance when the balance is above 0 and `has_credits` is not false; `none`
+when the balance is 0, `unlimited` is false and `has_credits` is not true; else `unknown`. A
+reading without the object makes it `unknown`; a failed read keeps the last one. They live in
+memory only, never in `state.json`, so after a restart they are `unknown` until the next reading.
+
 ### Files
 
 All under `~/.cache/cliproxy-kit/` of the user the proxy runs as, mode 0600, so one proxy per user:
@@ -404,9 +467,9 @@ All under `~/.cache/cliproxy-kit/` of the user the proxy runs as, mode 0600, so 
 | `state.json` | bindings, routes, sessions, the last quota readings, and the client keys the proxy accepted (as hashes) |
 | `usage/` | the request log (`YYYY-MM.jsonl`) and what is known of each session (`sessions.json`) |
 
-Nothing else reads them: the band and Codex hooks ask the proxy over the network, so the proxy can
-run in a container or on a server that runs no client. A container needs a volume for this folder,
-or a restart loses the log and the state.
+Nothing else reads them: the band, Codex hooks and `quota-pool` ask the proxy over the network, so
+the proxy can run in a container or on a server that runs no client. A container needs a volume for
+this folder, or a restart loses the log and the state.
 
 ### Management routes and the page
 
@@ -415,15 +478,16 @@ Under `/v0/management/quota-pilot/`, behind the management key: `snapshot`, `usa
 session's failed attempts, retries and moves in the range, each `{t, event, account, label, to,
 to_label, model, cause, status, wait_ms, try, since_first_ms, ok, answered, move, why}` with `event`
 one of `failed`, `retry` and `move`, and `why` a move's cause), and `POST refresh`, which answers
-`{read, failed: [{account, label, failure, status}], complete}`. Three resources, which CLIProxyAPI
+`{read, failed: [{account, label, failure, status}], complete}`. Four resources, which CLIProxyAPI
 serves without authentication under `/v0/resource/plugins/quota-pilot/`: `ui`, the page (it carries
-no data and asks the management routes for everything); `band`, the snapshot for the band; and
-`codex`, the notices for Codex hooks.
+no data and asks the management routes for everything); `band`, the snapshot for the band; `codex`,
+the notices for Codex hooks; and `pool`, the [pool document](#the-pool) for agents. Any other path
+answers 404 with no data.
 
-`band` and `codex` need a client key the proxy accepted for a request in the last week: a usage
-record names the key the proxy let in, and the plugin keeps its SHA-256, never the key. A proxy
-without `api-keys` lets every client in, and so every band, until a request with a key shows it
-asks for keys; one without a key sent before that, answered late, does not open it again. The
+`band`, `codex` and `pool` need a client key the proxy accepted for a request in the last week: a
+usage record names the key the proxy let in, and the plugin keeps its SHA-256, never the key. A
+proxy without `api-keys` lets every client in, and so every band, until a request with a key shows
+it asks for keys; one without a key sent before that, answered late, does not open it again. The
 band's snapshot carries opaque account ids and no emails or paths. A session belongs to the key
 whose request it first served, for as long as an account or a route the user chose for it lasts:
 only that key's band sees it, switches it and names it, and only that key's Codex hook hears of it;
@@ -845,7 +909,14 @@ back, so the band takes only that end as proof the turn stopped.
 - Transcripts are read only on the machine that runs the proxy, as the same user as Claude Code.
   Elsewhere, and in a container, the band names a session, else its requests do; without the band a
   session there keeps the title of its first request, and its project is its folder's.
-- A client key removed from the proxy can read quota with `/band` and `/codex` for up to a week.
+- A client key removed from the proxy can read quota with `/band`, `/codex` and `/pool` for up to a
+  week, Codex credit balances included.
+- The pool takes who serves a model from the names the host's registry holds and resolves no
+  credential prefix and no OAuth alias: a name the host accepts only that way is
+  `name_not_registered`, and an alias that hides its model family is judged on the all-models week.
+- An account that can never be read (an expired login) keeps a pool whose other accounts are under
+  the floor at `unmeasured`, never `short`; an enabled account with no model registered keeps every
+  answer `unmeasured` until it is disabled or given a model.
 - A proxy in a container that clients reach directly sees no `X-Forwarded-For`, so their requests
   are not marked as from another device.
 - The plugin is trusted in-process code: a crash takes the proxy down with it.

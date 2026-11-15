@@ -36,6 +36,7 @@
 - 🎛️ **在工作的地方看額度。** Claude Code 輸入框上方的額度列，終端機和桌面版都有，顯示帳號、用量、context 和 prompt 快取，一鍵就能切換。
 - 🧊 **不再意外冷啟動。** 下一輪要重寫 prompt 快取之前（快取過期，或 session 換了帳號或模型），額度列會說要重寫多少、以 API 價格計算要花多少，也能交接到從摘要開始的新 session。還可以打開「長對話的訊息先停下等你確認」和「你離開時保持快取」，只對一個 session 或對全部。
 - 🔀 **模型用完時自動接手。** 同一個供應商內會自動改用你設定的替代模型；也能手動切換到其他供應商，或設定成自動。
+- 🤖 **給 agent 看的額度。** [`quota-pool`](#給-agent-用) 用 JSON 告訴 agent 所有帳號加起來還有沒有某個模型的額度，不只看它登入的那一個帳號。
 
 <table>
   <tr>
@@ -287,6 +288,35 @@ Claude 的訊息執行緒也遵守同樣規則。續接請求無法安全留在�
 
 ![某個帳號這一週背後的專案和 session，依裝置和執行方式加上標籤](docs/images/zh-TW/projects.png)
 
+### 給 agent 用
+
+`quota-pool` 是給 agent 用的指令，附帶一個教 agent 怎麼讀結果的 skill。每次呼叫印出一份 JSON 文件：proxy 持有的每個帳號，以及每個問到的模型由哪些帳號服務、各自還剩多少每週額度，和對照門檻得出的結論。
+
+```sh
+quota-pool --model claude-opus-5-5 --floor 15
+```
+
+| `verdict` | 意思 |
+| --- | --- |
+| `enough` | 至少有一個服務這個模型的帳號讀到了額度，而且這週剩下的不低於門檻。 |
+| `short` | 每個服務它的帳號都讀到了，而且每個剩下的都低於門檻。 |
+| `unmeasured` | 無法判斷，`unmeasured_because` 會說明原因：有帳號沒讀到、沒有帳號註冊這個名稱，或 proxy 對自己帳號的掌握還不完整。 |
+| `not_pooled` | 只有 quota-pilot 不讀取的供應商服務它。 |
+
+請用 proxy 列給 client 的名稱來問：額度池依每個帳號註冊的名稱判斷誰服務某個模型，不解析 proxy 設定裡的前綴或別名。名稱看不出模型系列的別名，只用所有模型共用的每週額度判斷。
+
+<details>
+<summary>安裝指令和它的 skill</summary>
+
+```sh
+curl -fsSL https://github.com/kuan0808/cliproxy-kit/releases/latest/download/quota-pool -o ~/.local/bin/quota-pool && chmod +x ~/.local/bin/quota-pool
+npx skills add kuan0808/cliproxy-kit --skill quota-pool -g
+```
+
+需要 quota-pilot 0.2.1 以上、`bash` 和 `curl`，而且 `~/.local/bin` 要在 `PATH` 裡。它從 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN` 取得 proxy 和 client key，完成步驟 3 的 Claude Code session 已經有這兩個；其他地方（例如 Codex）請設定 `QUOTA_POOL_URL` 和 `QUOTA_POOL_KEY`。其餘說明見 `quota-pool --help`。
+
+</details>
+
 ### 值得知道
 
 - **額度提前重新計算時**（例如變更方案），從那一刻重新計算；之前的用量仍在近 7、30 天的檢視裡。
@@ -350,15 +380,18 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Claude Code 的插件 | `cliproxy-kit` marketplace 和 `quota-band` | `claude plugin uninstall quota-band@cliproxy-kit`，再執行 `claude plugin marketplace remove cliproxy-kit` |
 | 額度列那台的 `~/.cache/cliproxy-kit/handoff/` | 交接寫的筆記 | 刪掉這個資料夾。 |
 | `~/.codex/config.toml`（選用） | 步驟 4 的 model provider 和步驟 5 的 hook | 刪掉這些設定。 |
+| `~/.local/bin/quota-pool`（選用） | [給 agent 用的指令](#給-agent-用) | 刪掉這個檔案。 |
+| agent 的 skill 資料夾（選用） | `quota-pool` skill | `npx skills remove quota-pool -g` |
 
 ## 更新與移除
 
-- **更新：** 面板的插件商店會提供 quota-pilot 的新版本，商店一裝好，proxy 就改跑新版，不必重新啟動。手動用同一個檔名蓋掉舊的程式庫，要等 proxy 重新啟動才會跑新版，重新啟動會中斷所有正在經過它的請求。額度列用 `claude plugin update quota-band@cliproxy-kit` 更新，或在 `/plugin` 的 **Marketplaces** 開啟自動更新；執行中的 session 用 `/reload-plugins` 載入新版。從 0.1.19 升到 0.1.20 只要更新額度列，proxy 外掛的行為沒有變更。
+- **更新：** 面板的插件商店會提供 quota-pilot 的新版本，商店一裝好，proxy 就改跑新版，不必重新啟動。手動用同一個檔名蓋掉舊的程式庫，要等 proxy 重新啟動才會跑新版，重新啟動會中斷所有正在經過它的請求。額度列用 `claude plugin update quota-band@cliproxy-kit` 更新，或在 `/plugin` 的 **Marketplaces** 開啟自動更新；執行中的 session 用 `/reload-plugins` 載入新版。從 0.1.19 升到 0.1.20 只要更新額度列，proxy 外掛的行為沒有變更。`quota-pool` 和它的 skill 只要再跑一次那兩行安裝指令就會更新。
+- **升到 0.2.1：** agent 可以用 [`quota-pool`](#給-agent-用) 讀取所有帳號加起來的額度：先到插件商店更新 quota-pilot，再安裝指令和 skill。額度列和頁面都沒有變更。
 - **升到 0.2.0：** quota-pilot 需要 CLIProxyAPI 8.0.66 以上。先更新並重新啟動 proxy，再更新 quota-pilot：現在跑的 quota-pilot 在新版 proxy 上照常運作，重試也一樣；新版 quota-pilot 則不會在 CLIProxyAPI 8.0.48 以前的版本載入。
 - **從 0.1.16 升級：** 失敗的請求會先在 session 原本的帳號上重試，一直失敗的帳號會暫停使用，每次切換都會說明原因，按 `switch to k•••` 就不必再等。額度列和 quota-pilot 請一起更新，額度列的文字兩邊都要新版：舊版額度列會把新版插件的每次切換都寫成 `was unavailable`，新版額度列則把舊版插件做的切換寫成 `reason not recorded`。
 - **從 0.1.14 升級：** 冷啟動前攔下訊息和保持快取都改成預設關閉，要用時在 `/config` 對所有 session 打開，或用 `/hold-cold on`、`/keep-warm on` 只對一個打開。**攔下訊息的對話大小**或**保持快取的次數**設為 `0` 不再代表關閉：分別代表任何大小和刷新一次；攔下訊息的對話大小為 `0` 時，快取還熱著的每次切換都會先問。
 - **從 0.1.6 升級：** 額度列改成全部走網路，用 Claude Code 本來就在用的 key，所以 `band_tokens` 不再讀取，可以從 `config.yaml` 刪掉。session、專案和記住的資料夾會自動移進 `usage/sessions.json`。
-- **移除：** 在面板的**插件**頁面刪除 Quota Pilot，用 `claude plugin uninstall quota-band@cliproxy-kit` 移除額度列，其餘照上表還原。
+- **移除：** 在面板的**插件**頁面刪除 Quota Pilot，用 `claude plugin uninstall quota-band@cliproxy-kit` 移除額度列，用 `rm ~/.local/bin/quota-pool` 和 `npx skills remove quota-pool -g` 移除給 agent 用的指令，其餘照上表還原。
 
 ## 疑難排解
 
@@ -386,14 +419,20 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | 連線中斷後，Claude Code 顯示 `API error · Retrying` 與 `503 auth_unavailable: quota-pilot: …`，而不是一個比較久的請求 | CLIProxyAPI 8.0.49 到 8.0.65 會直接結束 quota-pilot 留著要重試的請求，所以每次重試都由 Claude Code 自己送：把 CLIProxyAPI 更新到 8.0.66 以上。設成 `request-retry: 0` 時，proxy 完全不會跑重試輪次。 |
 | Account 卡片顯示 `resting, back in 4m` | 那個帳號一直失敗，正在暫停使用：session 會在下一輪換到能服務的帳號，暫停到顯示的時間結束，或在它第一次成功時結束。不用做什麼。 |
 | 切換提示附上 `switch back` | session 離開的帳號現在又能接手。按 `switch back` 換回去，快取還熱著時會先問；quota-pilot 不會自己把 session 換回去，因為新帳號的快取才是熱的。 |
+| `quota-pool` 說 `POOL_NOT_SUPPORTED` | proxy 沒有額度池可讀：到插件商店把 quota-pilot 更新到 0.2.1 以上，並確認它已開啟。不提供外掛資源的 proxy，或那個位址上的其他服務，也會這樣回應。 |
+| `quota-pool` 說 `KEY_NOT_ACCEPTED` | proxy 最近一週沒有服務過這把 key 的請求：用它送出一個 prompt，或改用 proxy 的另一把 client key。 |
+| `quota-pool` 說 `NO_PROXY_URL`、`KEY_OVER_HTTP` 或 `PROXY_UNREACHABLE` | 把 `QUOTA_POOL_URL` 和 `QUOTA_POOL_KEY`，或 `ANTHROPIC_BASE_URL` 和它的 token，指向正在執行的 proxy。走 `http://` 時，只有 `127.0.0.1` 和 `localhost` 不需要 `ALLOW_HTTP=1`。 |
+| 每個 verdict 都是 `unmeasured`，原因是 `inventory` 或 `registry` | proxy 剛啟動，或有個啟用中的帳號沒有註冊任何模型（`accounts` 裡的 `registered_models` 會顯示是哪個）。一分鐘後再問；還是一樣的話，停用那個帳號或替它加上模型。 |
+| verdict 是 `unmeasured`，原因是 `name_not_registered` | 沒有帳號註冊這個名稱：改用 proxy 列給 client 的名稱，不加帳號的前綴。 |
+| verdict 是 `unmeasured`，原因是 `unread` | 有個服務這個模型的帳號讀不到，讀到的帳號也都低於門檻：`accounts` 裡的 `read_failure` 和 `read_at` 會說是哪個帳號、為什麼。頁面上的**重新整理**會重新讀取每個帳號。 |
 
 ## 隱私與安全
 
-- **單一擁有者。** proxy 的每一把 client key 都視為可信。proxy 接受過某把 key 的請求後，這把 key 就能讀到所有帳號的額度（遮蔽過的名稱，不含 email 或路徑），也能替它開的 session 命名、切換帳號。只把 key 給你願意讓他看到用量的人；從 proxy 移除的 key 最多還能讀一週。
+- **單一擁有者。** proxy 的每一把 client key 都視為可信。proxy 接受過某把 key 的請求後，這把 key 就能讀到所有帳號的額度（遮蔽過的名稱，不含 email 或路徑）和每個 Codex 帳號的點數餘額，也能替它開的 session 命名、切換帳號。只把 key 給你願意讓他看到用量和 Codex 點數餘額的人；從 proxy 移除的 key 最多還能讀這兩樣一週。不要求 key 的 proxy，只要最近一週服務過不帶 key 的請求，任何連得到它位址的人都能讀到同樣的內容；開啟 key 之後，直到它第一次收到帶 key 的請求為止也是如此。透過 [`quota-pool`](#給-agent-用)，key 還能讀到每個帳號註冊了幾個模型、某個帳號上次為什麼讀取失敗、quota-pilot 不讀取的帳號屬於哪些供應商，以及外掛的版本，也能讓 quota-pilot 提早讀取帳號額度，最多每分鐘一次。
 - **留在本機。** 所有資料都放在 proxy 使用者的 `~/.cache/cliproxy-kit/`（權限 0600），client key 只存雜湊。除了轉送的請求，插件只會用帳號既有的 token 呼叫供應商自己的用量和帳號資料端點，以及查詢裝置名稱的 DNS。
 - **對話記錄。** 它只讀自己那台機器上、同一個使用者的 Claude Code 對話記錄。
 - **額度列送出的內容。** 額度列每 10 秒向 `ANTHROPIC_BASE_URL` 讀取快照，帶著 Claude Code 用的 client key、session 的 id 和模型。要等這個位址回過 quota-pilot 的快照，它才會再附上 session 的標題、開始時的資料夾，以及 repository 的根目錄和 remote（放在 header 裡，不會進 proxy 的請求記錄），也才會讀你這台裝置上的對話記錄來找標題。不是 quota-pilot 的 gateway 永遠收不到這些資料。[讀取期限與連線上限](docs/architecture.md#quota-band)會限制沒有回應時的等待時間。
-- **都在金鑰後面。** 頁面本身不含任何資料，一切都經過 management 路由讀取，需要 management key。額度列和 Codex hook 的路由需要 proxy 接受過的 client key。
+- **都在金鑰後面。** 頁面本身不含任何資料，一切都經過 management 路由讀取，需要 management key。額度列、Codex hook 和 `quota-pool` 的路由需要 proxy 接受過的 client key。
 
 ## 開發
 

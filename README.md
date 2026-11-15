@@ -47,6 +47,8 @@ page in the management panel, and a band in Claude Code (**quota-band**).
   confirm, or keeping the cache warm while you are away, for one session or for all.
 - 🔀 **A fallback when a model runs out.** Run its configured replacement automatically within a
   provider, or switch to another provider by hand or by itself if you turn that on.
+- 🤖 **Quota for agents.** [`quota-pool`](#for-agents) tells an agent, as JSON, whether the
+  accounts together have quota left for a model, not only the one it is signed in to.
 
 <table>
   <tr>
@@ -356,6 +358,42 @@ ticked, else it asks for the management key once per tab.
 
 ![Projects and sessions behind an account's week, tagged by device and by what ran them](docs/images/projects.png)
 
+### For agents
+
+`quota-pool` is a command for agents, with a skill that tells them how to read it. One call prints
+one JSON document: every account the proxy holds and, for each model asked, the accounts that serve
+it, the weekly quota each has left, and a verdict against a floor.
+
+```sh
+quota-pool --model claude-opus-5-5 --floor 15
+```
+
+| `verdict` | Means |
+| --- | --- |
+| `enough` | At least one account that serves the model is read and has the floor or more left this week. |
+| `short` | Every account that serves it is read, and each has less than the floor left. |
+| `unmeasured` | The pool cannot tell, and `unmeasured_because` says why: an account not read, a name no account has registered, or the proxy's picture of its accounts not complete yet. |
+| `not_pooled` | Only providers quota-pilot does not read serve it. |
+
+Ask with a name the proxy lists for clients: the pool takes who serves a model from the names each
+account has registered, and resolves no prefix or alias from the proxy's config. A listed alias
+whose name hides the model family is judged on the all-models week alone.
+
+<details>
+<summary>Install the command and its skill</summary>
+
+```sh
+curl -fsSL https://github.com/kuan0808/cliproxy-kit/releases/latest/download/quota-pool -o ~/.local/bin/quota-pool && chmod +x ~/.local/bin/quota-pool
+npx skills add kuan0808/cliproxy-kit --skill quota-pool -g
+```
+
+It needs quota-pilot 0.2.1 or newer, `bash` and `curl`, with `~/.local/bin` on your `PATH`. It
+takes the proxy and its client key from `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`, which a
+Claude Code session has after step 3; anywhere else, such as Codex, set `QUOTA_POOL_URL` and
+`QUOTA_POOL_KEY`. `quota-pool --help` says the rest.
+
+</details>
+
 ### Good to know
 
 - **A window that starts over** before its reset, as after a plan change, counts from then; the use
@@ -429,6 +467,8 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | Claude Code's plugins | The `cliproxy-kit` marketplace and `quota-band` | `claude plugin uninstall quota-band@cliproxy-kit`, then `claude plugin marketplace remove cliproxy-kit` |
 | `~/.cache/cliproxy-kit/handoff/`, beside the band | The notes handoffs wrote | Delete the folder. |
 | `~/.codex/config.toml` (optional) | The model provider of step 4 and the hooks of step 5 | Remove them. |
+| `~/.local/bin/quota-pool` (optional) | The [agents' command](#for-agents) | Delete the file. |
+| Your agents' skills folders (optional) | The `quota-pool` skill | `npx skills remove quota-pool -g` |
 
 ## Update and uninstall
 
@@ -439,6 +479,10 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   `claude plugin update quota-band@cliproxy-kit`, or by itself once auto-update is on for the
   marketplace under **Marketplaces** in `/plugin`; `/reload-plugins` loads it in a running session.
   From 0.1.19 to 0.1.20, updating the band is enough; the proxy plugin's behaviour is unchanged.
+  `quota-pool` and its skill update when you run their two install lines again.
+- **From 0.2.1:** agents can read the pooled quota with [`quota-pool`](#for-agents): update
+  quota-pilot from the Plugin Store, then install the command and its skill. Nothing changes for
+  the band or the page.
 - **From 0.2.0:** quota-pilot needs CLIProxyAPI 8.0.66 or newer. Update and restart the
   proxy before quota-pilot: the quota-pilot you run now keeps working on the new proxy, retries
   included, while a new quota-pilot does not load on CLIProxyAPI 8.0.48 or older.
@@ -455,8 +499,9 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   uses, so `band_tokens` is no longer read: remove it from `config.yaml`. Sessions, projects and
   remembered folders move into `usage/sessions.json` by themselves.
 - **Uninstall:** delete Quota Pilot on the panel's **Plugins** page,
-  `claude plugin uninstall quota-band@cliproxy-kit` removes the band, then undo the rest as the
-  table above says.
+  `claude plugin uninstall quota-band@cliproxy-kit` removes the band, `rm ~/.local/bin/quota-pool`
+  and `npx skills remove quota-pool -g` remove the agents' command, then undo the rest as the table
+  above says.
 
 ## Troubleshooting
 
@@ -484,13 +529,25 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
 | After a lost connection Claude Code shows `API error · Retrying` with `503 auth_unavailable: quota-pilot: …`, not one long request | CLIProxyAPI 8.0.49 to 8.0.65 end a request quota-pilot keeps for a retry, so every retry is one of Claude Code's own: update CLIProxyAPI to 8.0.66 or newer. With `request-retry: 0` the proxy runs no retry round at all. |
 | The Account card says `resting, back in 4m` | That account kept failing and rests: the session moves at its next turn to an account that can serve, and the rest ends at the time shown, or at its first success. Nothing to do. |
 | A move offers `switch back` | The account the session left can take it again. `switch back` returns, asking first while the cache is warm; quota-pilot never moves a session back on its own, as the new account's cache is the warm one. |
+| `quota-pool` says `POOL_NOT_SUPPORTED` | The proxy has no pool to read: update quota-pilot to 0.2.1 or newer from the Plugin Store and check it is on. A proxy that serves no plugin resources, or another service at that address, answers the same. |
+| `quota-pool` says `KEY_NOT_ACCEPTED` | The proxy has not served a request with that key in the last week: send one prompt with it, or use another of its client keys. |
+| `quota-pool` says `NO_PROXY_URL`, `KEY_OVER_HTTP` or `PROXY_UNREACHABLE` | Point `QUOTA_POOL_URL` and `QUOTA_POOL_KEY`, or `ANTHROPIC_BASE_URL` with its token, at a running proxy. Over `http://` only `127.0.0.1` and `localhost` go without `ALLOW_HTTP=1`. |
+| Every verdict is `unmeasured` with `inventory` or `registry` | The proxy has just started, or an enabled account has no model registered (`registered_models` in `accounts` shows which). Ask again in a minute; if it stays, disable that account or give it a model. |
+| A verdict is `unmeasured` with `name_not_registered` | No account has registered that name: ask with the name the proxy lists for clients, without an account's prefix. |
+| A verdict is `unmeasured` with `unread` | An account that serves the model could not be read, and none read has the floor left: `read_failure` and `read_at` in `accounts` say which and why. **Refresh** on the page reads every account again. |
 
 ## Privacy and security
 
 - **One owner.** Every client key of the proxy is trusted. Once the proxy has accepted a key for a
-  request, it reads every account's quota (masked labels, no emails or paths), and names and
-  switches the sessions it started. Give keys only to people you would show your usage to; a key
-  removed from the proxy keeps reading for up to a week.
+  request, it reads every account's quota (masked labels, no emails or paths) and each Codex
+  account's credit balance, and names and switches the sessions it started. Give keys only to
+  people you would show your usage and your Codex credit balance to; a key removed from the proxy
+  keeps reading both for up to a week. A proxy that asks for no key gives the same to anyone who
+  can reach its address, once it has served a request without a key in the last week; after keys
+  are turned on, it keeps doing so until its first request with a key. Through
+  [`quota-pool`](#for-agents), a key also reads how many models each account has registered, why an
+  account's last read failed, the providers of accounts quota-pilot does not read, and the
+  plugin's version, and can make quota-pilot read the accounts early, at most once a minute.
 - **Local.** Everything stays in `~/.cache/cliproxy-kit/` (mode 0600) of the proxy's user, client
   keys only as hashes. Besides the requests it routes, the plugin calls only the providers' own
   usage and profile endpoints, with the accounts' existing tokens, and DNS for device names.
@@ -503,7 +560,8 @@ Be specific: paths, commands, names, numbers. Write in the language the user wri
   quota-pilot never receives them. [Read deadlines and connection limits](docs/architecture.md#quota-band)
   keep the wait bounded when that address does not answer.
 - **Behind keys.** The page carries no data: it reads everything through management routes, behind
-  the management key. The band's and the Codex hooks' routes need a client key the proxy accepted.
+  the management key. The band's, the Codex hooks' and `quota-pool`'s routes need a client key the
+  proxy accepted.
 
 ## Develop
 
