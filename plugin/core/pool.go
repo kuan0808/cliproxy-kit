@@ -293,10 +293,19 @@ func (s *State) poolModelLocked(pm *PoolModel, members map[string]*poolMember, n
 	// Eligible accounts that sign in to one provider account form a group, counted once under the
 	// member whose all-models week was read last.
 	groups := map[string][]*poolMember{}
+	observations := map[string][]*Cred{}
 	for _, m := range order {
-		if m.cred != nil && (m.disabled == nil || !*m.disabled) && registers(m) {
+		if m.cred != nil {
 			if account := s.identities[m.id].Account; account != "" {
-				groups[account] = append(groups[account], m)
+				c := m.cred
+				if (m.disabled == nil || !*m.disabled) && registers(m) {
+					groups[account] = append(groups[account], m)
+				} else {
+					held := *c
+					held.Absent = nil
+					c = &held
+				}
+				observations[account] = append(observations[account], c)
 			}
 		}
 	}
@@ -344,10 +353,7 @@ func (s *State) poolModelLocked(pm *PoolModel, members map[string]*poolMember, n
 		if row.Counts && m.cred != nil {
 			group := []*Cred{m.cred}
 			if account := s.identities[m.id].Account; account != "" {
-				group = group[:0]
-				for _, g := range groups[account] {
-					group = append(group, g.cred)
-				}
+				group = observations[account]
 			}
 			k := ownWeek(m.provider)
 			if left, kind, reset, read := s.weeklyLocked(group, k, k != "" && heldInPool[m.provider], now); read {

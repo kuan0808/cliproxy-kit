@@ -379,6 +379,10 @@ Ask with a name the proxy lists for clients: the pool takes who serves a model f
 account has registered, and resolves no prefix or alias from the proxy's config. A listed alias
 whose name hides the model family is judged on the all-models week alone.
 
+Multiple sign-ins to one provider account count once. Its figure combines held windows from every
+sign-in, including disabled ones and those not registered for the asked model. Only enabled
+sign-ins registered for the model can supply the counting row.
+
 <details>
 <summary>Install the command and its skill</summary>
 

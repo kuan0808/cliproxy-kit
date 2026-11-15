@@ -165,6 +165,23 @@ with socket.socket() as s:
 doc = failed('PROXY_UNREACHABLE', run(env={'QUOTA_POOL_URL': f'http://127.0.0.1:{closed}', 'QUOTA_POOL_KEY': KEY}))
 assert doc['error'] == f'the proxy did not answer at http://127.0.0.1:{closed}', doc
 
+for url_var, key_var in (('QUOTA_POOL_URL', 'QUOTA_POOL_KEY'),
+                         ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN'),
+                         ('ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY')):
+    address = f'http://operator:made-up-secret@127.0.0.1:{port}/['
+    status, out, err, _ = run(env={url_var: address, key_var: KEY, 'ALLOW_HTTP': '1'})
+    assert (status, out, err) == (0, DOC.encode(), ''), (status, out, err)
+    assert seen == [('/[' + POOL, '', 'Bearer ' + KEY)], seen
+    for part in ('operator', 'made-up-secret'):
+        assert part.encode() not in out and part not in err, (out, err)
+    address = f'http://operator:made-up-secret@127.0.0.1:{closed}/['
+    got = run(env={url_var: address, key_var: KEY, 'ALLOW_HTTP': '1'})
+    doc = failed('PROXY_UNREACHABLE', got)
+    assert got[2] == '' and seen == [], got
+    assert doc['error'] == f'the proxy did not answer at http://127.0.0.1:{closed}/[', doc
+    for part in ('operator', 'made-up-secret'):
+        assert part.encode() not in got[1] and part not in got[2], got
+
 # A usage error is exit 2, said on stderr, and sends nothing.
 for args in (('--floor', '15'), ('--model',), ('--floor',), ('--bogus',), ('-h',), ('--model=m',),
              ('--floor=15',), ('--model', 'm', '--floor=15'), ('--model', 'm', '--floor', '15', '--floor', '20'),

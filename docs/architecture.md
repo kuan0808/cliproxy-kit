@@ -443,10 +443,14 @@ An account's weekly figure is the least of the all-models week and, on Claude, t
 week when the provider's accounts hold one, as the pick judges it. It is read only when each window
 it takes is fresh: younger than `stale_after_seconds`, with no reset passed. A fresh 0 is read as
 0. An account with only response-header readings is not read, for a model whose own week another
-account holds, until its first full reading. Sign-ins to one provider account are combined by the
-[window rules](#reading-quota). A fall still waiting in any member or in their combined windows
-leaves the account not read, including a single sign-in. A disagreement on whether the model's own
-week exists also leaves the group not read. The group reader summarises the readings in force at
+account holds, until its first full reading. All sign-ins the plugin holds to one provider account
+contribute their held windows to the [window rules](#reading-quota), including disabled sign-ins
+and those not registered for the asked model. Counting and representative selection use only
+enabled sign-ins registered for that model. An ineligible sign-in contributes no absent marks:
+those marks do not expire, while a member's pending fall settles after five minutes even without
+another reading. A fall still waiting in any member or in their combined windows leaves the
+account not read, including a single sign-in. A held model-specific week and an eligible sign-in's
+absent mark also leave the group not read. The group reader summarises the readings in force at
 the time of the call and keeps no group history across calls. A fall seen across two sign-ins in
 separate calls is therefore not held as pending; the verdict follows the newest reading until
 the window rules settle it. Two windows that leave the same figure resolve to the later known

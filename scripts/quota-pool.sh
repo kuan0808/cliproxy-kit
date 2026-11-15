@@ -120,7 +120,7 @@ $floor_given && query+=(--data-urlencode "floor=$floor")
 # ponytail: the body goes through a shell variable, so a NUL byte in it is dropped; a JSON document
 # has none, and a temporary file would put the balance on disk.
 reply=$({ [ -z "$key" ] || printf 'Authorization: Bearer %s\n' "$key"; } |
-  curl -q -sS -m 20 -G -H @- -w '\n%{http_code}' ${query[@]+"${query[@]}"} "$base/v0/resource/plugins/quota-pilot/pool") ||
+  curl -q -g -s -m 20 -G -H @- -w '\n%{http_code}' ${query[@]+"${query[@]}"} "$base/v0/resource/plugins/quota-pilot/pool" 2>/dev/null) ||
   fail "the proxy did not answer at $shown" PROXY_UNREACHABLE "start CLIProxyAPI, or set QUOTA_POOL_URL and QUOTA_POOL_KEY"
 status=${reply##*$'\n'}
 body=${reply%$'\n'*}

@@ -764,6 +764,95 @@ func TestPoolGroups(t *testing.T) {
 	})
 }
 
+func TestPoolIneligibleObservations(t *testing.T) {
+	for _, why := range []string{"not_registered", "disabled"} {
+		for _, window := range []struct{ kind, model string }{
+			{"7d", fable}, {"7d_fable", fable}, {"7d_opus", opus}, {"7d_sonnet", "claude-sonnet-5-5"},
+		} {
+			for _, next := range []string{"latest zero", "later reset", "absent mark", "waiting fall"} {
+				t.Run(why+"/"+window.kind+"/"+next, func(t *testing.T) {
+					p := newPool("active", "other")
+					p.s.SetIdentity("active", "claude:same/org")
+					p.s.SetIdentity("other", "claude:same/org")
+					reset := poolNow.Add(24 * time.Hour)
+					read := func(id string, left float64, reset time.Time) {
+						windows := []Window{win("5h", 90, poolNow.Add(time.Hour)), win("7d", 90, reset)}
+						if window.kind == "7d" {
+							windows[1] = win("7d", left, reset)
+						} else {
+							windows = append(windows, win(window.kind, left, reset))
+						}
+						p.full(id, windows...)
+					}
+					read("active", 70, reset)
+					p.c.add(time.Minute)
+					read("other", 0, reset)
+					if why == "disabled" {
+						p.list[1].Disabled = true
+						p.s.UpdateInventory(p.list)
+					} else {
+						p.reg["other"] = []string{"claude-haiku-5-5"}
+					}
+					check := func(want string, left float64, kind string, reset time.Time) {
+						t.Helper()
+						doc := p.read(floor(15), window.model)
+						m := doc.Models[0]
+						reads := 0
+						if kind != "" {
+							reads = 1
+						}
+						if verdictText(m) != want || m.Accounts != 1 || m.Read != reads {
+							t.Fatalf("shared figure = %s %+v", verdictText(m), m)
+						}
+						r := rowOf(t, doc, window.model, "active")
+						if !r.Counts || r.CountedUnder != nil || r.WeeklyRead != (reads == 1) {
+							t.Fatalf("eligible representative = %+v", r)
+						}
+						if reads == 1 {
+							if r.WeeklyLeft == nil || *r.WeeklyLeft != left || r.WeeklyWindow == nil || *r.WeeklyWindow != kind || r.WeeklyResetAt == nil || !r.WeeklyResetAt.Equal(reset) {
+								t.Fatalf("weekly row = %+v, want %v on %s resetting %v", r, left, kind, reset)
+							}
+						} else if r.WeeklyLeft != nil || r.WeeklyWindow != nil || r.WeeklyResetAt != nil {
+							t.Fatalf("unread row = %+v", r)
+						}
+						r = rowOf(t, doc, window.model, "other")
+						if r.Counts || r.WhyNot == nil || *r.WhyNot != why || r.CountedUnder != nil || r.WeeklyRead || r.WeeklyLeft != nil || r.WeeklyWindow != nil || r.WeeklyResetAt != nil || r.Tier != nil || r.Blocked != nil || r.Resting != nil || r.BackAt != nil || r.Reason != nil {
+							t.Fatalf("ineligible observation row = %+v", r)
+						}
+					}
+					check("short/null", 0, window.kind, reset)
+					later := reset.Add(7 * 24 * time.Hour)
+					switch next {
+					case "later reset":
+						p.c.add(time.Minute)
+						read("active", 70, later)
+						check("enough/null", 70, window.kind, later)
+					case "absent mark":
+						p.full("other", win("5h", 90, poolNow.Add(time.Hour)), win("7d", 0, reset))
+						p.c.add(time.Minute)
+						own := ModelBucket(window.model)
+						refresh := func() {
+							p.full("active", win("5h", 90, poolNow.Add(time.Hour)), win("7d", 80, later), win(own, 70, later))
+						}
+						refresh()
+						check("enough/null", 70, own, later)
+						p.c.add(30 * time.Minute)
+						refresh()
+						check("enough/null", 70, own, later)
+					case "waiting fall":
+						p.header("other", win(window.kind, 80, reset))
+						check("unmeasured/unread", 0, "", time.Time{})
+						p.c.add(time.Minute)
+						read("active", 70, later)
+						p.c.add(6 * time.Minute)
+						check("enough/null", 70, window.kind, later)
+					}
+				})
+			}
+		}
+	}
+}
+
 // A row that does not count says why, and carries null in its weekly and ranking fields.
 func TestPoolWhyNot(t *testing.T) {
 	p := newPool("on", "off", "lacks", "twin")
