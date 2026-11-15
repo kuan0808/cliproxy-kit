@@ -103,6 +103,8 @@ jobs:
             platform=${dir#artifacts/}
             zip -j -q "dist/quota-pilot_${version}_${platform%-*}_${platform#*-}.zip" "$dir"/quota-pilot.*
           done
+          # The agents' CLI, downloaded as releases/latest/download/quota-pool.
+          cp scripts/quota-pool.sh dist/quota-pool
           cd dist
           sha256sum -- *.zip > checksums.txt
           cat checksums.txt
